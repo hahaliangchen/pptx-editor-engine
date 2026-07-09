@@ -1,0 +1,14 @@
+# Dependency directories
+node_modules/
+
+# Build outputs
+dist/
+pkg/
+rust-engine/pkg/
+rust-engine/target/
+
+# System / IDE files
+.DS_Store
+.vscode/
+.idea/
+Thumbs.db
