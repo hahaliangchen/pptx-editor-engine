@@ -6,6 +6,9 @@ dist/
 pkg/
 rust-engine/pkg/
 rust-engine/target/
+rust-backend/target/
+target/
+**/target/
 
 # System / IDE files
 .DS_Store

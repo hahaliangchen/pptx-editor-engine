@@ -69,29 +69,90 @@ export default class PptViewer {
 
   private async loadAndRegisterFonts() {
     if (!this.renderer) return;
-    console.log("Downloading standard layout fonts...");
+    console.log("[JS Font Manager] Starting font registration...");
+
+    const BACKEND_URL = "http://127.0.0.1:8080";
+    
+    // We try to request the available fonts from the local Rust backend.
+    try {
+      console.log("[JS Font Manager] Connecting to local font backend at", BACKEND_URL);
+      const listResponse = await fetch(`${BACKEND_URL}/api/fonts`);
+      if (!listResponse.ok) throw new Error("Backend returned status " + listResponse.status);
+      
+      const availableFonts: string[] = await listResponse.json();
+      console.log(`[JS Font Manager] Found ${availableFonts.length} system fonts via backend.`);
+
+      // 1. Find a suitable English Font (preferably Arial, Calibri or Segoe UI)
+      const englishCandidates = ["Arial", "Calibri", "Segoe UI", "Times New Roman"];
+      const englishFamily = availableFonts.find(f => englishCandidates.includes(f)) || "Arial";
+
+      // 2. Find a suitable Chinese Font
+      const chineseCandidates = [
+        "Microsoft YaHei", "SimSun", "NSimSun", "PingFang SC", 
+        "Heiti SC", "STHeiti", "Noto Sans CJK SC", "WenQuanYi Micro Hei", 
+        "Source Han Sans CN"
+      ];
+      const chineseFamily = availableFonts.find(f => chineseCandidates.includes(f));
+
+      const loadFontFromBackend = async (family: string) => {
+        console.log(`[JS Font Fetch] Fetching family: "${family}" from local backend...`);
+        const res = await fetch(`${BACKEND_URL}/api/font?family=${encodeURIComponent(family)}`);
+        if (!res.ok) throw new Error(`Failed to fetch font family ${family}`);
+        const buf = await res.arrayBuffer();
+        const bytes = new Uint8Array(buf);
+        console.log(`[JS Font Fetch] Successfully loaded ${family} (${bytes.byteLength} bytes)`);
+        
+        if (this.renderer) {
+          this.renderer.register_font(bytes);
+          console.log(`[JS Font Register] Registered ${family} in WASM.`);
+        }
+      };
+
+      const loadPromises: Promise<void>[] = [];
+      if (englishFamily && availableFonts.includes(englishFamily)) {
+        loadPromises.push(loadFontFromBackend(englishFamily));
+      }
+      if (chineseFamily) {
+        loadPromises.push(loadFontFromBackend(chineseFamily));
+      }
+
+      if (loadPromises.length > 0) {
+        await Promise.all(loadPromises);
+        console.log("[JS Font Manager] Local system fonts loaded successfully.");
+        return;
+      }
+    } catch (err) {
+      console.warn("[JS Font Manager] Local font backend unavailable, falling back to CDN:", err);
+    }
+
+    // --- FALLBACK CDN MODE ---
+    console.log("[JS Font Manager] Initializing CDN fallback fonts...");
     const fontUrls = {
       regular: "https://cdnjs.cloudflare.com/ajax/libs/pdfmake/0.3.3/fonts/Roboto/Roboto-Regular.ttf",
       bold: "https://cdnjs.cloudflare.com/ajax/libs/pdfmake/0.3.3/fonts/Roboto/Roboto-Medium.ttf"
     };
 
     try {
-      const loadFont = async (url: string) => {
+      const loadFontFromCdn = async (url: string, type: string) => {
+        console.log(`[JS Font Fetch] Fetching ${type} font from CDN: ${url}`);
         const response = await fetch(url);
         if (!response.ok) throw new Error(`HTTP ${response.status} fetching font`);
         const buffer = await response.arrayBuffer();
         const bytes = new Uint8Array(buffer);
-        this.renderer?.register_font(bytes);
+        console.log(`[JS Font Fetch] Succeeded. ${type} font size: ${bytes.byteLength} bytes.`);
+        
+        if (this.renderer) {
+          this.renderer.register_font(bytes);
+        }
       };
 
-      // Download both fonts in parallel
       await Promise.all([
-        loadFont(fontUrls.regular),
-        loadFont(fontUrls.bold)
+        loadFontFromCdn(fontUrls.regular, "Regular"),
+        loadFontFromCdn(fontUrls.bold, "Bold")
       ]);
-      console.log("Standard fonts registered in WASM successfully.");
+      console.log("[JS Font Manager] All CDN fallback fonts registered successfully.");
     } catch (err) {
-      console.error("Failed to fetch and register layout fonts in WASM:", err);
+      console.error("[JS Font Manager] Failed to load CDN fallback fonts:", err);
     }
   }
 
