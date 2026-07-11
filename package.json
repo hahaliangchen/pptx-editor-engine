@@ -1,0 +1,26 @@
+{
+  "name": "@your-org/pptx-editor",
+  "version": "1.0.0",
+  "description": "A lightweight standalone PPTX rendering and editing engine powered by Rust WASM and TypeScript.",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build:wasm": "wasm-pack build rust-engine --target bundler --out-dir pkg",
+    "build:wasm:debug": "wasm-pack build rust-engine --debug --target bundler --out-dir pkg",
+    "dev": "npm run build:wasm:debug && rspack dev",
+    "build": "npm run build:wasm && rspack build"
+  },
+  "dependencies": {
+    "jszip": "^3.10.1"
+  },
+  "devDependencies": {
+    "@rspack/cli": "^0.5.0",
+    "@rspack/core": "^0.5.0",
+    "css-loader": "^6.8.1",
+    "style-loader": "^3.3.3",
+    "typescript": "^5.0.0"
+  }
+}
