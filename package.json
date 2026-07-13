@@ -10,7 +10,8 @@
   "scripts": {
     "build:wasm": "wasm-pack build rust-engine --target bundler --out-dir pkg",
     "build:wasm:debug": "wasm-pack build rust-engine --debug --target bundler --out-dir pkg",
-    "dev": "npm run build:wasm:debug && rspack dev",
+    "dev:frontend": "npm run build:wasm:debug && rspack dev",
+    "dev": "concurrently \"npm run start:backend\" \"npm run dev:frontend\"",
     "build": "npm run build:wasm && rspack build",
     "start:backend": "cargo run --manifest-path rust-backend/Cargo.toml"
   },
@@ -21,6 +22,7 @@
   "devDependencies": {
     "@rspack/cli": "^0.5.0",
     "@rspack/core": "^0.5.0",
+    "concurrently": "^10.0.3",
     "css-loader": "^6.8.1",
     "style-loader": "^3.3.3",
     "typescript": "^5.0.0"

@@ -13,6 +13,46 @@ export interface TextStyle {
   color: string;
   bold: boolean;
   align: "left" | "center" | "right";
+  fontFamily?: string;
+  eastAsianFontFamily?: string;
+  italic?: boolean;
+}
+
+export interface TextRun {
+  content: string;
+  style: TextStyle;
+}
+
+export interface ParagraphStyle {
+  align: "left" | "center" | "right";
+  level: number;
+  marginLeft: number;
+  indent: number;
+  lineSpacing?: {
+    unit: "percent" | "points";
+    value: number;
+  };
+  spaceBefore?: number;
+  spaceAfter?: number;
+}
+
+export interface TextParagraph {
+  runs: TextRun[];
+  style: ParagraphStyle;
+  bullet?: {
+    char: string;
+    color: string;
+  };
+}
+
+export interface TextBodyProperties {
+  marginLeft: number;
+  marginRight: number;
+  marginTop: number;
+  marginBottom: number;
+  verticalAnchor: "top" | "middle" | "bottom";
+  autoFit: "none" | "shape" | "shrink";
+  fontScale?: number;
 }
 
 export interface TextElement {
@@ -21,14 +61,22 @@ export interface TextElement {
   rect: Rect;
   content: string;
   style: TextStyle;
+  paragraphs?: TextParagraph[];
+  body?: TextBodyProperties;
+}
+
+export interface Border {
+  color: string;
+  width: number;
 }
 
 export interface ShapeElement {
   type: "shape";
   id: string;
   rect: Rect;
-  shapeType: "rect" | "ellipse" | "triangle";
+  shapeType: "rect" | "roundRect" | "ellipse" | "triangle";
   fill: string;
+  border?: Border;
 }
 
 export interface ImageElement {
@@ -36,13 +84,21 @@ export interface ImageElement {
   id: string;
   rect: Rect;
   url: string;
+  crop?: ImageCrop;
 }
 
-export type Element = TextElement | ShapeElement | ImageElement;
+export interface ImageCrop {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+}
+
+export type SlideElement = TextElement | ShapeElement | ImageElement;
 
 export interface Slide {
   id: string;
-  elements: Element[];
+  elements: SlideElement[];
   rawXml: string; // Raw slide XML text
 }
 
@@ -54,6 +110,31 @@ export interface PresentationSize {
 export interface PresentationAST {
   size: PresentationSize;
   slides: Slide[];
+}
+
+interface PlaceholderDescriptor {
+  idx: string | null;
+  type: string;
+}
+
+interface PlaceholderContext {
+  layoutShapes: globalThis.Element[];
+  masterShapes: globalThis.Element[];
+  masterTextStyles: globalThis.Element | null;
+}
+
+interface TextInheritanceContext {
+  textBodies: globalThis.Element[];
+  masterTextStyle: globalThis.Element | null;
+}
+
+interface ComputedRunStyle {
+  fontSize: number;
+  color: string;
+  bold: boolean;
+  fontFamily: string;
+  eastAsianFontFamily: string;
+  italic: boolean;
 }
 
 // XML Namespaces query helper
@@ -112,12 +193,29 @@ export class PptxParser {
     "bg2": "#eef1f5",
     "tx2": "#1f497d"
   };
+  private themeFonts: Record<string, string> = {
+    "+mj-lt": "",
+    "+mj-ea": "",
+    "+mj-cs": "",
+    "+mn-lt": "",
+    "+mn-ea": "",
+    "+mn-cs": "",
+    "+mj-Hans": "",
+    "+mj-Hant": "",
+    "+mj-Jpan": "",
+    "+mj-Hang": "",
+    "+mn-Hans": "",
+    "+mn-Hant": "",
+    "+mn-Jpan": "",
+    "+mn-Hang": ""
+  };
 
   public async parse(buffer: ArrayBuffer): Promise<PresentationAST> {
     this.zip = await JSZip.loadAsync(buffer);
 
     // 1. Parse Theme Colors
     await this.parseThemeColors();
+    await this.parseThemeFonts();
 
     // 2. Parse Presentation Properties (slide size)
     const size = await this.parsePresentationSize();
@@ -174,31 +272,151 @@ export class PptxParser {
     }
   }
 
+  private async parseThemeFonts() {
+    const themeFile = this.zip?.file("ppt/theme/theme1.xml");
+    if (!themeFile) return;
+
+    const xmlText = await themeFile.async("text");
+    const doc = new DOMParser().parseFromString(xmlText, "application/xml");
+    const major = querySelector(doc, "a\\:majorFont, majorFont");
+    const minor = querySelector(doc, "a\\:minorFont, minorFont");
+
+    const readTypeface = (root: Element | null, selector: string) =>
+      root ? querySelector(root, selector)?.getAttribute("typeface") || "" : "";
+
+    this.themeFonts["+mj-lt"] = readTypeface(major, "a\\:latin, latin");
+    this.themeFonts["+mj-ea"] = readTypeface(major, "a\\:ea, ea");
+    this.themeFonts["+mj-cs"] = readTypeface(major, "a\\:cs, cs");
+    this.themeFonts["+mn-lt"] = readTypeface(minor, "a\\:latin, latin");
+    this.themeFonts["+mn-ea"] = readTypeface(minor, "a\\:ea, ea");
+    this.themeFonts["+mn-cs"] = readTypeface(minor, "a\\:cs, cs");
+
+    for (const [prefix, root] of [["+mj", major], ["+mn", minor]] as const) {
+      if (!root) continue;
+      for (const font of querySelectorAll(root, "a\\:font, font")) {
+        const script = font.getAttribute("script");
+        const typeface = font.getAttribute("typeface");
+        if (script && typeface && ["Hans", "Hant", "Jpan", "Hang"].includes(script)) {
+          this.themeFonts[`${prefix}-${script}`] = typeface;
+        }
+      }
+    }
+  }
+
+  private resolveThemeTypeface(typeface: string): string {
+    if (!typeface.startsWith("+")) return typeface;
+    const resolved = this.themeFonts[typeface];
+    if (resolved) return resolved;
+    if (typeface.endsWith("-ea") || typeface.endsWith("-cs")) {
+      return this.themeFonts[`${typeface.substring(0, 3)}-lt`] || "sans-serif";
+    }
+    return "sans-serif";
+  }
+
   private extractHexColor(node: Element): string | null {
+    let hex: string | null = null;
+    let colorNode: Element | null = null;
+
     // 1. Direct srgbClr
     const srgbNode = querySelector(node, "a\\:srgbClr, srgbClr");
     if (srgbNode) {
       const val = srgbNode.getAttribute("val");
-      if (val) return `#${val}`;
-    }
-
-    // 2. sysClr
-    const sysNode = querySelector(node, "a\\:sysClr, sysClr");
-    if (sysNode) {
-      const val = sysNode.getAttribute("lastClr");
-      if (val) return `#${val}`;
-    }
-
-    // 3. schemeClr (nested reference)
-    const schemeNode = querySelector(node, "a\\:schemeClr, schemeClr");
-    if (schemeNode) {
-      const val = schemeNode.getAttribute("val");
-      if (val && this.themeColors[val]) {
-        return this.themeColors[val];
+      if (val) {
+        hex = `#${val}`;
+        colorNode = srgbNode;
       }
     }
 
-    return null;
+    // 2. sysClr
+    if (!hex) {
+      const sysNode = querySelector(node, "a\\:sysClr, sysClr");
+      if (sysNode) {
+        const val = sysNode.getAttribute("lastClr");
+        if (val) {
+          hex = `#${val}`;
+          colorNode = sysNode;
+        }
+      }
+    }
+
+    // 3. schemeClr (nested reference)
+    if (!hex) {
+      const schemeNode = querySelector(node, "a\\:schemeClr, schemeClr");
+      if (schemeNode) {
+        const val = schemeNode.getAttribute("val");
+        if (val && this.themeColors[val]) {
+          hex = this.themeColors[val];
+          colorNode = schemeNode;
+        }
+      }
+    }
+
+    if (!hex || !colorNode) return hex;
+
+    // Apply color transformations (tint, shade, lumMod, lumOff) under the colorNode
+    try {
+      let r = parseInt(hex.substring(1, 3), 16);
+      let g = parseInt(hex.substring(3, 5), 16);
+      let b = parseInt(hex.substring(5, 7), 16);
+
+      const children = Array.from(colorNode.childNodes) as Element[];
+      for (const child of children) {
+        if (child.nodeType !== 1) continue;
+        const tagName = child.localName || child.nodeName;
+        const valAttr = child.getAttribute("val");
+        if (!valAttr) continue;
+        const val = parseInt(valAttr, 10) / 100000; // OOXML values are in 1000ths of a percent
+
+        if (tagName.endsWith("tint")) {
+          // Tint: blend with white. E.g. val=0.8 means 80% color, 20% white
+          r = Math.round(r * val + 255 * (1 - val));
+          g = Math.round(g * val + 255 * (1 - val));
+          b = Math.round(b * val + 255 * (1 - val));
+        } else if (tagName.endsWith("shade")) {
+          // Shade: blend with black. E.g. val=0.8 means 80% color, 20% black
+          r = Math.round(r * val);
+          g = Math.round(g * val);
+          b = Math.round(b * val);
+        } else if (tagName.endsWith("lumMod")) {
+          r = Math.round(r * val);
+          g = Math.round(g * val);
+          b = Math.round(b * val);
+        } else if (tagName.endsWith("lumOff")) {
+          const offset = Math.round(255 * val);
+          r = Math.min(255, r + offset);
+          g = Math.min(255, g + offset);
+          b = Math.min(255, b + offset);
+        }
+      }
+
+      // Clamp values to 0-255
+      r = Math.max(0, Math.min(255, r));
+      g = Math.max(0, Math.min(255, g));
+      b = Math.max(0, Math.min(255, b));
+
+      return "#" + r.toString(16).padStart(2, '0') + g.toString(16).padStart(2, '0') + b.toString(16).padStart(2, '0');
+    } catch (e) {
+      return hex;
+    }
+  }
+
+  private approximateGradientColor(gradient: Element): string | null {
+    const stops = querySelectorAll(gradient, "a\\:gs, gs")
+      .map(stop => this.extractHexColor(stop))
+      .filter((color): color is string => color !== null);
+    if (stops.length === 0) return null;
+    if (stops.length === 1) return stops[0];
+
+    const rgb = stops.map(color => ({
+      r: parseInt(color.slice(1, 3), 16),
+      g: parseInt(color.slice(3, 5), 16),
+      b: parseInt(color.slice(5, 7), 16)
+    }));
+    const average = (channel: "r" | "g" | "b") =>
+      Math.round(rgb.reduce((sum, color) => sum + color[channel], 0) / rgb.length)
+        .toString(16)
+        .padStart(2, "0");
+    return `#${average("r")}${average("g")}${average("b")}`;
   }
 
   private async parsePresentationSize(): Promise<PresentationSize> {
@@ -278,6 +496,38 @@ export class PptxParser {
     return paths;
   }
 
+  private async loadRelationships(relsPath: string, baseDir: string): Promise<{
+    imgRelMap: Record<string, string>;
+    layoutPath?: string;
+    masterPath?: string;
+  }> {
+    const relMap: Record<string, string> = {};
+    let layoutPath: string | undefined = undefined;
+    let masterPath: string | undefined = undefined;
+
+    const relsFile = this.zip?.file(relsPath);
+    if (relsFile) {
+      const relsText = await relsFile.async("text");
+      const relsDoc = new DOMParser().parseFromString(relsText, "application/xml");
+      const relationships = querySelectorAll(relsDoc, "Relationship");
+      for (const rel of relationships) {
+        const id = rel.getAttribute("Id");
+        const target = rel.getAttribute("Target");
+        const type = rel.getAttribute("Type");
+        if (id && target && type) {
+          if (type.includes("image")) {
+            relMap[id] = this.resolveRelativePath(baseDir, target);
+          } else if (type.includes("slideLayout")) {
+            layoutPath = this.resolveRelativePath(baseDir, target);
+          } else if (type.includes("slideMaster")) {
+            masterPath = this.resolveRelativePath(baseDir, target);
+          }
+        }
+      }
+    }
+    return { imgRelMap: relMap, layoutPath, masterPath };
+  }
+
   private async parseSlide(slidePath: string, slideId: string, viewSize: PresentationSize): Promise<Slide> {
     const slideFile = this.zip?.file(slidePath);
     if (!slideFile) throw new Error(`Slide file not found: ${slidePath}`);
@@ -310,52 +560,94 @@ export class PptxParser {
     // Load relationships for images
     const slideDir = slidePath.substring(0, slidePath.lastIndexOf("/"));
     const slideFileName = slidePath.substring(slidePath.lastIndexOf("/") + 1);
-    const relsPath = `${slideDir}/_rels/${slideFileName}.rels`;
-    const relsFile = this.zip?.file(relsPath);
-    const imgRelMap: Record<string, string> = {};
+    const slideRelsPath = `${slideDir}/_rels/${slideFileName}.rels`;
+    const { imgRelMap, layoutPath } = await this.loadRelationships(slideRelsPath, slideDir);
 
-    if (relsFile) {
-      const relsText = await relsFile.async("text");
-      const relsDoc = new DOMParser().parseFromString(relsText, "application/xml");
-      const relationships = querySelectorAll(relsDoc, "Relationship");
-      for (const rel of relationships) {
-        const id = rel.getAttribute("Id");
-        const target = rel.getAttribute("Target");
-        const type = rel.getAttribute("Type");
-        if (id && target && type && type.includes("image")) {
-          // Resolve target relative to slide directory
-          // e.g. Target="../media/image1.png" relative to "ppt/slides" -> "ppt/media/image1.png"
-          const resolvedTarget = this.resolveRelativePath(slideDir, target);
-          imgRelMap[id] = resolvedTarget;
+    let layoutImgRelMap: Record<string, string> = {};
+    let masterImgRelMap: Record<string, string> = {};
+    let layoutDoc: Document | null = null;
+    let masterDoc: Document | null = null;
+
+    // Load layout if present
+    if (layoutPath) {
+      const layoutDir = layoutPath.substring(0, layoutPath.lastIndexOf("/"));
+      const layoutFileName = layoutPath.substring(layoutPath.lastIndexOf("/") + 1);
+      const layoutRelsPath = `${layoutDir}/_rels/${layoutFileName}.rels`;
+      const layoutRels = await this.loadRelationships(layoutRelsPath, layoutDir);
+      layoutImgRelMap = layoutRels.imgRelMap;
+
+      const layoutFile = this.zip?.file(layoutPath);
+      if (layoutFile) {
+        const text = await layoutFile.async("text");
+        layoutDoc = new DOMParser().parseFromString(text, "application/xml");
+      }
+
+      // Load master if present in layout relations
+      if (layoutRels.masterPath) {
+        const masterPath = layoutRels.masterPath;
+        const masterDir = masterPath.substring(0, masterPath.lastIndexOf("/"));
+        const masterRelsPath = `${masterDir}/_rels/${masterPath.substring(masterPath.lastIndexOf("/") + 1)}.rels`;
+        const masterRels = await this.loadRelationships(masterRelsPath, masterDir);
+        masterImgRelMap = masterRels.imgRelMap;
+
+        const masterFile = this.zip?.file(masterPath);
+        if (masterFile) {
+          const text = await masterFile.async("text");
+          masterDoc = new DOMParser().parseFromString(text, "application/xml");
         }
       }
     }
 
-    const elements: Element[] = [];
+    const elements: SlideElement[] = [];
+    const placeholderContext: PlaceholderContext = {
+      layoutShapes: layoutDoc ? this.collectPlaceholderShapes(layoutDoc) : [],
+      masterShapes: masterDoc ? this.collectPlaceholderShapes(masterDoc) : [],
+      masterTextStyles: masterDoc
+        ? querySelector(masterDoc, "p\\:txStyles, txStyles") as unknown as globalThis.Element | null
+        : null
+    };
 
-    // Parse shape tree
-    const spTree = querySelector(doc, "p\\:spTree, spTree");
-    if (spTree) {
-      const children = Array.from(spTree.childNodes) as Element[];
-      for (const node of children) {
-        if (node.nodeType !== 1) continue; // Only elements
-        const tagName = node.localName || node.nodeName;
+    // Initialize coordinate transform (EMU to logical pixels)
+    const initialTransform: TransformState = {
+      scaleX: scaleX,
+      scaleY: scaleY,
+      absoluteUnitScale: Math.min(scaleX, scaleY),
+      offsetX: 0,
+      offsetY: 0
+    };
 
-        if (tagName.endsWith("sp")) {
-          // Shape or text box
-          await this.parseShapeNode(node, scaleX, scaleY, elements);
-        } else if (tagName.endsWith("pic")) {
-          // Picture element
-          await this.parsePicNode(node, scaleX, scaleY, imgRelMap, elements);
-        }
+    // First: Parse Slide Master background elements
+    if (masterDoc) {
+      const sldMaster = querySelector(masterDoc, "p\\:sldMaster, sldMaster");
+      const cSld = sldMaster ? querySelector(sldMaster, "p\\:cSld, cSld") : null;
+      const spTree = cSld ? querySelector(cSld, "p\\:spTree, spTree") : null;
+      if (spTree) {
+        await this.parseElementsRecursive(spTree, initialTransform, masterImgRelMap, elements, true);
       }
+    }
+
+    // Second: Parse Slide Layout midground elements
+    if (layoutDoc) {
+      const sldLayout = querySelector(layoutDoc, "p\\:sldLayout, sldLayout");
+      const cSld = sldLayout ? querySelector(sldLayout, "p\\:cSld, cSld") : null;
+      const spTree = cSld ? querySelector(cSld, "p\\:spTree, spTree") : null;
+      if (spTree) {
+        await this.parseElementsRecursive(spTree, initialTransform, layoutImgRelMap, elements, true);
+      }
+    }
+
+    // Third: Parse Slide shapes (foreground layer)
+    const sld = querySelector(doc, "p\\:sld, sld");
+    const cSld = sld ? querySelector(sld, "p\\:cSld, cSld") : null;
+    const spTree = cSld ? querySelector(cSld, "p\\:spTree, spTree") : null;
+    if (spTree) {
+      await this.parseElementsRecursive(spTree, initialTransform, imgRelMap, elements, false, placeholderContext);
     }
 
     return { id: slideId, elements, rawXml: xmlText };
   }
 
   private resolveRelativePath(baseDir: string, relativePath: string): string {
-    // baseDir: "ppt/slides", relativePath: "../media/image1.png"
     const baseParts = baseDir.split("/");
     const relParts = relativePath.split("/");
     for (const part of relParts) {
@@ -368,25 +660,273 @@ export class PptxParser {
     return baseParts.join("/");
   }
 
-  private async parseShapeNode(node: Element, scaleX: number, scaleY: number, elements: Element[]) {
+  private collectPlaceholderShapes(doc: Document): globalThis.Element[] {
+    return querySelectorAll(doc, "p\\:sp, sp")
+      .filter(shape => this.getPlaceholderDescriptor(shape) !== null);
+  }
+
+  private getPlaceholderDescriptor(shape: globalThis.Element): PlaceholderDescriptor | null {
+    const nvSpPr = querySelector(shape, "p\\:nvSpPr, nvSpPr");
+    const nvPr = nvSpPr ? querySelector(nvSpPr, "p\\:nvPr, nvPr") : null;
+    const ph = nvPr ? querySelector(nvPr, "p\\:ph, ph") : null;
+    if (!ph) return null;
+
+    return {
+      idx: ph.getAttribute("idx"),
+      type: ph.getAttribute("type") || "obj"
+    };
+  }
+
+  private findMatchingPlaceholder(
+    descriptor: PlaceholderDescriptor,
+    candidates: globalThis.Element[]
+  ): globalThis.Element | null {
+    if (descriptor.idx !== null) {
+      const byIndex = candidates.find(candidate =>
+        this.getPlaceholderDescriptor(candidate)?.idx === descriptor.idx
+      );
+      if (byIndex) return byIndex;
+    }
+
+    return candidates.find(candidate =>
+      this.getPlaceholderDescriptor(candidate)?.type === descriptor.type
+    ) || null;
+  }
+
+  private resolvePlaceholderChain(
+    shape: globalThis.Element,
+    context: PlaceholderContext | null
+  ): globalThis.Element[] {
+    const chain = [shape];
+    if (!context) return chain;
+
+    const slideDescriptor = this.getPlaceholderDescriptor(shape);
+    if (!slideDescriptor) return chain;
+
+    const layoutShape = this.findMatchingPlaceholder(slideDescriptor, context.layoutShapes);
+    if (layoutShape) chain.push(layoutShape);
+
+    const masterDescriptor = layoutShape
+      ? this.getPlaceholderDescriptor(layoutShape) || slideDescriptor
+      : slideDescriptor;
+    const masterShape = this.findMatchingPlaceholder(masterDescriptor, context.masterShapes);
+    if (masterShape) chain.push(masterShape);
+
+    return chain;
+  }
+
+  private selectMasterTextStyle(
+    txStyles: globalThis.Element | null,
+    placeholder: PlaceholderDescriptor | null
+  ): globalThis.Element | null {
+    if (!txStyles) return null;
+    const type = placeholder?.type || "obj";
+    if (type === "title" || type === "ctrTitle") {
+      return querySelector(txStyles, "p\\:titleStyle, titleStyle");
+    }
+    if (type === "body" || type === "obj" || type === "subTitle") {
+      return querySelector(txStyles, "p\\:bodyStyle, bodyStyle");
+    }
+    return querySelector(txStyles, "p\\:otherStyle, otherStyle");
+  }
+
+  private getLevelParagraphProperties(
+    container: globalThis.Element,
+    level: number
+  ): globalThis.Element | null {
+    const styleRoot = (container.localName || container.nodeName).endsWith("txBody")
+      ? querySelector(container, "a\\:lstStyle, lstStyle")
+      : container;
+    if (!styleRoot) return null;
+    const levelName = `lvl${Math.max(0, Math.min(8, level)) + 1}pPr`;
+    return querySelector(styleRoot, `a\\:${levelName}, ${levelName}`);
+  }
+
+  private resolveTextBodyProperties(
+    textBodies: globalThis.Element[],
+    scaleX: number,
+    scaleY: number
+  ): TextBodyProperties {
+    const emuToX = (value: string | null, fallback: number) =>
+      (value === null ? fallback : parseInt(value, 10)) * scaleX;
+    const emuToY = (value: string | null, fallback: number) =>
+      (value === null ? fallback : parseInt(value, 10)) * scaleY;
+
+    const result: TextBodyProperties = {
+      marginLeft: 91440 * scaleX,
+      marginRight: 91440 * scaleX,
+      marginTop: 45720 * scaleY,
+      marginBottom: 45720 * scaleY,
+      verticalAnchor: "top",
+      autoFit: "none",
+      fontScale: 1
+    };
+
+    for (const txBody of [...textBodies].reverse()) {
+      const bodyPr = querySelector(txBody, "a\\:bodyPr, bodyPr");
+      if (!bodyPr) continue;
+      if (bodyPr.hasAttribute("lIns")) result.marginLeft = emuToX(bodyPr.getAttribute("lIns"), 91440);
+      if (bodyPr.hasAttribute("rIns")) result.marginRight = emuToX(bodyPr.getAttribute("rIns"), 91440);
+      if (bodyPr.hasAttribute("tIns")) result.marginTop = emuToY(bodyPr.getAttribute("tIns"), 45720);
+      if (bodyPr.hasAttribute("bIns")) result.marginBottom = emuToY(bodyPr.getAttribute("bIns"), 45720);
+
+      const anchor = bodyPr.getAttribute("anchor");
+      if (anchor === "ctr") result.verticalAnchor = "middle";
+      else if (anchor === "b") result.verticalAnchor = "bottom";
+      else if (anchor === "t") result.verticalAnchor = "top";
+
+      if (querySelector(bodyPr, "a\\:spAutoFit, spAutoFit")) result.autoFit = "shape";
+      else if (querySelector(bodyPr, "a\\:normAutofit, normAutofit")) {
+        result.autoFit = "shrink";
+        const normAutofit = querySelector(bodyPr, "a\\:normAutofit, normAutofit");
+        const fontScale = normAutofit?.getAttribute("fontScale");
+        if (fontScale) result.fontScale = parseInt(fontScale, 10) / 100000;
+      }
+      else if (querySelector(bodyPr, "a\\:noAutofit, noAutofit")) result.autoFit = "none";
+    }
+    return result;
+  }
+
+  private async parseElementsRecursive(
+    parent: Element,
+    transform: TransformState,
+    imgRelMap: Record<string, string>,
+    elements: SlideElement[],
+    isTemplate: boolean = false,
+    placeholderContext: PlaceholderContext | null = null
+  ): Promise<void> {
+    const children = Array.from(parent.childNodes) as Element[];
+    for (const node of children) {
+      if (node.nodeType !== 1) continue; // Only elements
+      const tagName = node.localName || node.nodeName;
+
+      if (tagName.endsWith("sp") || tagName.endsWith("cxnSp")) {
+        // Shape or connection shape
+        await this.parseShapeNode(node, transform, elements, isTemplate, placeholderContext);
+      } else if (tagName.endsWith("pic")) {
+        // Picture element
+        await this.parsePicNode(node, transform, imgRelMap, elements, isTemplate);
+      } else if (tagName.endsWith("grpSp")) {
+        // Group shape - compute nested transform and recurse
+        const grpSpPr = querySelector(node, "p\\:grpSpPr, grpSpPr");
+        let childTransform = transform;
+        if (grpSpPr) {
+          const xfrm = querySelector(grpSpPr, "a\\:xfrm, xfrm");
+          if (xfrm) {
+            const off = querySelector(xfrm, "a\\:off, off");
+            const ext = querySelector(xfrm, "a\\:ext, ext");
+            const chOff = querySelector(xfrm, "a\\:chOff, chOff");
+            const chExt = querySelector(xfrm, "a\\:chExt, chExt");
+
+            if (off && ext && chOff && chExt) {
+              const ox = parseInt(off.getAttribute("x") || "0", 10);
+              const oy = parseInt(off.getAttribute("y") || "0", 10);
+              const cx = parseInt(ext.getAttribute("cx") || "1", 10);
+              const cy = parseInt(ext.getAttribute("cy") || "1", 10);
+              const cox = parseInt(chOff.getAttribute("x") || "0", 10);
+              const coy = parseInt(chOff.getAttribute("y") || "0", 10);
+              const ccx = parseInt(chExt.getAttribute("cx") || "1", 10);
+              const ccy = parseInt(chExt.getAttribute("cy") || "1", 10);
+
+              const groupScaleX = cx / ccx;
+              const groupScaleY = cy / ccy;
+              const groupOffsetX = ox - cox * groupScaleX;
+              const groupOffsetY = oy - coy * groupScaleY;
+
+              childTransform = {
+                scaleX: transform.scaleX * groupScaleX,
+                scaleY: transform.scaleY * groupScaleY,
+                absoluteUnitScale: transform.absoluteUnitScale,
+                offsetX: transform.offsetX + groupOffsetX * transform.scaleX,
+                offsetY: transform.offsetY + groupOffsetY * transform.scaleY
+              };
+            }
+          }
+        }
+        await this.parseElementsRecursive(node, childTransform, imgRelMap, elements, isTemplate, placeholderContext);
+      } else if (tagName.endsWith("graphicFrame")) {
+        // Table graphic frame
+        await this.parseGraphicFrameNode(node, transform, elements, isTemplate);
+      }
+    }
+  }
+
+  private parseRunProperties(
+    rPr: Element,
+    absoluteUnitScale: number,
+    defaults: ComputedRunStyle
+  ): ComputedRunStyle {
+    const res = { ...defaults };
+    const szAttr = rPr.getAttribute("sz");
+    if (szAttr) {
+      const ptSize = parseInt(szAttr, 10) / 100;
+      res.fontSize = Math.round(ptSize * 12700 * absoluteUnitScale);
+    }
+    const boldAttr = rPr.getAttribute("b");
+    if (boldAttr === "1" || boldAttr === "true") {
+      res.bold = true;
+    } else if (boldAttr === "0" || boldAttr === "false") {
+      res.bold = false;
+    }
+    const italicAttr = rPr.getAttribute("i");
+    if (italicAttr === "1" || italicAttr === "true") {
+      res.italic = true;
+    } else if (italicAttr === "0" || italicAttr === "false") {
+      res.italic = false;
+    }
+    const latin = querySelector(rPr, "a\\:latin, latin");
+    const typeface = latin?.getAttribute("typeface");
+    if (typeface) res.fontFamily = this.resolveThemeTypeface(typeface);
+    const eastAsian = querySelector(rPr, "a\\:ea, ea");
+    const eastAsianTypeface = eastAsian?.getAttribute("typeface");
+    if (eastAsianTypeface) res.eastAsianFontFamily = this.resolveThemeTypeface(eastAsianTypeface);
+    const runColor = this.extractHexColor(rPr);
+    if (runColor) {
+      res.color = runColor;
+    }
+    return res;
+  }
+
+  private async parseShapeNode(
+    node: Element,
+    transform: TransformState,
+    elements: SlideElement[],
+    isTemplate: boolean = false,
+    placeholderContext: PlaceholderContext | null = null
+  ) {
     const nvSpPr = querySelector(node, "p\\:nvSpPr, nvSpPr");
+    const nvPr = nvSpPr ? querySelector(nvSpPr, "p\\:nvPr, nvPr") : null;
+    const ph = nvPr ? querySelector(nvPr, "p\\:ph, ph") : null;
+
+    // Skip empty placeholder templates from master/layout
+    if (isTemplate && ph) {
+      return;
+    }
+
     const cNvPr = nvSpPr ? querySelector(nvSpPr, "p\\:cNvPr, cNvPr") : null;
     const id = cNvPr?.getAttribute("id") || `shape_${Math.random().toString(36).substr(2, 9)}`;
-    const name = cNvPr?.getAttribute("name") || id;
 
-    const spPr = querySelector(node, "p\\:spPr, spPr");
+    const shapeChain = this.resolvePlaceholderChain(node, placeholderContext);
+    const spPrNodes = shapeChain
+      .map(shape => querySelector(shape, "p\\:spPr, spPr"))
+      .filter((spPr): spPr is globalThis.Element => spPr !== null);
+    const spPr = spPrNodes[0];
     if (!spPr) return;
 
-    const rect = this.parseXfrm(spPr, scaleX, scaleY);
+    const rect = spPrNodes
+      .map(candidate => this.parseRect(candidate, transform))
+      .find((candidate): candidate is Rect => candidate !== null) || null;
     if (!rect) return;
 
     // Check geometry
     const prstGeom = querySelector(spPr, "a\\:prstGeom, prstGeom");
-    let shapeType: "rect" | "ellipse" | "triangle" = "rect";
+    let shapeType: "rect" | "roundRect" | "ellipse" | "triangle" = "rect";
     if (prstGeom) {
       const prst = prstGeom.getAttribute("prst");
       if (prst === "ellipse" || prst === "oval") {
         shapeType = "ellipse";
+      } else if (prst === "roundRect") {
+        shapeType = "roundRect";
       } else if (prst === "triangle") {
         shapeType = "triangle";
       }
@@ -395,8 +935,12 @@ export class PptxParser {
     // Fill Color
     let fill = "#cccccc"; // Default shape fill
     const solidFill = querySelector(spPr, "a\\:solidFill, solidFill");
+    const gradientFill = querySelector(spPr, "a\\:gradFill, gradFill");
     if (solidFill) {
       const color = this.extractHexColor(solidFill);
+      if (color) fill = color;
+    } else if (gradientFill) {
+      const color = this.approximateGradientColor(gradientFill);
       if (color) fill = color;
     } else {
       // Check style reference
@@ -408,120 +952,499 @@ export class PptxParser {
       }
     }
 
-    // Check if it has solid fill or style, draw background shape if it is not transparent
-    // PPTX shape can be a placeholder with no outline/fill (pure text container).
-    // Let's output shape only if there is a fill or if it's explicitly drawn.
-    // If no solidFill and no fillRef, we might have noFill.
-    const noFill = querySelector(spPr, "a\\:noFill, noFill");
-    const hasBg = !noFill && (solidFill || querySelector(node, "p\\:style, style"));
+    // Border (Outline) Color and Width
+    let border: Border | undefined = undefined;
+    const ln = querySelector(spPr, "a\\:ln, ln");
+    let borderColor: string | null = null;
+    let emuWidth = 12700; // 1 pt default
 
-    if (hasBg) {
+    if (ln) {
+      const lnNoFill = querySelector(ln, "a\\:noFill, noFill");
+      if (!lnNoFill) {
+        const lnSolidFill = querySelector(ln, "a\\:solidFill, solidFill");
+        if (lnSolidFill) {
+          borderColor = this.extractHexColor(lnSolidFill);
+        }
+        const wAttr = ln.getAttribute("w");
+        if (wAttr) {
+          emuWidth = parseInt(wAttr, 10);
+        }
+      }
+    }
+
+    // Fallback: Check shape style lnRef for border outline color
+    if (!borderColor) {
+      const styleNode = querySelector(node, "p\\:style, style");
+      const lnRef = styleNode ? querySelector(styleNode, "a\\:lnRef, lnRef") : null;
+      if (lnRef) {
+        borderColor = this.extractHexColor(lnRef);
+      }
+    }
+
+    if (borderColor) {
+      const strokeWidth = Math.max(1, emuWidth * transform.absoluteUnitScale);
+      border = { color: borderColor, width: strokeWidth };
+    }
+
+    // Fix: only look for noFill directly under spPr, not inside ln
+    const noFill = querySelector(spPr, "a\\:noFill, noFill");
+    const isShapeNoFill = noFill && (
+      noFill.parentElement === spPr ||
+      noFill.parentElement?.localName === "spPr" ||
+      noFill.parentElement?.nodeName.endsWith("spPr")
+    );
+    const hasFill = !isShapeNoFill && (solidFill || gradientFill || querySelector(node, "p\\:style, style"));
+    const hasBorder = border !== undefined;
+
+    if (hasFill || hasBorder) {
       elements.push({
         type: "shape",
         id: `shape_bg_${id}`,
         rect: { ...rect },
         shapeType,
-        fill
+        fill: hasFill ? fill : "transparent",
+        border
       });
     }
 
+    // Default text color and font size from shape placeholder / style
+    let defaultTextColor = "#333333";
+    let defaultFontSize = 18; // Default in points (18pt)
+    let defaultBold = false;
+    let defaultFontFamily = "sans-serif";
+    let defaultEastAsianFontFamily = "";
+
+    // Check placeholder type
+    if (ph) {
+      const type = ph.getAttribute("type");
+      if (type === "title" || type === "ctrTitle") {
+        defaultFontSize = 40; // 40pt
+        defaultBold = true;
+      } else if (type === "subTitle") {
+        defaultFontSize = 24; // 24pt
+      } else if (type === "body") {
+        defaultFontSize = 18; // 18pt
+      }
+    }
+
+    // Check style node for fontRef
+    const styleNode = querySelector(node, "p\\:style, style");
+    if (styleNode) {
+      const fontRef = querySelector(styleNode, "a\\:fontRef, fontRef");
+      if (fontRef) {
+        const color = this.extractHexColor(fontRef);
+        if (color) defaultTextColor = color;
+        const fontScheme = fontRef.getAttribute("idx");
+        if (fontScheme === "major" || fontScheme === "minor") {
+          const prefix = fontScheme === "major" ? "+mj" : "+mn";
+          defaultFontFamily = this.resolveThemeTypeface(`${prefix}-lt`);
+          defaultEastAsianFontFamily = this.themeFonts[`${prefix}-Hans`]
+            || this.resolveThemeTypeface(`${prefix}-ea`);
+        }
+      }
+    }
+
+    const defaultFontSizePx = Math.round(defaultFontSize * 12700 * transform.absoluteUnitScale);
+
     // Text Content
-    const txBody = querySelector(node, "p\\:txBody, txBody");
+    const textBodies = shapeChain
+      .map(shape => querySelector(shape, "p\\:txBody, txBody"))
+      .filter((txBody): txBody is globalThis.Element => txBody !== null);
+    const txBody = textBodies[0] || null;
     if (txBody) {
-      const paragraphs = querySelectorAll(txBody, "a\\:p, p");
-      let fullText = "";
-      let fontSize = 24; // Default text size (px)
-      let color = "#333333"; // Default text color
-      let bold = false;
-      let align: "left" | "center" | "right" = "left";
-
-      for (let i = 0; i < paragraphs.length; i++) {
-        const p = paragraphs[i];
-        
-        // Paragraph alignment
-        const pPr = querySelector(p, "a\\:pPr, pPr");
-        if (pPr) {
-          const algnAttr = pPr.getAttribute("algn");
-          if (algnAttr === "ctr") align = "center";
-          else if (algnAttr === "r") align = "right";
-        }
-
-        // Text Runs
-        const runs = querySelectorAll(p, "a\\:r, r, a\\:fld, fld, a\\:br, br");
-        let paraText = "";
-
-        for (const run of runs) {
-          const runName = run.localName || run.nodeName;
-          if (runName.endsWith("br")) {
-            paraText += "\n";
-            continue;
-          }
-
-          const txtNode = querySelector(run, "a\\:t, t");
-          if (txtNode) {
-            paraText += txtNode.textContent || "";
-          }
-
-          // Extract text style from the first run that defines them
-          const rPr = querySelector(run, "a\\:rPr, rPr");
-          if (rPr) {
-            const szAttr = rPr.getAttribute("sz");
-            if (szAttr) {
-              // sz is in 100ths of a point. E.g. sz="2400" -> 24pt
-              // Convert pt to pixels: 1pt = 1.333px.
-              // Wait, let's keep font size proportional!
-              const ptSize = parseInt(szAttr, 10) / 100;
-              fontSize = Math.round(ptSize * 1.33 * scaleY * 1.3); // Scale text size proportionally
-            }
-
-            const boldAttr = rPr.getAttribute("b");
-            if (boldAttr === "1" || boldAttr === "true") {
-              bold = true;
-            }
-
-            const runColor = this.extractHexColor(rPr);
-            if (runColor) {
-              color = runColor;
-            }
-          }
-        }
-
-        if (paraText) {
-          fullText += (fullText ? "\n" : "") + paraText;
-        }
-      }
-
-      if (fullText.trim()) {
-        elements.push({
-          type: "text",
-          id: `text_${id}`,
-          rect: {
-            x: rect.x + 8, // slight margin
-            y: rect.y + 4,
-            w: Math.max(10, rect.w - 16),
-            h: Math.max(10, rect.h - 8)
-          },
-          content: fullText,
-          style: {
-            fontSize: Math.max(10, fontSize),
-            color,
-            bold,
-            align
-          }
-        });
-      }
+      const inheritance: TextInheritanceContext = {
+        textBodies,
+        masterTextStyle: this.selectMasterTextStyle(
+          placeholderContext?.masterTextStyles || null,
+          this.getPlaceholderDescriptor(node)
+        )
+      };
+      const body = this.resolveTextBodyProperties(textBodies, transform.scaleX, transform.scaleY);
+      await this.parseTextBody(
+        txBody,
+        rect.x,
+        rect.y,
+        rect.w,
+        rect.h,
+        transform.absoluteUnitScale,
+        transform.scaleY,
+        id,
+        elements,
+        defaultTextColor,
+        defaultFontSizePx,
+        defaultBold,
+        defaultFontFamily,
+        defaultEastAsianFontFamily,
+        inheritance,
+        body
+      );
     }
   }
 
-  private async parsePicNode(node: Element, scaleX: number, scaleY: number, imgRelMap: Record<string, string>, elements: Element[]) {
+  private async parseGraphicFrameNode(
+    node: Element,
+    transform: TransformState,
+    elements: SlideElement[],
+    isTemplate: boolean = false
+  ) {
+    // If it's a template placeholder graphicFrame, skip
+    const nvGraphicFramePr = querySelector(node, "p\\:nvGraphicFramePr, nvGraphicFramePr");
+    const nvPr = nvGraphicFramePr ? querySelector(nvGraphicFramePr, "p\\:nvPr, nvPr") : null;
+    const ph = nvPr ? querySelector(nvPr, "p\\:ph, ph") : null;
+    if (isTemplate && ph) {
+      return;
+    }
+
+    const tbl = querySelector(node, "a\\:tbl, tbl");
+    if (!tbl) return;
+
+    // Get position of the graphic frame
+    const xfrm = querySelector(node, "a\\:xfrm, xfrm");
+    if (!xfrm) return;
+    const off = querySelector(xfrm, "a\\:off, off");
+    const ext = querySelector(xfrm, "a\\:ext, ext");
+    if (!off || !ext) return null;
+
+    const ox = parseInt(off.getAttribute("x") || "0", 10);
+    const oy = parseInt(off.getAttribute("y") || "0", 10);
+    const cx = parseInt(ext.getAttribute("cx") || "0", 10);
+    const cy = parseInt(ext.getAttribute("cy") || "0", 10);
+
+    const fx = transform.offsetX + ox * transform.scaleX;
+    const fy = transform.offsetY + oy * transform.scaleY;
+    const fcx = cx * transform.scaleX;
+    const fcy = cy * transform.scaleY;
+
+    // Read column widths from tblGrid
+    const gridCols = querySelectorAll(tbl, "a\\:gridCol, gridCol");
+    const colWidths = gridCols.map(col => parseInt(col.getAttribute("w") || "0", 10) * transform.scaleX);
+
+    // Read rows
+    const rows = querySelectorAll(tbl, "a\\:tr, tr");
+    let currentY = fy;
+
+    for (let r = 0; r < rows.length; r++) {
+      const row = rows[r];
+      const hAttr = row.getAttribute("h");
+      const rowHeight = hAttr ? parseInt(hAttr, 10) * transform.scaleY : (fcy / rows.length);
+
+      const cells = querySelectorAll(row, "a\\:tc, tc");
+      let currentX = fx;
+
+      for (let c = 0; c < cells.length; c++) {
+        const cell = cells[c];
+        const cellWidth = colWidths[c] || (fcx / cells.length);
+
+        // Check merge (gridSpan)
+        const gridSpan = parseInt(cell.getAttribute("gridSpan") || "1", 10);
+        let actualWidth = 0;
+        for (let i = 0; i < gridSpan; i++) {
+          actualWidth += colWidths[c + i] || cellWidth;
+        }
+
+        // Cell background fill
+        const tcPr = querySelector(cell, "a\\:tcPr, tcPr");
+        let fill = "transparent";
+        let cellBorderColor = "#cccccc";
+
+        if (tcPr) {
+          const solidFill = querySelector(tcPr, "a\\:solidFill, solidFill");
+          if (solidFill) {
+            const color = this.extractHexColor(solidFill);
+            if (color) fill = color;
+          }
+          // Border color styling (accent-based or custom)
+          const lnL = querySelector(tcPr, "a\\:lnL, lnL");
+          if (lnL) {
+            const solidFillLn = querySelector(lnL, "a\\:solidFill, solidFill");
+            if (solidFillLn) {
+              const color = this.extractHexColor(solidFillLn);
+              if (color) cellBorderColor = color;
+            }
+          }
+        }
+
+        // Add cell shape
+        const cellId = `tbl_cell_${r}_${c}_${Math.random().toString(36).substr(2, 5)}`;
+        elements.push({
+          type: "shape",
+          id: `shape_${cellId}`,
+          rect: { x: currentX, y: currentY, w: actualWidth, h: rowHeight },
+          shapeType: "rect",
+          fill,
+          border: { color: cellBorderColor, width: 1 }
+        });
+
+        // Cell text content
+        const txBody = querySelector(cell, "a\\:txBody, txBody");
+        if (txBody) {
+          await this.parseTextBody(
+            txBody,
+            currentX,
+            currentY,
+            actualWidth,
+            rowHeight,
+            transform.absoluteUnitScale,
+            transform.scaleY,
+            cellId,
+            elements,
+            "#333333"
+          );
+        }
+
+        currentX += actualWidth;
+      }
+      currentY += rowHeight;
+    }
+  }
+
+  private getBulletChar(buCharNode: Element | null, buFontNode: Element | null): string {
+    if (!buCharNode) return "•";
+    const char = buCharNode.getAttribute("char") || "•";
+    const font = buFontNode ? buFontNode.getAttribute("typeface") : "";
+    if (font === "Wingdings" || font === "Wingdings 2" || font === "Wingdings 3") {
+      if (char === "n") return "■";
+      if (char === "u") return "◆";
+      if (char === "o") return "○";
+    }
+    return char;
+  }
+
+  private async parseTextBody(
+    txBody: Element,
+    x: number,
+    y: number,
+    w: number,
+    h: number,
+    absoluteUnitScale: number,
+    layoutScaleY: number,
+    id: string,
+    elements: SlideElement[],
+    defaultTextColor: string = "#333333",
+    defaultFontSizePx: number = 20,
+    defaultBold: boolean = false,
+    defaultFontFamily: string = "sans-serif",
+    defaultEastAsianFontFamily: string = "",
+    inheritance: TextInheritanceContext | null = null,
+    resolvedBody: TextBodyProperties | null = null
+  ) {
+    const paragraphs = querySelectorAll(txBody, "a\\:p, p");
+    const body = resolvedBody || {
+      marginLeft: 8,
+      marginRight: 8,
+      marginTop: 4,
+      marginBottom: 4,
+      verticalAnchor: "top" as const,
+      autoFit: "none" as const,
+      fontScale: 1
+    };
+    const computedParagraphs: TextParagraph[] = [];
+
+    for (let i = 0; i < paragraphs.length; i++) {
+      const p = paragraphs[i];
+      const pPr = querySelector(p, "a\\:pPr, pPr");
+      const level = Math.max(0, Math.min(8, parseInt(pPr?.getAttribute("lvl") || "0", 10)));
+      let pDefaults: ComputedRunStyle = {
+        fontSize: defaultFontSizePx,
+        color: defaultTextColor,
+        bold: defaultBold,
+        fontFamily: defaultFontFamily,
+        eastAsianFontFamily: defaultEastAsianFontFamily,
+        italic: false
+      };
+
+      const inheritedParagraphProperties: globalThis.Element[] = [];
+      if (inheritance?.masterTextStyle) {
+        const masterLevel = this.getLevelParagraphProperties(inheritance.masterTextStyle, level);
+        if (masterLevel) inheritedParagraphProperties.push(masterLevel);
+      }
+      if (inheritance) {
+        for (const inheritedBody of [...inheritance.textBodies].reverse()) {
+          const levelProperties = this.getLevelParagraphProperties(inheritedBody, level);
+          if (levelProperties) inheritedParagraphProperties.push(levelProperties);
+        }
+      }
+      if (pPr) inheritedParagraphProperties.push(pPr);
+
+      let align: "left" | "center" | "right" = "left";
+      let marginLeft = 0;
+      let indent = 0;
+      let lineSpacing: ParagraphStyle["lineSpacing"];
+      let spaceBefore = 0;
+      let spaceAfter = 0;
+
+      const readSpacing = (
+        properties: globalThis.Element,
+        selector: string
+      ): { unit: "percent" | "points"; value: number } | null => {
+        const spacing = querySelector(properties, selector);
+        if (!spacing) return null;
+        const percent = querySelector(spacing, "a\\:spcPct, spcPct")?.getAttribute("val");
+        if (percent !== null && percent !== undefined) {
+          return { unit: "percent", value: parseInt(percent, 10) / 100000 };
+        }
+        const points = querySelector(spacing, "a\\:spcPts, spcPts")?.getAttribute("val");
+        if (points !== null && points !== undefined) {
+          return { unit: "points", value: (parseInt(points, 10) / 100) * 12700 * absoluteUnitScale };
+        }
+        return null;
+      };
+
+      for (const inheritedPPr of inheritedParagraphProperties) {
+        const algnAttr = inheritedPPr.getAttribute("algn");
+        if (algnAttr === "ctr") align = "center";
+        else if (algnAttr === "r") align = "right";
+        else if (algnAttr === "l" || algnAttr === "just" || algnAttr === "dist") align = "left";
+
+        const marL = inheritedPPr.getAttribute("marL");
+        const indentAttr = inheritedPPr.getAttribute("indent");
+        if (marL !== null) marginLeft = parseInt(marL, 10) * layoutScaleY;
+        if (indentAttr !== null) indent = parseInt(indentAttr, 10) * layoutScaleY;
+
+        const defRPr = querySelector(inheritedPPr, "a\\:defRPr, defRPr");
+        if (defRPr) {
+          pDefaults = this.parseRunProperties(defRPr, absoluteUnitScale, pDefaults);
+        }
+
+        const inheritedLineSpacing = readSpacing(inheritedPPr, "a\\:lnSpc, lnSpc");
+        if (inheritedLineSpacing) lineSpacing = inheritedLineSpacing;
+        const inheritedSpaceBefore = readSpacing(inheritedPPr, "a\\:spcBef, spcBef");
+        if (inheritedSpaceBefore) {
+          spaceBefore = inheritedSpaceBefore.unit === "points"
+            ? inheritedSpaceBefore.value
+            : pDefaults.fontSize * inheritedSpaceBefore.value;
+        }
+        const inheritedSpaceAfter = readSpacing(inheritedPPr, "a\\:spcAft, spcAft");
+        if (inheritedSpaceAfter) {
+          spaceAfter = inheritedSpaceAfter.unit === "points"
+            ? inheritedSpaceAfter.value
+            : pDefaults.fontSize * inheritedSpaceAfter.value;
+        }
+      }
+
+      // Check if bullet exists
+      let bulletChar = "";
+      let bulletColor = pDefaults.color;
+
+      for (const inheritedPPr of inheritedParagraphProperties) {
+        if (querySelector(inheritedPPr, "a\\:buNone, buNone")) {
+          bulletChar = "";
+        }
+        const buChar = querySelector(inheritedPPr, "a\\:buChar, buChar");
+        if (buChar) {
+          const buFont = querySelector(inheritedPPr, "a\\:buFont, buFont");
+          bulletChar = this.getBulletChar(buChar, buFont);
+
+          const buClr = querySelector(inheritedPPr, "a\\:buClr, buClr");
+          if (buClr) {
+            const color = this.extractHexColor(buClr);
+            if (color) bulletColor = color;
+          }
+        }
+      }
+
+      const computedRuns: TextRun[] = [];
+      const runs = querySelectorAll(p, "a\\:r, r, a\\:fld, fld, a\\:br, br");
+      for (const run of runs) {
+        const runName = run.localName || run.nodeName;
+        let runStyle = pDefaults;
+        const rPr = querySelector(run, "a\\:rPr, rPr");
+        if (rPr) runStyle = this.parseRunProperties(rPr, absoluteUnitScale, pDefaults);
+
+        const content = runName.endsWith("br")
+          ? "\n"
+          : querySelector(run, "a\\:t, t")?.textContent || "";
+        if (content) {
+          computedRuns.push({
+            content,
+            style: {
+              fontSize: runStyle.fontSize,
+              color: runStyle.color,
+              bold: runStyle.bold,
+              align,
+              fontFamily: runStyle.fontFamily,
+              eastAsianFontFamily: runStyle.eastAsianFontFamily || undefined,
+              italic: runStyle.italic
+            }
+          });
+        }
+      }
+
+      if (computedRuns.length === 0) {
+        const endParaRPr = querySelector(p, "a\\:endParaRPr, endParaRPr");
+        const emptyStyle = endParaRPr
+          ? this.parseRunProperties(endParaRPr, absoluteUnitScale, pDefaults)
+          : pDefaults;
+        computedRuns.push({
+          content: "",
+          style: {
+            fontSize: emptyStyle.fontSize,
+            color: emptyStyle.color,
+            bold: emptyStyle.bold,
+            align,
+            fontFamily: emptyStyle.fontFamily,
+            eastAsianFontFamily: emptyStyle.eastAsianFontFamily || undefined,
+            italic: emptyStyle.italic
+          }
+        });
+      }
+
+      computedParagraphs.push({
+        style: {
+          align,
+          level,
+          marginLeft,
+          indent,
+          lineSpacing,
+          spaceBefore,
+          spaceAfter
+        },
+        bullet: bulletChar ? { char: bulletChar, color: bulletColor } : undefined,
+        runs: computedRuns
+      });
+    }
+
+    if (computedParagraphs.length === 0) return;
+    const fallbackRun = computedParagraphs
+      .flatMap(paragraph => paragraph.runs)
+      .find(run => run.content.length > 0) || computedParagraphs[0].runs[0];
+    const content = computedParagraphs
+      .map(paragraph => paragraph.runs.map(run => run.content).join(""))
+      .join("\n");
+
+    elements.push({
+      type: "text",
+      id: `text_${id}`,
+      rect: { x, y, w, h },
+      content,
+      style: fallbackRun.style,
+      paragraphs: computedParagraphs,
+      body
+    });
+  }
+
+  private async parsePicNode(
+    node: Element,
+    transform: TransformState,
+    imgRelMap: Record<string, string>,
+    elements: SlideElement[],
+    isTemplate: boolean = false
+  ) {
+    // If it's a template placeholder picture, skip
     const nvPicPr = querySelector(node, "p\\:nvPicPr, nvPicPr");
+    const nvPr = nvPicPr ? querySelector(nvPicPr, "p\\:nvPr, nvPr") : null;
+    const ph = nvPr ? querySelector(nvPr, "p\\:ph, ph") : null;
+    if (isTemplate && ph) {
+      return;
+    }
+
     const cNvPr = nvPicPr ? querySelector(nvPicPr, "p\\:cNvPr, cNvPr") : null;
     const id = cNvPr?.getAttribute("id") || `pic_${Math.random().toString(36).substr(2, 9)}`;
 
     const spPr = querySelector(node, "p\\:spPr, spPr");
     if (!spPr) return;
 
-    const rect = this.parseXfrm(spPr, scaleX, scaleY);
+    const rect = this.parseRect(spPr, transform);
     if (!rect) return;
 
     const blipFill = querySelector(node, "p\\:blipFill, blipFill");
@@ -540,16 +1463,24 @@ export class PptxParser {
     // Convert zip file image data to a Blob URL
     const blob = await imgZipFile.async("blob");
     const blobUrl = URL.createObjectURL(blob);
+    const srcRect = querySelector(blipFill, "a\\:srcRect, srcRect");
+    const crop = srcRect ? {
+      left: parseInt(srcRect.getAttribute("l") || "0", 10) / 100000,
+      top: parseInt(srcRect.getAttribute("t") || "0", 10) / 100000,
+      right: parseInt(srcRect.getAttribute("r") || "0", 10) / 100000,
+      bottom: parseInt(srcRect.getAttribute("b") || "0", 10) / 100000
+    } : undefined;
 
     elements.push({
       type: "image",
       id: `img_${id}`,
       rect,
-      url: blobUrl
+      url: blobUrl,
+      crop
     });
   }
 
-  private parseXfrm(spPr: Element, scaleX: number, scaleY: number): Rect | null {
+  private parseRect(spPr: Element, transform: TransformState): Rect | null {
     const xfrm = querySelector(spPr, "a\\:xfrm, xfrm");
     if (!xfrm) return null;
 
@@ -557,23 +1488,27 @@ export class PptxParser {
     const ext = querySelector(xfrm, "a\\:ext, ext");
     if (!off || !ext) return null;
 
-    const xStr = off.getAttribute("x");
-    const yStr = off.getAttribute("y");
-    const cxStr = ext.getAttribute("cx");
-    const cyStr = ext.getAttribute("cy");
-
-    if (!xStr || !yStr || !cxStr || !cyStr) return null;
-
-    const x = parseInt(xStr, 10);
-    const y = parseInt(yStr, 10);
-    const cx = parseInt(cxStr, 10);
-    const cy = parseInt(cyStr, 10);
+    const x = parseInt(off.getAttribute("x") || "0", 10);
+    const y = parseInt(off.getAttribute("y") || "0", 10);
+    const cx = parseInt(ext.getAttribute("cx") || "0", 10);
+    const cy = parseInt(ext.getAttribute("cy") || "0", 10);
 
     return {
-      x: x * scaleX,
-      y: y * scaleY,
-      w: cx * scaleX,
-      h: cy * scaleY
+      x: transform.offsetX + x * transform.scaleX,
+      y: transform.offsetY + y * transform.scaleY,
+      w: cx * transform.scaleX,
+      h: cy * transform.scaleY
     };
   }
+}
+
+// Coordinate transform state interface
+export interface TransformState {
+  // Cumulative group-space transform for geometry coordinates.
+  scaleX: number;
+  scaleY: number;
+  // Page-level conversion for pt/EMU visual properties; never multiplied by group scale.
+  absoluteUnitScale: number;
+  offsetX: number;
+  offsetY: number;
 }

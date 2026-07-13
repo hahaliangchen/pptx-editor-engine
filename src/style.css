@@ -171,8 +171,9 @@ body {
 }
 
 .canvas-container {
-  width: min(100%, calc((100vh - 180px) * 16 / 9));
+  width: 100%;
   aspect-ratio: 16 / 9;
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
   justify-content: center;

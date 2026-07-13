@@ -1,12 +1,20 @@
-import { PptxParser, PresentationAST, Slide, PresentationSize } from "./pptx-parser";
+import { ImageElement, PptxParser, PresentationAST, Slide, PresentationSize } from "./pptx-parser";
 import * as wasm from "../rust-engine/pkg/ppt_engine";
 
 export interface ViewerOptions {
   container: HTMLElement;
   width?: number; // CSS width
   height?: number; // CSS height
+  fontBackendUrl?: string;
   onSlideChange?: (slideIndex: number, ast: Slide) => void;
   onLoadComplete?: (ast: PresentationAST) => void;
+}
+
+interface FontRequest {
+  family: string;
+  bold: boolean;
+  italic: boolean;
+  eastAsian: boolean;
 }
 
 export default class PptViewer {
@@ -18,6 +26,13 @@ export default class PptViewer {
   private presentation: PresentationAST | null = null;
   private currentSlideIndex: number = 0;
   private imageCache: Record<string, HTMLImageElement> = {};
+  private fontBackendUrl: string;
+  private engineReady: Promise<void>;
+  private fontCatalogPromise: Promise<string[]> | null = null;
+  private loadedFontKeys = new Set<string>();
+  private fontLoads = new Map<string, Promise<void>>();
+  private preferredWidth?: number;
+  private preferredHeight?: number;
   
   // Callbacks
   private onSlideChange?: (slideIndex: number, ast: Slide) => void;
@@ -27,11 +42,14 @@ export default class PptViewer {
     this.container = options.container;
     this.onSlideChange = options.onSlideChange;
     this.onLoadComplete = options.onLoadComplete;
+    this.preferredWidth = options.width;
+    this.preferredHeight = options.height;
+    this.fontBackendUrl = (options.fontBackendUrl || "http://127.0.0.1:8080").replace(/\/$/, "");
 
     // Create Canvas element
     this.canvas = document.createElement("canvas");
-    this.canvas.style.width = options.width ? `${options.width}px` : "100%";
-    this.canvas.style.height = options.height ? `${options.height}px` : "100%";
+    this.canvas.style.width = "100%";
+    this.canvas.style.height = "100%";
     this.canvas.style.display = "block";
     this.canvas.style.boxShadow = "0 8px 24px rgba(0,0,0,0.15)";
     this.canvas.style.borderRadius = "8px";
@@ -43,7 +61,7 @@ export default class PptViewer {
     this.ctx = context;
 
     this.parser = new PptxParser();
-    this.initEngine();
+    this.engineReady = this.initEngine();
 
     // Listen to resize to keep canvas crisp
     window.addEventListener("resize", () => this.resizeAndRedraw());
@@ -55,110 +73,166 @@ export default class PptViewer {
       this.renderer = new wasmModule.RustPptRenderer(this.ctx);
       console.log("PPT WASM Engine initialized successfully.");
 
-      // Load and register layout fonts in WASM
-      await this.loadAndRegisterFonts();
-      
-      // If a presentation was loaded before engine was ready, render it now
-      if (this.presentation) {
-        this.renderCurrentSlide();
-      }
     } catch (err) {
       console.error("Failed to load Rust WASM Engine:", err);
+      throw err;
     }
   }
 
-  private async loadAndRegisterFonts() {
-    if (!this.renderer) return;
-    console.log("[JS Font Manager] Starting font registration...");
+  private getFontCatalog(): Promise<string[]> {
+    if (!this.fontCatalogPromise) {
+      this.fontCatalogPromise = fetch(`${this.fontBackendUrl}/api/fonts`)
+        .then(response => {
+          if (!response.ok) throw new Error(`Font backend returned HTTP ${response.status}`);
+          return response.json() as Promise<string[]>;
+        })
+        .then(families => {
+          console.log(`[Font Manager] Backend exposes ${families.length} font families.`);
+          return families;
+        });
+    }
+    return this.fontCatalogPromise;
+  }
 
-    const BACKEND_URL = "http://127.0.0.1:8080";
-    
-    // We try to request the available fonts from the local Rust backend.
-    try {
-      console.log("[JS Font Manager] Connecting to local font backend at", BACKEND_URL);
-      const listResponse = await fetch(`${BACKEND_URL}/api/fonts`);
-      if (!listResponse.ok) throw new Error("Backend returned status " + listResponse.status);
-      
-      const availableFonts: string[] = await listResponse.json();
-      console.log(`[JS Font Manager] Found ${availableFonts.length} system fonts via backend.`);
-
-      // 1. Find a suitable English Font (preferably Arial, Calibri or Segoe UI)
-      const englishCandidates = ["Arial", "Calibri", "Segoe UI", "Times New Roman"];
-      const englishFamily = availableFonts.find(f => englishCandidates.includes(f)) || "Arial";
-
-      // 2. Find a suitable Chinese Font
-      const chineseCandidates = [
-        "Microsoft YaHei", "SimSun", "NSimSun", "PingFang SC", 
-        "Heiti SC", "STHeiti", "Noto Sans CJK SC", "WenQuanYi Micro Hei", 
-        "Source Han Sans CN"
-      ];
-      const chineseFamily = availableFonts.find(f => chineseCandidates.includes(f));
-
-      const loadFontFromBackend = async (family: string) => {
-        console.log(`[JS Font Fetch] Fetching family: "${family}" from local backend...`);
-        const res = await fetch(`${BACKEND_URL}/api/font?family=${encodeURIComponent(family)}`);
-        if (!res.ok) throw new Error(`Failed to fetch font family ${family}`);
-        const buf = await res.arrayBuffer();
-        const bytes = new Uint8Array(buf);
-        console.log(`[JS Font Fetch] Successfully loaded ${family} (${bytes.byteLength} bytes)`);
-        
-        if (this.renderer) {
-          this.renderer.register_font(bytes);
-          console.log(`[JS Font Register] Registered ${family} in WASM.`);
-        }
-      };
-
-      const loadPromises: Promise<void>[] = [];
-      if (englishFamily && availableFonts.includes(englishFamily)) {
-        loadPromises.push(loadFontFromBackend(englishFamily));
-      }
-      if (chineseFamily) {
-        loadPromises.push(loadFontFromBackend(chineseFamily));
-      }
-
-      if (loadPromises.length > 0) {
-        await Promise.all(loadPromises);
-        console.log("[JS Font Manager] Local system fonts loaded successfully.");
-        return;
-      }
-    } catch (err) {
-      console.warn("[JS Font Manager] Local font backend unavailable, falling back to CDN:", err);
+  private resolveBackendFamily(request: FontRequest, catalog: string[]): string {
+    const byLowerName = new Map(catalog.map(family => [family.toLowerCase(), family]));
+    const requested = request.family.trim();
+    const exact = requested ? byLowerName.get(requested.toLowerCase()) : undefined;
+    if (exact && !["sans-serif", "serif", "monospace"].includes(requested.toLowerCase())) {
+      return exact;
     }
 
-    // --- FALLBACK CDN MODE ---
-    console.log("[JS Font Manager] Initializing CDN fallback fonts...");
-    const fontUrls = {
-      regular: "https://cdnjs.cloudflare.com/ajax/libs/pdfmake/0.3.3/fonts/Roboto/Roboto-Regular.ttf",
-      bold: "https://cdnjs.cloudflare.com/ajax/libs/pdfmake/0.3.3/fonts/Roboto/Roboto-Medium.ttf"
+    const candidates = request.eastAsian
+      ? ["Microsoft YaHei", "DengXian", "SimSun", "Noto Sans CJK SC", "Source Han Sans CN"]
+      : ["Aptos", "Calibri", "Arial", "Segoe UI", "Times New Roman"];
+    for (const candidate of candidates) {
+      const available = byLowerName.get(candidate.toLowerCase());
+      if (available) return available;
+    }
+    if (catalog[0]) return catalog[0];
+    throw new Error("Font backend returned an empty font catalog");
+  }
+
+  private collectPresentationFonts(ast: PresentationAST): FontRequest[] {
+    const requests = new Map<string, FontRequest>();
+    const addStyle = (style: { fontFamily?: string; eastAsianFontFamily?: string; bold: boolean; italic?: boolean }) => {
+      const add = (family: string | undefined, eastAsian: boolean) => {
+        if (!family) return;
+        const request: FontRequest = {
+          family,
+          bold: style.bold,
+          italic: style.italic || false,
+          eastAsian
+        };
+        const key = `${family.toLowerCase()}|${request.bold}|${request.italic}|${eastAsian}`;
+        requests.set(key, request);
+      };
+      add(style.fontFamily, false);
+      add(style.eastAsianFontFamily, true);
     };
 
-    try {
-      const loadFontFromCdn = async (url: string, type: string) => {
-        console.log(`[JS Font Fetch] Fetching ${type} font from CDN: ${url}`);
-        const response = await fetch(url);
-        if (!response.ok) throw new Error(`HTTP ${response.status} fetching font`);
-        const buffer = await response.arrayBuffer();
-        const bytes = new Uint8Array(buffer);
-        console.log(`[JS Font Fetch] Succeeded. ${type} font size: ${bytes.byteLength} bytes.`);
-        
-        if (this.renderer) {
-          this.renderer.register_font(bytes);
+    for (const slide of ast.slides) {
+      for (const element of slide.elements) {
+        if (element.type !== "text") continue;
+        addStyle(element.style);
+        for (const paragraph of element.paragraphs || []) {
+          for (const run of paragraph.runs) addStyle(run.style);
         }
-      };
-
-      await Promise.all([
-        loadFontFromCdn(fontUrls.regular, "Regular"),
-        loadFontFromCdn(fontUrls.bold, "Bold")
-      ]);
-      console.log("[JS Font Manager] All CDN fallback fonts registered successfully.");
-    } catch (err) {
-      console.error("[JS Font Manager] Failed to load CDN fallback fonts:", err);
+      }
     }
+    if (requests.size === 0) {
+      requests.set("sans-serif|false|false|false", {
+        family: "sans-serif",
+        bold: false,
+        italic: false,
+        eastAsian: false
+      });
+    }
+    return [...requests.values()];
+  }
+
+  private loadBackendFont(family: string, bold: boolean, italic: boolean): Promise<void> {
+    const weight = bold ? 700 : 400;
+    const key = `${family.toLowerCase()}|${weight}|${italic}`;
+    if (this.loadedFontKeys.has(key)) return Promise.resolve();
+    const pending = this.fontLoads.get(key);
+    if (pending) return pending;
+
+    const load = (async () => {
+      if (!this.renderer) throw new Error("WASM renderer is not initialized");
+      const query = new URLSearchParams({
+        family,
+        weight: weight.toString(),
+        italic: italic.toString()
+      });
+      const response = await fetch(`${this.fontBackendUrl}/api/font?${query}`);
+      if (!response.ok) {
+        throw new Error(`Font backend could not provide ${family} (${weight}, italic=${italic})`);
+      }
+      const buffer = await response.arrayBuffer();
+      const face = new FontFace(family, buffer.slice(0), {
+        weight: weight.toString(),
+        style: italic ? "italic" : "normal"
+      });
+      await face.load();
+      document.fonts.add(face);
+      this.renderer.register_font(new Uint8Array(buffer));
+      this.loadedFontKeys.add(key);
+      console.log(`[Font Manager] Registered backend font ${family} (${weight}, italic=${italic}).`);
+    })().finally(() => this.fontLoads.delete(key));
+
+    this.fontLoads.set(key, load);
+    return load;
+  }
+
+  private async ensurePresentationFonts(ast: PresentationAST): Promise<void> {
+    const catalog = await this.getFontCatalog();
+    const resolved = new Map<string, { family: string; bold: boolean; italic: boolean }>();
+    const latinFallbacks = new Map<string, string>();
+    const eastAsianFallbacks = new Map<string, string>();
+    for (const request of this.collectPresentationFonts(ast)) {
+      const family = this.resolveBackendFamily(request, catalog);
+      (request.eastAsian ? eastAsianFallbacks : latinFallbacks)
+        .set(request.family.toLowerCase(), family);
+      if (family.toLowerCase() !== request.family.toLowerCase()) {
+        console.warn(`[Font Manager] ${request.family} is unavailable; backend fallback is ${family}.`);
+      }
+      resolved.set(`${family.toLowerCase()}|${request.bold}|${request.italic}`, {
+        family,
+        bold: request.bold,
+        italic: request.italic
+      });
+    }
+
+    const applyBackendFamily = (style: { fontFamily?: string; eastAsianFontFamily?: string }) => {
+      if (style.fontFamily) {
+        style.fontFamily = latinFallbacks.get(style.fontFamily.toLowerCase()) || style.fontFamily;
+      }
+      if (style.eastAsianFontFamily) {
+        style.eastAsianFontFamily = eastAsianFallbacks.get(style.eastAsianFontFamily.toLowerCase())
+          || style.eastAsianFontFamily;
+      }
+    };
+    for (const slide of ast.slides) {
+      for (const element of slide.elements) {
+        if (element.type !== "text") continue;
+        applyBackendFamily(element.style);
+        for (const paragraph of element.paragraphs || []) {
+          for (const run of paragraph.runs) applyBackendFamily(run.style);
+        }
+      }
+    }
+
+    await Promise.all([...resolved.values()].map(font =>
+      this.loadBackendFont(font.family, font.bold, font.italic)
+    ));
   }
 
   // Load PPTX file from ArrayBuffer
   public async loadPptx(buffer: ArrayBuffer): Promise<PresentationAST> {
     this.presentation = await this.parser.parse(buffer);
+    await this.engineReady;
+    await this.ensurePresentationFonts(this.presentation);
     this.currentSlideIndex = 0;
     this.imageCache = {}; // Clear old image cache
     
@@ -173,6 +247,8 @@ export default class PptViewer {
   // Load manual AST structure (for demos / testing)
   public async loadAST(ast: PresentationAST): Promise<void> {
     this.presentation = ast;
+    await this.engineReady;
+    await this.ensurePresentationFonts(ast);
     this.currentSlideIndex = 0;
     this.imageCache = {};
     
@@ -260,23 +336,56 @@ export default class PptViewer {
     if (!slide) return;
 
     const logicalSize = this.presentation.size;
+    const slideRatio = logicalSize.width / logicalSize.height;
 
-    // Get display sizes in CSS pixels
-    const rect = this.canvas.getBoundingClientRect();
-    const cssWidth = rect.width || this.canvas.clientWidth || 960;
-    const cssHeight = rect.height || this.canvas.clientHeight || 540;
+    const viewport = this.container.parentElement;
+    const viewportStyle = viewport ? getComputedStyle(viewport) : null;
+    const horizontalPadding = viewportStyle
+      ? parseFloat(viewportStyle.paddingLeft) + parseFloat(viewportStyle.paddingRight)
+      : 0;
+    const verticalPadding = viewportStyle
+      ? parseFloat(viewportStyle.paddingTop) + parseFloat(viewportStyle.paddingBottom)
+      : 0;
+    const controls = viewport?.querySelector<HTMLElement>(".control-bar");
+    const controlsHeight = controls ? controls.offsetHeight + 16 : 0;
+    const availableWidth = Math.max(
+      1,
+      Math.min(
+        (viewport?.clientWidth || this.container.clientWidth || logicalSize.width) - horizontalPadding,
+        this.preferredWidth || Number.POSITIVE_INFINITY
+      )
+    );
+    const availableHeight = Math.max(
+      1,
+      Math.min(
+        (viewport?.clientHeight || this.container.clientHeight || logicalSize.height)
+          - verticalPadding
+          - controlsHeight,
+        this.preferredHeight || Number.POSITIVE_INFINITY
+      )
+    );
+    const cssWidth = Math.min(availableWidth, availableHeight * slideRatio);
+    const cssHeight = cssWidth / slideRatio;
+
+    this.container.style.width = `${cssWidth}px`;
+    this.container.style.height = `${cssHeight}px`;
+    this.container.style.aspectRatio = `${logicalSize.width} / ${logicalSize.height}`;
 
     // Device Pixel Ratio scaling for Retina screens (sharp rendering)
     const dpr = window.devicePixelRatio || 1;
-    this.canvas.width = cssWidth * dpr;
-    this.canvas.height = cssHeight * dpr;
+    this.canvas.width = Math.max(1, Math.round(cssWidth * dpr));
+    this.canvas.height = Math.max(1, Math.round(cssHeight * dpr));
 
     this.ctx.save();
     
-    // Scale coordinate system from logical (e.g. 1920x1080) to physical pixel viewport
-    const scaleX = this.canvas.width / logicalSize.width;
-    const scaleY = this.canvas.height / logicalSize.height;
-    this.ctx.setTransform(scaleX, 0, 0, scaleY, 0, 0);
+    // Always use a uniform scale. Any spare pixels become centered letterboxing.
+    const scale = Math.min(
+      this.canvas.width / logicalSize.width,
+      this.canvas.height / logicalSize.height
+    );
+    const offsetX = (this.canvas.width - logicalSize.width * scale) / 2;
+    const offsetY = (this.canvas.height - logicalSize.height * scale) / 2;
+    this.ctx.setTransform(scale, 0, 0, scale, offsetX, offsetY);
 
     // Call Rust WASM renderer
     try {

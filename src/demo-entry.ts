@@ -1,6 +1,6 @@
 import format from "xml-formatter";
 import PptViewer from "./index";
-import { Slide } from "./pptx-parser";
+import { PresentationAST, Slide } from "./pptx-parser";
 import "./style.css";
 
 // Pretty-print XML text using standard 'xml-formatter' library
@@ -19,7 +19,7 @@ function prettyPrintXml(xmlString: string, indentString: string = "  "): string 
 }
 
 // Setup Mock Presentation Demo with embedded mock XML strings
-const mockPresentation = {
+const mockPresentation: PresentationAST = {
   size: { width: 1920, height: 1080 },
   slides: [
     {
