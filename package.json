@@ -15,7 +15,8 @@
     "start:backend": "cargo run --manifest-path rust-backend/Cargo.toml"
   },
   "dependencies": {
-    "jszip": "^3.10.1"
+    "jszip": "^3.10.1",
+    "xml-formatter": "^3.7.0"
   },
   "devDependencies": {
     "@rspack/cli": "^0.5.0",

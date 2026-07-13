@@ -2,48 +2,121 @@ import PptViewer from "./index";
 import { Slide } from "./pptx-parser";
 import "./style.css";
 
-// Pretty-print XML text using a robust regex-based parser (works 100% on namespaces & snippets)
-function prettyPrintXml(xmlString: string, indentString: string = "  "): string {
-  if (!xmlString) return "No XML data available for this slide.";
-  try {
-    // Clean up existing whitespace between tags
-    let cleaned = xmlString.replace(/>\s*</g, "><").trim();
+// Helper function to format an XML DOM node recursively
+function formatXmlNode(node: Node, depth: number, indentString: string): string {
+  const indent = indentString.repeat(depth);
+  
+  if (node.nodeType === Node.ELEMENT_NODE) {
+    const el = node as Element;
+    const tagName = el.tagName;
     
+    // Build attributes string
+    let attrs = "";
+    for (let i = 0; i < el.attributes.length; i++) {
+      const attr = el.attributes[i];
+      attrs += ` ${attr.name}="${attr.value}"`;
+    }
+    
+    const childNodes = Array.from(el.childNodes);
+    if (childNodes.length === 0) {
+      return `${indent}<${tagName}${attrs}/>`;
+    }
+    
+    let hasChildElements = false;
+    let textContent = "";
+    let childrenHtml = "";
+    
+    for (const child of childNodes) {
+      if (child.nodeType === Node.ELEMENT_NODE) {
+        hasChildElements = true;
+        childrenHtml += "\n" + formatXmlNode(child, depth + 1, indentString);
+      } else if (child.nodeType === Node.TEXT_NODE) {
+        const text = child.textContent?.trim();
+        if (text) {
+          textContent += text;
+        }
+      } else if (child.nodeType === Node.COMMENT_NODE) {
+        hasChildElements = true;
+        childrenHtml += `\n${indentString.repeat(depth + 1)}<!--${child.textContent}-->`;
+      }
+    }
+    
+    if (hasChildElements) {
+      if (textContent) {
+        childrenHtml = `\n${indentString.repeat(depth + 1)}${textContent}` + childrenHtml;
+      }
+      return `${indent}<${tagName}${attrs}>${childrenHtml}\n${indent}</${tagName}>`;
+    } else {
+      return `${indent}<${tagName}${attrs}>${textContent}</${tagName}>`;
+    }
+  } else if (node.nodeType === Node.COMMENT_NODE) {
+    return `${indent}<!--${node.textContent}-->`;
+  }
+  
+  return "";
+}
+
+// Fallback regex-based pretty-printer for malformed XML or snippets
+function prettyPrintXmlRegex(xmlString: string, indentString: string = "  "): string {
+  try {
+    let cleaned = xmlString.replace(/>\s*</g, "><").trim();
     let formatted = "";
     let indent = 0;
-    
-    // Split by tags, keeping the tags in the tokens list
     let tokens = cleaned.split(/(<[^>]+>)/g);
     
     for (let i = 0; i < tokens.length; i++) {
       let token = tokens[i].trim();
       if (!token) continue;
       
-      // If token is a tag
       if (token.startsWith("<") && token.endsWith(">")) {
-        // Closing tag e.g. </p:sld>
         if (token.startsWith("</")) {
           indent = Math.max(0, indent - 1);
           formatted += "\n" + indentString.repeat(indent) + token;
         }
-        // Self-closing tag or declaration e.g. <a:off /> or <?xml ... ?>
         else if (token.endsWith("/>") || token.startsWith("<?") || token.startsWith("<!")) {
           formatted += "\n" + indentString.repeat(indent) + token;
         }
-        // Opening tag e.g. <p:sld>
         else {
           formatted += "\n" + indentString.repeat(indent) + token;
           indent++;
         }
       } else {
-        // Text content
         formatted += "\n" + indentString.repeat(indent) + token;
       }
     }
-    
     return formatted.trim();
   } catch (err) {
     return xmlString;
+  }
+}
+
+// Pretty-print XML text using native browser DOMParser (safely handles namespaces, attributes, comments)
+function prettyPrintXml(xmlString: string, indentString: string = "  "): string {
+  if (!xmlString) return "No XML data available for this slide.";
+  try {
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(xmlString.trim(), "application/xml");
+    
+    // Check if there is a parsing error (e.g. undeclared namespace prefix)
+    const parserError = doc.querySelector("parsererror");
+    if (parserError) {
+      console.warn("DOMParser failed to parse XML, falling back to regex pretty-printer:", parserError.textContent);
+      return prettyPrintXmlRegex(xmlString, indentString);
+    }
+    
+    // Format declaration if it exists in the original string
+    let declaration = "";
+    if (xmlString.trim().startsWith("<?xml")) {
+      const decMatch = xmlString.trim().match(/^<\?xml[^?]+\?>/);
+      if (decMatch) {
+        declaration = decMatch[0] + "\n";
+      }
+    }
+    
+    return declaration + formatXmlNode(doc.documentElement, 0, indentString);
+  } catch (err) {
+    console.error("DOMParser formatter failed, falling back to regex pretty-printer:", err);
+    return prettyPrintXmlRegex(xmlString, indentString);
   }
 }
 
