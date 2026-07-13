@@ -389,10 +389,13 @@ document.addEventListener("DOMContentLoaded", () => {
         }
       });
 
-      // Display current slide AST JSON
-      astInspector.textContent = JSON.stringify(ast, null, 2);
+      // Display current slide AST JSON (excluding rawXml to keep it clean)
+      const cleanAst = { ...ast };
+      delete (cleanAst as any).rawXml;
+      astInspector.textContent = JSON.stringify(cleanAst, null, 2);
       
       // Display current slide formatted XML data
+      tabBtnXml.textContent = `Raw XML (${ast.id}.xml)`;
       xmlInspector.textContent = prettyPrintXml(ast.rawXml || "");
     },
     onLoadComplete: (ast) => {
