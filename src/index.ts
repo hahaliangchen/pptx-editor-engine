@@ -1,4 +1,11 @@
-import { ImageElement, PptxParser, PresentationAST, Slide, PresentationSize } from "./pptx-parser";
+import {
+  ImageElement,
+  PptVirtualDocument,
+  PptxParser,
+  PresentationAST,
+  Slide,
+  PresentationSize
+} from "./pptx-parser";
 import * as wasm from "../rust-engine/pkg/ppt_engine";
 
 export interface ViewerOptions {
@@ -6,8 +13,8 @@ export interface ViewerOptions {
   width?: number; // CSS width
   height?: number; // CSS height
   fontBackendUrl?: string;
-  onSlideChange?: (slideIndex: number, ast: Slide) => void;
-  onLoadComplete?: (ast: PresentationAST) => void;
+  onSlideChange?: (slideIndex: number, slide: Slide) => void;
+  onLoadComplete?: (document: PptVirtualDocument) => void;
 }
 
 interface FontRequest {
@@ -23,7 +30,7 @@ export default class PptViewer {
   private ctx: CanvasRenderingContext2D;
   private renderer: wasm.RustPptRenderer | null = null;
   private parser: PptxParser;
-  private presentation: PresentationAST | null = null;
+  private presentation: PptVirtualDocument | null = null;
   private currentSlideIndex: number = 0;
   private imageCache: Record<string, HTMLImageElement> = {};
   private fontBackendUrl: string;
@@ -35,8 +42,8 @@ export default class PptViewer {
   private preferredHeight?: number;
   
   // Callbacks
-  private onSlideChange?: (slideIndex: number, ast: Slide) => void;
-  private onLoadComplete?: (ast: PresentationAST) => void;
+  private onSlideChange?: (slideIndex: number, slide: Slide) => void;
+  private onLoadComplete?: (document: PptVirtualDocument) => void;
 
   constructor(options: ViewerOptions) {
     this.container = options.container;
@@ -113,7 +120,7 @@ export default class PptViewer {
     throw new Error("Font backend returned an empty font catalog");
   }
 
-  private collectPresentationFonts(ast: PresentationAST): FontRequest[] {
+  private collectPresentationFonts(document: PptVirtualDocument): FontRequest[] {
     const requests = new Map<string, FontRequest>();
     const addStyle = (style: { fontFamily?: string; eastAsianFontFamily?: string; bold: boolean; italic?: boolean }) => {
       const add = (family: string | undefined, eastAsian: boolean) => {
@@ -131,7 +138,7 @@ export default class PptViewer {
       add(style.eastAsianFontFamily, true);
     };
 
-    for (const slide of ast.slides) {
+    for (const slide of document.slides) {
       for (const element of slide.elements) {
         if (element.type !== "text") continue;
         addStyle(element.style);
@@ -170,27 +177,21 @@ export default class PptViewer {
         throw new Error(`Font backend could not provide ${family} (${weight}, italic=${italic})`);
       }
       const buffer = await response.arrayBuffer();
-      const face = new FontFace(family, buffer.slice(0), {
-        weight: weight.toString(),
-        style: italic ? "italic" : "normal"
-      });
-      await face.load();
-      document.fonts.add(face);
       this.renderer.register_font(new Uint8Array(buffer));
       this.loadedFontKeys.add(key);
-      console.log(`[Font Manager] Registered backend font ${family} (${weight}, italic=${italic}).`);
+      console.log(`[Font Manager] Registered backend font in Rust: ${family} (${weight}, italic=${italic}).`);
     })().finally(() => this.fontLoads.delete(key));
 
     this.fontLoads.set(key, load);
     return load;
   }
 
-  private async ensurePresentationFonts(ast: PresentationAST): Promise<void> {
+  private async ensurePresentationFonts(document: PptVirtualDocument): Promise<void> {
     const catalog = await this.getFontCatalog();
     const resolved = new Map<string, { family: string; bold: boolean; italic: boolean }>();
     const latinFallbacks = new Map<string, string>();
     const eastAsianFallbacks = new Map<string, string>();
-    for (const request of this.collectPresentationFonts(ast)) {
+    for (const request of this.collectPresentationFonts(document)) {
       const family = this.resolveBackendFamily(request, catalog);
       (request.eastAsian ? eastAsianFallbacks : latinFallbacks)
         .set(request.family.toLowerCase(), family);
@@ -213,7 +214,7 @@ export default class PptViewer {
           || style.eastAsianFontFamily;
       }
     };
-    for (const slide of ast.slides) {
+    for (const slide of document.slides) {
       for (const element of slide.elements) {
         if (element.type !== "text") continue;
         applyBackendFamily(element.style);
@@ -229,7 +230,7 @@ export default class PptViewer {
   }
 
   // Load PPTX file from ArrayBuffer
-  public async loadPptx(buffer: ArrayBuffer): Promise<PresentationAST> {
+  public async loadPptx(buffer: ArrayBuffer): Promise<PptVirtualDocument> {
     this.presentation = await this.parser.parse(buffer);
     await this.engineReady;
     await this.ensurePresentationFonts(this.presentation);
@@ -244,11 +245,11 @@ export default class PptViewer {
     return this.presentation;
   }
 
-  // Load manual AST structure (for demos / testing)
-  public async loadAST(ast: PresentationAST): Promise<void> {
-    this.presentation = ast;
+  // Load a pre-built PPT Virtual DOM (for demos / testing).
+  public async loadVirtualDocument(document: PptVirtualDocument): Promise<void> {
+    this.presentation = document;
     await this.engineReady;
-    await this.ensurePresentationFonts(ast);
+    await this.ensurePresentationFonts(document);
     this.currentSlideIndex = 0;
     this.imageCache = {};
     
@@ -257,6 +258,14 @@ export default class PptViewer {
     }
     
     await this.renderCurrentSlide();
+  }
+
+  /** @deprecated Use loadVirtualDocument. */
+  public async loadAST(ast: PresentationAST): Promise<void> {
+    await this.loadVirtualDocument({
+      ...ast,
+      styleRegistry: ast.styleRegistry || { rules: {} }
+    });
   }
 
   public getSlidesCount(): number {

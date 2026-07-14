@@ -1,6 +1,6 @@
 import JSZip from "jszip";
 
-// AST Interfaces
+// PPT Virtual DOM interfaces
 export interface Rect {
   x: number;
   y: number;
@@ -16,6 +16,7 @@ export interface TextStyle {
   fontFamily?: string;
   eastAsianFontFamily?: string;
   italic?: boolean;
+  letterSpacing?: number;
 }
 
 export interface TextRun {
@@ -28,6 +29,10 @@ export interface ParagraphStyle {
   level: number;
   marginLeft: number;
   indent: number;
+  // OOXML paragraph flags that affect East Asian line breaking and line layout.
+  eastAsianLineBreak?: boolean;
+  hangingPunctuation?: boolean;
+  fontAlignment?: "auto" | "baseline" | "top" | "center" | "bottom";
   lineSpacing?: {
     unit: "percent" | "points";
     value: number;
@@ -70,6 +75,77 @@ export interface Border {
   width: number;
 }
 
+export interface GradientStop {
+  position: number;
+  color: string;
+}
+
+export type FillStyle =
+  | { type: "none" }
+  | { type: "solid"; color: string }
+  | {
+      type: "gradient";
+      kind: "linear" | "radial";
+      stops: GradientStop[];
+      angle?: number;
+      rotateWithShape?: boolean;
+    };
+
+export interface LineStyle {
+  fill: FillStyle;
+  width: number;
+  dash?: string;
+  cap?: string;
+  join?: string;
+  compound?: string;
+}
+
+export interface ShadowStyle {
+  color: string;
+  opacity: number;
+  blur: number;
+  distance: number;
+  direction: number;
+  scaleX?: number;
+  scaleY?: number;
+  alignment?: string;
+}
+
+export interface GlowStyle {
+  color: string;
+  opacity: number;
+  radius: number;
+}
+
+export interface EffectStyle {
+  outerShadow?: ShadowStyle;
+  glow?: GlowStyle;
+}
+
+export interface ComputedShapeStyle {
+  fill: FillStyle;
+  line?: LineStyle;
+  effects?: EffectStyle;
+}
+
+export type StyleSourceKind = "theme" | "master" | "layout" | "placeholder" | "shape";
+export type ShapeStyleProperty = "fill" | "line" | "effects";
+
+export interface StyleRule {
+  id: string;
+  source: {
+    kind: StyleSourceKind;
+    part: string;
+    nodeId?: string;
+  };
+  parents: string[];
+  declarations: Partial<ComputedShapeStyle>;
+}
+
+export interface StyleRegistry {
+  rules: Record<string, StyleRule>;
+}
+
 export interface ShapeElement {
   type: "shape";
   id: string;
@@ -77,6 +153,9 @@ export interface ShapeElement {
   shapeType: "rect" | "roundRect" | "ellipse" | "triangle";
   fill: string;
   border?: Border;
+  styleRefs?: string[];
+  computedStyle?: ComputedShapeStyle;
+  styleTrace?: Partial<Record<ShapeStyleProperty, string>>;
 }
 
 export interface ImageElement {
@@ -107,10 +186,16 @@ export interface PresentationSize {
   height: number;
 }
 
-export interface PresentationAST {
+export interface PptVirtualDocument {
   size: PresentationSize;
   slides: Slide[];
+  styleRegistry: StyleRegistry;
 }
+
+/** @deprecated Use PptVirtualDocument. */
+export type PresentationAST = Omit<PptVirtualDocument, "styleRegistry"> & {
+  styleRegistry?: StyleRegistry;
+};
 
 interface PlaceholderDescriptor {
   idx: string | null;
@@ -121,6 +206,9 @@ interface PlaceholderContext {
   layoutShapes: globalThis.Element[];
   masterShapes: globalThis.Element[];
   masterTextStyles: globalThis.Element | null;
+  slidePart: string;
+  layoutPart: string | null;
+  masterPart: string | null;
 }
 
 interface TextInheritanceContext {
@@ -135,6 +223,7 @@ interface ComputedRunStyle {
   fontFamily: string;
   eastAsianFontFamily: string;
   italic: boolean;
+  letterSpacing: number;
 }
 
 // XML Namespaces query helper
@@ -172,8 +261,31 @@ function querySelectorAll(parent: Element | Document, selectors: string): Elemen
   return [];
 }
 
+function hasLocalName(node: Element, names: string[]): boolean {
+  const localName = node.localName || node.nodeName.replace(/^.*:/, "");
+  return names.includes(localName);
+}
+
+function getDirectChildren(parent: Element | Document, ...names: string[]): Element[] {
+  return Array.from(parent.childNodes)
+    .filter((node): node is Element => node.nodeType === 1)
+    .filter(node => hasLocalName(node, names));
+}
+
+function getDirectChild(parent: Element | Document, ...names: string[]): Element | null {
+  return getDirectChildren(parent, ...names)[0] || null;
+}
+
 export class PptxParser {
   private zip: JSZip | null = null;
+  private styleRegistry: StyleRegistry = { rules: {} };
+  private nextStyleRuleId = 1;
+  private themeStyleMatrix: {
+    fills: globalThis.Element[];
+    backgroundFills: globalThis.Element[];
+    lines: globalThis.Element[];
+    effects: globalThis.Element[];
+  } = { fills: [], backgroundFills: [], lines: [], effects: [] };
   private themeColors: Record<string, string> = {
     "dk1": "#000000",
     "lt1": "#ffffff",
@@ -210,12 +322,15 @@ export class PptxParser {
     "+mn-Hang": ""
   };
 
-  public async parse(buffer: ArrayBuffer): Promise<PresentationAST> {
+  public async parse(buffer: ArrayBuffer): Promise<PptVirtualDocument> {
     this.zip = await JSZip.loadAsync(buffer);
+    this.styleRegistry = { rules: {} };
+    this.nextStyleRuleId = 1;
 
     // 1. Parse Theme Colors
     await this.parseThemeColors();
     await this.parseThemeFonts();
+    await this.parseThemeStyleMatrix();
 
     // 2. Parse Presentation Properties (slide size)
     const size = await this.parsePresentationSize();
@@ -235,7 +350,7 @@ export class PptxParser {
       }
     }
 
-    return { size, slides };
+    return { size, slides, styleRegistry: this.styleRegistry };
   }
 
   private async parseThemeColors() {
@@ -303,6 +418,30 @@ export class PptxParser {
     }
   }
 
+  private async parseThemeStyleMatrix() {
+    this.themeStyleMatrix = { fills: [], backgroundFills: [], lines: [], effects: [] };
+    const themeFile = this.zip?.file("ppt/theme/theme1.xml");
+    if (!themeFile) return;
+
+    const xmlText = await themeFile.async("text");
+    const doc = new DOMParser().parseFromString(xmlText, "application/xml");
+    const formatScheme = querySelector(doc, "a\\:fmtScheme, fmtScheme");
+    if (!formatScheme) return;
+
+    const fillList = getDirectChild(formatScheme, "fillStyleLst");
+    const backgroundFillList = getDirectChild(formatScheme, "bgFillStyleLst");
+    const lineList = getDirectChild(formatScheme, "lnStyleLst");
+    const effectList = getDirectChild(formatScheme, "effectStyleLst");
+    this.themeStyleMatrix.fills = fillList ? getDirectChildren(fillList, "solidFill", "gradFill", "noFill", "pattFill") : [];
+    this.themeStyleMatrix.backgroundFills = backgroundFillList
+      ? getDirectChildren(backgroundFillList, "solidFill", "gradFill", "noFill", "pattFill")
+      : [];
+    this.themeStyleMatrix.lines = lineList ? getDirectChildren(lineList, "ln") : [];
+    this.themeStyleMatrix.effects = effectList
+      ? getDirectChildren(effectList, "effectStyle")
+      : [];
+  }
+
   private resolveThemeTypeface(typeface: string): string {
     if (!typeface.startsWith("+")) return typeface;
     const resolved = this.themeFonts[typeface];
@@ -313,7 +452,7 @@ export class PptxParser {
     return "sans-serif";
   }
 
-  private extractHexColor(node: Element): string | null {
+  private extractHexColor(node: Element, placeholderColor?: string | null): string | null {
     let hex: string | null = null;
     let colorNode: Element | null = null;
 
@@ -339,12 +478,51 @@ export class PptxParser {
       }
     }
 
-    // 3. schemeClr (nested reference)
+    // 3. preset colors, commonly used by shadows (for example prstClr="black")
+    if (!hex) {
+      const presetNode = querySelector(node, "a\\:prstClr, prstClr");
+      if (presetNode) {
+        const presetColors: Record<string, string> = {
+          black: "#000000",
+          white: "#ffffff",
+          red: "#ff0000",
+          green: "#008000",
+          blue: "#0000ff",
+          yellow: "#ffff00",
+          gray: "#808080",
+          grey: "#808080",
+          dkGray: "#404040",
+          ltGray: "#c0c0c0"
+        };
+        const val = presetNode.getAttribute("val") || "";
+        if (presetColors[val]) {
+          hex = presetColors[val];
+          colorNode = presetNode;
+        }
+      }
+    }
+
+    // 4. scRGB colors use percentages rather than 8-bit channels.
+    if (!hex) {
+      const scRgbNode = querySelector(node, "a\\:scrgbClr, scrgbClr");
+      if (scRgbNode) {
+        const channel = (name: string) => Math.round(
+          Math.max(0, Math.min(100000, parseInt(scRgbNode.getAttribute(name) || "0", 10))) * 255 / 100000
+        );
+        hex = `#${channel("r").toString(16).padStart(2, "0")}${channel("g").toString(16).padStart(2, "0")}${channel("b").toString(16).padStart(2, "0")}`;
+        colorNode = scRgbNode;
+      }
+    }
+
+    // 5. schemeClr (nested reference)
     if (!hex) {
       const schemeNode = querySelector(node, "a\\:schemeClr, schemeClr");
       if (schemeNode) {
         const val = schemeNode.getAttribute("val");
-        if (val && this.themeColors[val]) {
+        if (val === "phClr" && placeholderColor) {
+          hex = placeholderColor;
+          colorNode = schemeNode;
+        } else if (val && this.themeColors[val]) {
           hex = this.themeColors[val];
           colorNode = schemeNode;
         }
@@ -398,6 +576,128 @@ export class PptxParser {
     } catch (e) {
       return hex;
     }
+  }
+
+  private extractOpacity(node: Element): number {
+    const alpha = querySelector(node, "a\\:alpha, alpha");
+    const value = alpha?.getAttribute("val");
+    return value ? Math.max(0, Math.min(1, parseInt(value, 10) / 100000)) : 1;
+  }
+
+  private applyColorOpacity(color: string, opacity: number): string {
+    if (opacity >= 1 || !/^#[0-9a-f]{6}$/i.test(color)) return color;
+    const r = parseInt(color.slice(1, 3), 16);
+    const g = parseInt(color.slice(3, 5), 16);
+    const b = parseInt(color.slice(5, 7), 16);
+    return `rgba(${r},${g},${b},${opacity})`;
+  }
+
+  private parseFillStyle(container: Element, placeholderColor?: string | null): FillStyle | undefined {
+    const fillNode = hasLocalName(container, ["solidFill", "gradFill", "noFill"])
+      ? container
+      : getDirectChild(container, "noFill", "solidFill", "gradFill");
+    if (!fillNode) return undefined;
+    if (hasLocalName(fillNode, ["noFill"])) return { type: "none" };
+
+    if (hasLocalName(fillNode, ["solidFill"])) {
+      const color = this.extractHexColor(fillNode, placeholderColor);
+      return color
+        ? { type: "solid", color: this.applyColorOpacity(color, this.extractOpacity(fillNode)) }
+        : undefined;
+    }
+
+    const stopList = getDirectChild(fillNode, "gsLst");
+    const stops = (stopList ? getDirectChildren(stopList, "gs") : [])
+      .map(stop => {
+        const color = this.extractHexColor(stop, placeholderColor);
+        if (!color) return null;
+        return {
+          position: Math.max(0, Math.min(1, parseInt(stop.getAttribute("pos") || "0", 10) / 100000)),
+          color: this.applyColorOpacity(color, this.extractOpacity(stop))
+        };
+      })
+      .filter((stop): stop is GradientStop => stop !== null);
+    if (stops.length === 0) return undefined;
+
+    const linear = getDirectChild(fillNode, "lin");
+    const path = getDirectChild(fillNode, "path");
+    return {
+      type: "gradient",
+      kind: path ? "radial" : "linear",
+      stops,
+      angle: linear ? parseInt(linear.getAttribute("ang") || "0", 10) / 60000 : undefined,
+      rotateWithShape: fillNode.getAttribute("rotWithShape") !== "0"
+    };
+  }
+
+  private parseLineStyle(
+    line: Element,
+    absoluteUnitScale: number,
+    placeholderColor?: string | null
+  ): LineStyle | undefined {
+    const fill = this.parseFillStyle(line, placeholderColor);
+    if (fill?.type === "none") return undefined;
+    const resolvedFill = fill || (placeholderColor ? { type: "solid" as const, color: placeholderColor } : undefined);
+    if (!resolvedFill) return undefined;
+
+    const width = Math.max(1, parseInt(line.getAttribute("w") || "12700", 10) * absoluteUnitScale);
+    const dashNode = getDirectChild(line, "prstDash");
+    const joinNode = getDirectChild(line, "round", "bevel", "miter");
+    const cap = line.getAttribute("cap");
+    return {
+      fill: resolvedFill,
+      width,
+      dash: dashNode?.getAttribute("val") || undefined,
+      cap: cap === "rnd" ? "round" : cap === "sq" ? "square" : cap === "flat" ? "butt" : undefined,
+      join: joinNode ? (joinNode.localName || joinNode.nodeName.replace(/^.*:/, "")) : undefined,
+      compound: line.getAttribute("cmpd") || undefined
+    };
+  }
+
+  private parseEffectStyle(
+    container: Element,
+    absoluteUnitScale: number,
+    placeholderColor?: string | null
+  ): EffectStyle | undefined {
+    const effectRoot = hasLocalName(container, ["effectLst", "effectDag"])
+      ? container
+      : getDirectChild(container, "effectLst", "effectDag") || container;
+    const shadow = querySelector(effectRoot, "a\\:outerShdw, outerShdw");
+    const glow = querySelector(effectRoot, "a\\:glow, glow");
+    const result: EffectStyle = {};
+
+    if (shadow) {
+      const color = this.extractHexColor(shadow, placeholderColor);
+      if (color) {
+        result.outerShadow = {
+          color,
+          opacity: this.extractOpacity(shadow),
+          blur: parseInt(shadow.getAttribute("blurRad") || "0", 10) * absoluteUnitScale,
+          distance: parseInt(shadow.getAttribute("dist") || "0", 10) * absoluteUnitScale,
+          direction: parseInt(shadow.getAttribute("dir") || "0", 10) / 60000,
+          scaleX: parseInt(shadow.getAttribute("sx") || "100000", 10) / 100000,
+          scaleY: parseInt(shadow.getAttribute("sy") || "100000", 10) / 100000,
+          alignment: shadow.getAttribute("algn") || undefined
+        };
+      }
+    }
+    if (glow) {
+      const color = this.extractHexColor(glow, placeholderColor);
+      if (color) {
+        result.glow = {
+          color,
+          opacity: this.extractOpacity(glow),
+          radius: parseInt(glow.getAttribute("rad") || "0", 10) * absoluteUnitScale
+        };
+      }
+    }
+    return result.outerShadow || result.glow ? result : undefined;
+  }
+
+  private registerStyleRule(rule: Omit<StyleRule, "id">): string {
+    const id = `style_${this.nextStyleRuleId++}`;
+    this.styleRegistry.rules[id] = { id, ...rule };
+    return id;
   }
 
   private approximateGradientColor(gradient: Element): string | null {
@@ -567,6 +867,7 @@ export class PptxParser {
     let masterImgRelMap: Record<string, string> = {};
     let layoutDoc: Document | null = null;
     let masterDoc: Document | null = null;
+    let masterPart: string | null = null;
 
     // Load layout if present
     if (layoutPath) {
@@ -585,6 +886,7 @@ export class PptxParser {
       // Load master if present in layout relations
       if (layoutRels.masterPath) {
         const masterPath = layoutRels.masterPath;
+        masterPart = masterPath;
         const masterDir = masterPath.substring(0, masterPath.lastIndexOf("/"));
         const masterRelsPath = `${masterDir}/_rels/${masterPath.substring(masterPath.lastIndexOf("/") + 1)}.rels`;
         const masterRels = await this.loadRelationships(masterRelsPath, masterDir);
@@ -604,7 +906,10 @@ export class PptxParser {
       masterShapes: masterDoc ? this.collectPlaceholderShapes(masterDoc) : [],
       masterTextStyles: masterDoc
         ? querySelector(masterDoc, "p\\:txStyles, txStyles") as unknown as globalThis.Element | null
-        : null
+        : null,
+      slidePart: slidePath,
+      layoutPart: layoutPath || null,
+      masterPart
     };
 
     // Initialize coordinate transform (EMU to logical pixels)
@@ -874,6 +1179,10 @@ export class PptxParser {
     } else if (italicAttr === "0" || italicAttr === "false") {
       res.italic = false;
     }
+    const spacingAttr = rPr.getAttribute("spc");
+    if (spacingAttr) {
+      res.letterSpacing = (parseInt(spacingAttr, 10) / 100) * 12700 * absoluteUnitScale;
+    }
     const latin = querySelector(rPr, "a\\:latin, latin");
     const typeface = latin?.getAttribute("typeface");
     if (typeface) res.fontFamily = this.resolveThemeTypeface(typeface);
@@ -885,6 +1194,71 @@ export class PptxParser {
       res.color = runColor;
     }
     return res;
+  }
+
+  private resolveThemeStyleRules(
+    styleNode: Element | null,
+    absoluteUnitScale: number
+  ): Array<{ id: string; property: ShapeStyleProperty; value: FillStyle | LineStyle | EffectStyle }> {
+    if (!styleNode) return [];
+    const result: Array<{ id: string; property: ShapeStyleProperty; value: FillStyle | LineStyle | EffectStyle }> = [];
+
+    const fillRef = getDirectChild(styleNode, "fillRef");
+    if (fillRef) {
+      const index = parseInt(fillRef.getAttribute("idx") || "0", 10);
+      const placeholderColor = this.extractHexColor(fillRef);
+      const source = index >= 1000
+        ? this.themeStyleMatrix.backgroundFills[index - 1001]
+        : this.themeStyleMatrix.fills[index - 1];
+      const fill = source
+        ? this.parseFillStyle(source, placeholderColor)
+        : (placeholderColor ? { type: "solid" as const, color: placeholderColor } : undefined);
+      if (fill) {
+        const id = this.registerStyleRule({
+          source: { kind: "theme", part: "ppt/theme/theme1.xml", nodeId: `fillRef:${index}` },
+          parents: [],
+          declarations: { fill }
+        });
+        result.push({ id, property: "fill", value: fill });
+      }
+    }
+
+    const lineRef = getDirectChild(styleNode, "lnRef");
+    if (lineRef) {
+      const index = parseInt(lineRef.getAttribute("idx") || "0", 10);
+      const placeholderColor = this.extractHexColor(lineRef);
+      const source = this.themeStyleMatrix.lines[index - 1];
+      const line = source
+        ? this.parseLineStyle(source, absoluteUnitScale, placeholderColor)
+        : undefined;
+      if (line) {
+        const id = this.registerStyleRule({
+          source: { kind: "theme", part: "ppt/theme/theme1.xml", nodeId: `lnRef:${index}` },
+          parents: [],
+          declarations: { line }
+        });
+        result.push({ id, property: "line", value: line });
+      }
+    }
+
+    const effectRef = getDirectChild(styleNode, "effectRef");
+    if (effectRef) {
+      const index = parseInt(effectRef.getAttribute("idx") || "0", 10);
+      const placeholderColor = this.extractHexColor(effectRef);
+      const source = this.themeStyleMatrix.effects[index - 1];
+      const effects = source
+        ? this.parseEffectStyle(source, absoluteUnitScale, placeholderColor)
+        : undefined;
+      if (effects) {
+        const id = this.registerStyleRule({
+          source: { kind: "theme", part: "ppt/theme/theme1.xml", nodeId: `effectRef:${index}` },
+          parents: [],
+          declarations: { effects }
+        });
+        result.push({ id, property: "effects", value: effects });
+      }
+    }
+    return result;
   }
 
   private async parseShapeNode(
@@ -918,8 +1292,10 @@ export class PptxParser {
       .find((candidate): candidate is Rect => candidate !== null) || null;
     if (!rect) return;
 
-    // Check geometry
-    const prstGeom = querySelector(spPr, "a\\:prstGeom, prstGeom");
+    // Geometry is structural: only a direct child of spPr can define it.
+    const prstGeom = spPrNodes
+      .map(candidate => getDirectChild(candidate, "prstGeom"))
+      .find((candidate): candidate is globalThis.Element => candidate !== null) || null;
     let shapeType: "rect" | "roundRect" | "ellipse" | "triangle" = "rect";
     if (prstGeom) {
       const prst = prstGeom.getAttribute("prst");
@@ -932,78 +1308,109 @@ export class PptxParser {
       }
     }
 
-    // Fill Color
-    let fill = "#cccccc"; // Default shape fill
-    const solidFill = querySelector(spPr, "a\\:solidFill, solidFill");
-    const gradientFill = querySelector(spPr, "a\\:gradFill, gradFill");
-    if (solidFill) {
-      const color = this.extractHexColor(solidFill);
-      if (color) fill = color;
-    } else if (gradientFill) {
-      const color = this.approximateGradientColor(gradientFill);
-      if (color) fill = color;
-    } else {
-      // Check style reference
-      const styleNode = querySelector(node, "p\\:style, style");
-      const fillRef = styleNode ? querySelector(styleNode, "a\\:fillRef, fillRef") : null;
-      if (fillRef) {
-        const color = this.extractHexColor(fillRef);
-        if (color) fill = color;
+    const computedStyle: ComputedShapeStyle = { fill: { type: "none" } };
+    const styleRefs: string[] = [];
+    const styleTrace: Partial<Record<ShapeStyleProperty, string>> = {};
+    let previousSourceRule: string | null = null;
+
+    // Apply low-priority sources first: master -> layout -> slide shape.
+    const cascade = [...shapeChain].reverse();
+    for (let sourceIndex = 0; sourceIndex < cascade.length; sourceIndex++) {
+      const sourceShape = cascade[sourceIndex];
+      const sourceSpPr = getDirectChild(sourceShape, "spPr");
+      const sourceStyle = getDirectChild(sourceShape, "style");
+      const sourceKind: StyleSourceKind = sourceShape === node
+        ? (isTemplate ? "placeholder" : "shape")
+        : placeholderContext?.layoutShapes.includes(sourceShape)
+          ? "layout"
+          : placeholderContext?.masterShapes.includes(sourceShape)
+            ? "master"
+            : "placeholder";
+      const sourcePart = sourceKind === "shape"
+        ? placeholderContext?.slidePart || "slide"
+        : sourceKind === "layout"
+          ? placeholderContext?.layoutPart || "layout"
+          : sourceKind === "master"
+            ? placeholderContext?.masterPart || "master"
+            : sourceKind;
+      const sourceNodeId = querySelector(sourceShape, "p\\:cNvPr, cNvPr")?.getAttribute("id") || undefined;
+      const themeRules = this.resolveThemeStyleRules(sourceStyle, transform.absoluteUnitScale);
+      const declarations: Partial<ComputedShapeStyle> = {};
+
+      for (const themeRule of themeRules) {
+        styleRefs.push(themeRule.id);
+        if (themeRule.property === "fill") computedStyle.fill = themeRule.value as FillStyle;
+        else if (themeRule.property === "line") computedStyle.line = themeRule.value as LineStyle;
+        else computedStyle.effects = themeRule.value as EffectStyle;
+        styleTrace[themeRule.property] = themeRule.id;
       }
-    }
 
-    // Border (Outline) Color and Width
-    let border: Border | undefined = undefined;
-    const ln = querySelector(spPr, "a\\:ln, ln");
-    let borderColor: string | null = null;
-    let emuWidth = 12700; // 1 pt default
-
-    if (ln) {
-      const lnNoFill = querySelector(ln, "a\\:noFill, noFill");
-      if (!lnNoFill) {
-        const lnSolidFill = querySelector(ln, "a\\:solidFill, solidFill");
-        if (lnSolidFill) {
-          borderColor = this.extractHexColor(lnSolidFill);
+      if (sourceSpPr) {
+        const directFill = this.parseFillStyle(sourceSpPr);
+        const directLineNode = getDirectChild(sourceSpPr, "ln");
+        const directEffectNode = getDirectChild(sourceSpPr, "effectLst", "effectDag");
+        const directEffects = this.parseEffectStyle(sourceSpPr, transform.absoluteUnitScale);
+        if (directFill) declarations.fill = directFill;
+        if (directLineNode) {
+          const directLine = this.parseLineStyle(directLineNode, transform.absoluteUnitScale);
+          // An explicit a:ln/a:noFill clears an inherited line.
+          declarations.line = directLine || { fill: { type: "none" }, width: 0 };
         }
-        const wAttr = ln.getAttribute("w");
-        if (wAttr) {
-          emuWidth = parseInt(wAttr, 10);
+        if (directEffectNode) declarations.effects = directEffects || {};
+      }
+
+      const parents = [
+        ...(previousSourceRule ? [previousSourceRule] : []),
+        ...themeRules.map(rule => rule.id)
+      ];
+      if (Object.keys(declarations).length > 0 || themeRules.length > 0) {
+        const sourceRule = this.registerStyleRule({
+          source: {
+            kind: sourceKind,
+            part: sourcePart,
+            nodeId: sourceNodeId
+          },
+          parents,
+          declarations
+        });
+        styleRefs.push(sourceRule);
+        previousSourceRule = sourceRule;
+        for (const property of ["fill", "line", "effects"] as ShapeStyleProperty[]) {
+          const value = declarations[property];
+          if (value === undefined) continue;
+          if (property === "fill") computedStyle.fill = value as FillStyle;
+          else if (property === "line") computedStyle.line = value as LineStyle;
+          else computedStyle.effects = value as EffectStyle;
+          styleTrace[property] = sourceRule;
         }
       }
     }
 
-    // Fallback: Check shape style lnRef for border outline color
-    if (!borderColor) {
-      const styleNode = querySelector(node, "p\\:style, style");
-      const lnRef = styleNode ? querySelector(styleNode, "a\\:lnRef, lnRef") : null;
-      if (lnRef) {
-        borderColor = this.extractHexColor(lnRef);
-      }
-    }
+    const fallbackFill = computedStyle.fill.type === "solid"
+      ? computedStyle.fill.color
+      : computedStyle.fill.type === "gradient"
+        ? computedStyle.fill.stops[0]?.color || "#cccccc"
+        : "transparent";
+    const lineFill = computedStyle.line?.fill;
+    const borderColor = lineFill?.type === "solid" ? lineFill.color : null;
+    const border: Border | undefined = borderColor && computedStyle.line
+      ? { color: borderColor, width: computedStyle.line.width }
+      : undefined;
+    const hasFill = computedStyle.fill.type !== "none";
+    const hasBorder = !!computedStyle.line && computedStyle.line.fill.type !== "none";
+    const hasEffects = !!(computedStyle.effects?.outerShadow || computedStyle.effects?.glow);
 
-    if (borderColor) {
-      const strokeWidth = Math.max(1, emuWidth * transform.absoluteUnitScale);
-      border = { color: borderColor, width: strokeWidth };
-    }
-
-    // Fix: only look for noFill directly under spPr, not inside ln
-    const noFill = querySelector(spPr, "a\\:noFill, noFill");
-    const isShapeNoFill = noFill && (
-      noFill.parentElement === spPr ||
-      noFill.parentElement?.localName === "spPr" ||
-      noFill.parentElement?.nodeName.endsWith("spPr")
-    );
-    const hasFill = !isShapeNoFill && (solidFill || gradientFill || querySelector(node, "p\\:style, style"));
-    const hasBorder = border !== undefined;
-
-    if (hasFill || hasBorder) {
+    if (hasFill || hasBorder || hasEffects) {
       elements.push({
         type: "shape",
         id: `shape_bg_${id}`,
         rect: { ...rect },
         shapeType,
-        fill: hasFill ? fill : "transparent",
-        border
+        fill: fallbackFill,
+        border,
+        styleRefs,
+        computedStyle,
+        styleTrace
       });
     }
 
@@ -1052,14 +1459,21 @@ export class PptxParser {
       .filter((txBody): txBody is globalThis.Element => txBody !== null);
     const txBody = textBodies[0] || null;
     if (txBody) {
+      const placeholder = this.getPlaceholderDescriptor(node);
       const inheritance: TextInheritanceContext = {
         textBodies,
-        masterTextStyle: this.selectMasterTextStyle(
-          placeholderContext?.masterTextStyles || null,
-          this.getPlaceholderDescriptor(node)
-        )
+        // Master txStyles participate in placeholder inheritance. Ordinary shapes
+        // carry their defaults in their own txBody/lstStyle and must not inherit
+        // unrelated master bullet or run defaults.
+        masterTextStyle: placeholder
+          ? this.selectMasterTextStyle(placeholderContext?.masterTextStyles || null, placeholder)
+          : null
       };
-      const body = this.resolveTextBodyProperties(textBodies, transform.scaleX, transform.scaleY);
+      const body = this.resolveTextBodyProperties(
+        textBodies,
+        transform.absoluteUnitScale,
+        transform.absoluteUnitScale
+      );
       await this.parseTextBody(
         txBody,
         rect.x,
@@ -1067,7 +1481,7 @@ export class PptxParser {
         rect.w,
         rect.h,
         transform.absoluteUnitScale,
-        transform.scaleY,
+        transform.absoluteUnitScale,
         id,
         elements,
         defaultTextColor,
@@ -1250,7 +1664,8 @@ export class PptxParser {
         bold: defaultBold,
         fontFamily: defaultFontFamily,
         eastAsianFontFamily: defaultEastAsianFontFamily,
-        italic: false
+        italic: false,
+        letterSpacing: 0
       };
 
       const inheritedParagraphProperties: globalThis.Element[] = [];
@@ -1269,6 +1684,9 @@ export class PptxParser {
       let align: "left" | "center" | "right" = "left";
       let marginLeft = 0;
       let indent = 0;
+      let eastAsianLineBreak = false;
+      let hangingPunctuation = false;
+      let fontAlignment: ParagraphStyle["fontAlignment"] = "auto";
       let lineSpacing: ParagraphStyle["lineSpacing"];
       let spaceBefore = 0;
       let spaceAfter = 0;
@@ -1301,6 +1719,19 @@ export class PptxParser {
         if (marL !== null) marginLeft = parseInt(marL, 10) * layoutScaleY;
         if (indentAttr !== null) indent = parseInt(indentAttr, 10) * layoutScaleY;
 
+        const eaLnBrk = inheritedPPr.getAttribute("eaLnBrk");
+        if (eaLnBrk !== null) eastAsianLineBreak = eaLnBrk === "1" || eaLnBrk === "true";
+        const hangingPunct = inheritedPPr.getAttribute("hangingPunct");
+        if (hangingPunct !== null) {
+          hangingPunctuation = hangingPunct === "1" || hangingPunct === "true";
+        }
+        const fontAlgn = inheritedPPr.getAttribute("fontAlgn");
+        if (fontAlgn === "base") fontAlignment = "baseline";
+        else if (fontAlgn === "t") fontAlignment = "top";
+        else if (fontAlgn === "ctr") fontAlignment = "center";
+        else if (fontAlgn === "b") fontAlignment = "bottom";
+        else if (fontAlgn === "auto") fontAlignment = "auto";
+
         const defRPr = querySelector(inheritedPPr, "a\\:defRPr, defRPr");
         if (defRPr) {
           pDefaults = this.parseRunProperties(defRPr, absoluteUnitScale, pDefaults);
@@ -1325,20 +1756,27 @@ export class PptxParser {
       // Check if bullet exists
       let bulletChar = "";
       let bulletColor = pDefaults.color;
+      let hasExplicitBulletColor = false;
 
       for (const inheritedPPr of inheritedParagraphProperties) {
-        if (querySelector(inheritedPPr, "a\\:buNone, buNone")) {
+        if (getDirectChild(inheritedPPr, "buNone")) {
           bulletChar = "";
         }
-        const buChar = querySelector(inheritedPPr, "a\\:buChar, buChar");
+        const buChar = getDirectChild(inheritedPPr, "buChar");
         if (buChar) {
-          const buFont = querySelector(inheritedPPr, "a\\:buFont, buFont");
+          const buFont = getDirectChild(inheritedPPr, "buFont");
           bulletChar = this.getBulletChar(buChar, buFont);
 
-          const buClr = querySelector(inheritedPPr, "a\\:buClr, buClr");
+          const buClr = getDirectChild(inheritedPPr, "buClr");
           if (buClr) {
             const color = this.extractHexColor(buClr);
-            if (color) bulletColor = color;
+            if (color) {
+              bulletColor = color;
+              hasExplicitBulletColor = true;
+            }
+          }
+          if (getDirectChild(inheritedPPr, "buClrTx")) {
+            hasExplicitBulletColor = false;
           }
         }
       }
@@ -1364,7 +1802,8 @@ export class PptxParser {
               align,
               fontFamily: runStyle.fontFamily,
               eastAsianFontFamily: runStyle.eastAsianFontFamily || undefined,
-              italic: runStyle.italic
+              italic: runStyle.italic,
+              letterSpacing: runStyle.letterSpacing
             }
           });
         }
@@ -1384,9 +1823,14 @@ export class PptxParser {
             align,
             fontFamily: emptyStyle.fontFamily,
             eastAsianFontFamily: emptyStyle.eastAsianFontFamily || undefined,
-            italic: emptyStyle.italic
+            italic: emptyStyle.italic,
+            letterSpacing: emptyStyle.letterSpacing
           }
         });
+      }
+
+      if (bulletChar && !hasExplicitBulletColor) {
+        bulletColor = computedRuns[0].style.color;
       }
 
       computedParagraphs.push({
@@ -1395,6 +1839,9 @@ export class PptxParser {
           level,
           marginLeft,
           indent,
+          eastAsianLineBreak,
+          hangingPunctuation,
+          fontAlignment,
           lineSpacing,
           spaceBefore,
           spaceAfter

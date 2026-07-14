@@ -1,43 +1,257 @@
 mod ast;
 
-use ast::{Element, Slide, TextElement, TextStyle};
-use cosmic_text::fontdb::Source;
-use cosmic_text::{Attrs, Buffer, Family, FontSystem, Metrics, Shaping, Style, Weight};
+use ast::{
+    Element, FillStyle, ParagraphStyle, Rect, ShapeElement, Slide, TextBodyProperties, TextElement,
+    TextParagraph, TextRun, TextStyle,
+};
+use cosmic_text::fontdb::{self, Source};
+use cosmic_text::{
+    Align, Attrs, AttrsList, Buffer, BufferLine, CacheKeyFlags, Color, Family, FontSystem, Hinting,
+    LineEnding, Metrics, Shaping, Style, SwashCache, Weight, Wrap,
+};
 use std::sync::Arc;
-use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
-use web_sys::CanvasRenderingContext2d;
+use wasm_bindgen::{prelude::*, Clamped};
+use web_sys::{CanvasRenderingContext2d, HtmlCanvasElement, ImageData};
 
 #[wasm_bindgen]
 pub struct RustPptRenderer {
     ctx: CanvasRenderingContext2d,
     font_system: Option<FontSystem>,
+    swash_cache: SwashCache,
     registered_fonts: Vec<Arc<Vec<u8>>>,
 }
 
-#[derive(Clone)]
-struct RichFragment {
-    text: String,
-    style: TextStyle,
-    width: f32,
-}
-
-struct RichLine {
-    fragments: Vec<RichFragment>,
-    width: f32,
-    height: f32,
+struct CosmicParagraph {
+    buffer: Buffer,
+    bullet_buffer: Option<Buffer>,
     x: f32,
-    y: f32,
-    bullet: Option<(String, TextStyle, f32)>,
+    first_line_offset: f32,
+    bullet_x: f32,
+    top: f32,
+    hanging_punctuation: bool,
+    font_alignment: String,
+    font_size: f32,
+    metric_line_height: f32,
+    line_height: f32,
+    font_metrics: Option<FontMetricSample>,
 }
 
-struct RichLayout {
-    lines: Vec<RichLine>,
-    height: f32,
-    max_width: f32,
+#[derive(Clone, Copy)]
+struct FontMetricSample {
+    ascent: f32,
+    descent: f32,
+    leading: f32,
+    line_height: f32,
 }
+
+// The mac-like profile uses grayscale, unhinted glyphs and a small oversampling
+// factor before compositing the text bitmap onto the presentation canvas.
+const MAC_TEXT_OVERSAMPLE: f32 = 2.0;
+// WPS leaves less internal leading than the raw cosmic-text alignment box for
+// the Windows fonts used by this deck. This is renderer compatibility behavior,
+// not an OOXML spacing value.
+const WPS_FONT_METRIC_SCALE: f32 = 0.92;
 
 impl RustPptRenderer {
+    fn color_with_opacity(color: &str, opacity: f32) -> String {
+        if color.len() == 7 && color.starts_with('#') {
+            if let (Ok(r), Ok(g), Ok(b)) = (
+                u8::from_str_radix(&color[1..3], 16),
+                u8::from_str_radix(&color[3..5], 16),
+                u8::from_str_radix(&color[5..7], 16),
+            ) {
+                return format!("rgba({},{},{},{})", r, g, b, opacity.clamp(0.0, 1.0));
+            }
+        }
+        color.to_string()
+    }
+
+    fn set_shape_paint(&self, fill: &FillStyle, rect: &Rect, stroke: bool) -> bool {
+        match fill {
+            FillStyle::None => false,
+            FillStyle::Solid { color } => {
+                if stroke {
+                    self.ctx.set_stroke_style_str(color);
+                } else {
+                    self.ctx.set_fill_style_str(color);
+                }
+                true
+            }
+            FillStyle::Gradient {
+                kind, stops, angle, ..
+            } => {
+                if stops.is_empty() {
+                    return false;
+                }
+                let x = rect.x as f64;
+                let y = rect.y as f64;
+                let w = rect.w as f64;
+                let h = rect.h as f64;
+                let gradient = if kind == "radial" {
+                    let radius = w.max(h) / 2.0;
+                    self.ctx
+                        .create_radial_gradient(
+                            x + w / 2.0,
+                            y + h / 2.0,
+                            0.0,
+                            x + w / 2.0,
+                            y + h / 2.0,
+                            radius,
+                        )
+                        .ok()
+                } else {
+                    let radians = angle.unwrap_or(0.0) as f64 * std::f64::consts::PI / 180.0;
+                    let dx = radians.cos() * w / 2.0;
+                    let dy = radians.sin() * h / 2.0;
+                    Some(self.ctx.create_linear_gradient(
+                        x + w / 2.0 - dx,
+                        y + h / 2.0 - dy,
+                        x + w / 2.0 + dx,
+                        y + h / 2.0 + dy,
+                    ))
+                };
+                let Some(gradient) = gradient else {
+                    return false;
+                };
+                for stop in stops {
+                    let _ = gradient.add_color_stop(stop.position, &stop.color);
+                }
+                if stroke {
+                    self.ctx.set_stroke_style_canvas_gradient(&gradient);
+                } else {
+                    self.ctx.set_fill_style_canvas_gradient(&gradient);
+                }
+                true
+            }
+        }
+    }
+
+    fn begin_shape_path(&self, shp: &ShapeElement) {
+        let x = shp.rect.x as f64;
+        let y = shp.rect.y as f64;
+        let w = shp.rect.w as f64;
+        let h = shp.rect.h as f64;
+        self.ctx.begin_path();
+        match shp.shape_type.as_str() {
+            "roundRect" => {
+                let radius = (w.min(h) * 0.13).max(1.0);
+                self.ctx.move_to(x + radius, y);
+                self.ctx.line_to(x + w - radius, y);
+                self.ctx.quadratic_curve_to(x + w, y, x + w, y + radius);
+                self.ctx.line_to(x + w, y + h - radius);
+                self.ctx
+                    .quadratic_curve_to(x + w, y + h, x + w - radius, y + h);
+                self.ctx.line_to(x + radius, y + h);
+                self.ctx.quadratic_curve_to(x, y + h, x, y + h - radius);
+                self.ctx.line_to(x, y + radius);
+                self.ctx.quadratic_curve_to(x, y, x + radius, y);
+            }
+            "ellipse" => {
+                let _ = self.ctx.ellipse(
+                    x + w / 2.0,
+                    y + h / 2.0,
+                    w / 2.0,
+                    h / 2.0,
+                    0.0,
+                    0.0,
+                    2.0 * std::f64::consts::PI,
+                );
+            }
+            "triangle" => {
+                self.ctx.move_to(x + w / 2.0, y);
+                self.ctx.line_to(x + w, y + h);
+                self.ctx.line_to(x, y + h);
+            }
+            _ => self.ctx.rect(x, y, w, h),
+        }
+        self.ctx.close_path();
+    }
+
+    fn apply_shape_effects(&self, shp: &ShapeElement) {
+        let Some(effects) = shp
+            .computed_style
+            .as_ref()
+            .and_then(|style| style.effects.as_ref())
+        else {
+            return;
+        };
+        if let Some(shadow) = &effects.outer_shadow {
+            let radians = shadow.direction as f64 * std::f64::consts::PI / 180.0;
+            self.ctx
+                .set_shadow_color(&Self::color_with_opacity(&shadow.color, shadow.opacity));
+            self.ctx.set_shadow_blur(shadow.blur as f64);
+            self.ctx
+                .set_shadow_offset_x(radians.cos() * shadow.distance as f64);
+            self.ctx
+                .set_shadow_offset_y(radians.sin() * shadow.distance as f64);
+        } else if let Some(glow) = &effects.glow {
+            self.ctx
+                .set_shadow_color(&Self::color_with_opacity(&glow.color, glow.opacity));
+            self.ctx.set_shadow_blur(glow.radius as f64);
+            self.ctx.set_shadow_offset_x(0.0);
+            self.ctx.set_shadow_offset_y(0.0);
+        }
+    }
+
+    fn clear_shape_effects(&self) {
+        self.ctx.set_shadow_color("rgba(0,0,0,0)");
+        self.ctx.set_shadow_blur(0.0);
+        self.ctx.set_shadow_offset_x(0.0);
+        self.ctx.set_shadow_offset_y(0.0);
+    }
+
+    fn apply_shadow_transform(&self, shp: &ShapeElement) {
+        let Some(shadow) = shp
+            .computed_style
+            .as_ref()
+            .and_then(|style| style.effects.as_ref())
+            .and_then(|effects| effects.outer_shadow.as_ref())
+        else {
+            return;
+        };
+        let scale_x = shadow.scale_x.max(0.01) as f64;
+        let scale_y = shadow.scale_y.max(0.01) as f64;
+        if (scale_x - 1.0).abs() < f64::EPSILON && (scale_y - 1.0).abs() < f64::EPSILON {
+            return;
+        }
+        let center_x = (shp.rect.x + shp.rect.w / 2.0) as f64;
+        let center_y = (shp.rect.y + shp.rect.h / 2.0) as f64;
+        let _ = self.ctx.translate(center_x, center_y);
+        let _ = self.ctx.scale(scale_x, scale_y);
+        let _ = self.ctx.translate(-center_x, -center_y);
+    }
+
+    fn paint_shape(&self, shp: &ShapeElement) {
+        self.begin_shape_path(shp);
+        if let Some(style) = &shp.computed_style {
+            if self.set_shape_paint(&style.fill, &shp.rect, false) {
+                self.ctx.fill();
+            }
+            if let Some(line) = &style.line {
+                if self.set_shape_paint(&line.fill, &shp.rect, true) {
+                    self.ctx.set_line_width(line.width as f64);
+                    if let Some(cap) = &line.cap {
+                        self.ctx.set_line_cap(cap);
+                    }
+                    if let Some(join) = &line.join {
+                        self.ctx.set_line_join(join);
+                    }
+                    self.ctx.stroke();
+                }
+            }
+        } else {
+            if shp.fill != "transparent" {
+                self.ctx.set_fill_style_str(&shp.fill);
+                self.ctx.fill();
+            }
+            if let Some(border) = &shp.border {
+                self.ctx.set_stroke_style_str(&border.color);
+                self.ctx.set_line_width(border.width as f64);
+                self.ctx.stroke();
+            }
+        }
+    }
     fn is_east_asian_text(text: &str) -> bool {
         text.chars().any(|ch| {
             matches!(
@@ -56,76 +270,168 @@ impl RustPptRenderer {
         })
     }
 
-    fn layout_tokens(text: &str) -> Vec<String> {
-        let mut tokens = Vec::new();
-        let mut current = String::new();
-        let mut current_kind: Option<u8> = None;
-
-        for ch in text.chars() {
-            if ch == '\n' {
-                if !current.is_empty() {
-                    tokens.push(std::mem::take(&mut current));
-                }
-                tokens.push("\n".to_string());
-                current_kind = None;
-                continue;
-            }
-
-            let kind = if ch.is_whitespace() {
-                1
-            } else if Self::is_east_asian_text(&ch.to_string()) {
-                2
-            } else {
-                3
-            };
-            if kind == 2 {
-                if !current.is_empty() {
-                    tokens.push(std::mem::take(&mut current));
-                }
-                tokens.push(ch.to_string());
-                current_kind = None;
-            } else {
-                if current_kind.is_some() && current_kind != Some(kind) && !current.is_empty() {
-                    tokens.push(std::mem::take(&mut current));
-                }
-                current.push(ch);
-                current_kind = Some(kind);
+    fn parse_text_color(value: &str) -> Color {
+        if value.len() == 7 && value.starts_with('#') {
+            if let (Ok(r), Ok(g), Ok(b)) = (
+                u8::from_str_radix(&value[1..3], 16),
+                u8::from_str_radix(&value[3..5], 16),
+                u8::from_str_radix(&value[5..7], 16),
+            ) {
+                return Color::rgb(r, g, b);
             }
         }
-        if !current.is_empty() {
-            tokens.push(current);
+        if let Some(channels) = value
+            .strip_prefix("rgba(")
+            .and_then(|inner| inner.strip_suffix(')'))
+        {
+            let parts: Vec<&str> = channels.split(',').map(str::trim).collect();
+            if parts.len() == 4 {
+                if let (Ok(r), Ok(g), Ok(b), Ok(alpha)) = (
+                    parts[0].parse::<u8>(),
+                    parts[1].parse::<u8>(),
+                    parts[2].parse::<u8>(),
+                    parts[3].parse::<f32>(),
+                ) {
+                    return Color::rgba(r, g, b, (alpha.clamp(0.0, 1.0) * 255.0) as u8);
+                }
+            }
         }
-        tokens
+        Color::rgb(0, 0, 0)
     }
 
-    fn set_text_font(&self, style: &TextStyle, text: &str, scale: f32) {
-        let font_style = if style.italic { "italic" } else { "normal" };
-        let font_weight = if style.bold { "bold" } else { "normal" };
+    fn cosmic_attrs<'a>(
+        style: &'a TextStyle,
+        text: &str,
+        scale: f32,
+        line_height: f32,
+    ) -> Attrs<'a> {
         let requested_family =
             if Self::is_east_asian_text(text) && !style.east_asian_font_family.is_empty() {
                 &style.east_asian_font_family
             } else {
                 &style.font_family
             };
-        let family = requested_family.replace('\'', "");
-        self.ctx.set_font(&format!(
-            "{} {} {}px '{}'",
-            font_style,
-            font_weight,
-            style.font_size * scale,
-            family
-        ));
+        let family = match requested_family.to_ascii_lowercase().as_str() {
+            "serif" => Family::Serif,
+            "sans-serif" | "sans serif" => Family::SansSerif,
+            "cursive" => Family::Cursive,
+            "fantasy" => Family::Fantasy,
+            "monospace" => Family::Monospace,
+            _ => Family::Name(requested_family),
+        };
+        let mut attrs = Attrs::new()
+            .family(family)
+            .color(Self::parse_text_color(&style.color))
+            .cache_key_flags(CacheKeyFlags::DISABLE_HINTING)
+            .metrics(Metrics::new(
+                (style.font_size * scale).max(1.0),
+                line_height.max(style.font_size * scale).max(1.0),
+            ));
+        if style.bold {
+            attrs = attrs.weight(Weight::BOLD);
+        }
+        if style.italic {
+            attrs = attrs.style(Style::Italic);
+        }
+        if style.letter_spacing != 0.0 && style.font_size > 0.0 {
+            attrs = attrs.letter_spacing(style.letter_spacing / style.font_size);
+        }
+        attrs
     }
 
-    fn measure_fragment(&self, text: &str, style: &TextStyle, scale: f32) -> f32 {
-        self.set_text_font(style, text, scale);
-        self.ctx
-            .measure_text(text)
-            .map(|metrics| metrics.width() as f32)
-            .unwrap_or_else(|_| text.chars().count() as f32 * style.font_size * scale * 0.55)
+    fn font_metric_line_height(
+        font_system: &mut FontSystem,
+        style: &TextStyle,
+        text: &str,
+        scale: f32,
+    ) -> Option<FontMetricSample> {
+        let font_size = (style.font_size * scale).max(1.0);
+        let attrs = Self::cosmic_attrs(style, text, scale, font_size);
+        let family = match attrs.family {
+            Family::Name(name) => fontdb::Family::Name(name),
+            Family::Serif => fontdb::Family::Serif,
+            Family::SansSerif => fontdb::Family::SansSerif,
+            Family::Cursive => fontdb::Family::Cursive,
+            Family::Fantasy => fontdb::Family::Fantasy,
+            Family::Monospace => fontdb::Family::Monospace,
+        };
+        let families = [family];
+        let id = font_system.db().query(&fontdb::Query {
+            families: &families,
+            weight: attrs.weight,
+            stretch: attrs.stretch,
+            style: attrs.style,
+        })?;
+        let font = font_system.get_font(id, attrs.weight)?;
+        let metrics = font.metrics();
+        if metrics.units_per_em == 0 {
+            return None;
+        }
+        let px_scale = font_size / metrics.units_per_em as f32;
+        let ascent = metrics.ascent * px_scale;
+        let descent = metrics.descent * px_scale;
+        let leading = metrics.leading * px_scale;
+        let line_height = ascent - descent + leading;
+        Some(FontMetricSample {
+            ascent,
+            descent,
+            leading,
+            line_height: (line_height * WPS_FONT_METRIC_SCALE).max(font_size),
+        })
     }
 
-    fn build_rich_layout(&self, txt: &TextElement, scale: f32) -> RichLayout {
+    fn normalize_text_element(txt: &TextElement) -> TextElement {
+        if !txt.paragraphs.is_empty() {
+            return txt.clone();
+        }
+        let paragraphs = txt
+            .content
+            .split('\n')
+            .map(|content| TextParagraph {
+                runs: vec![TextRun {
+                    content: content.to_string(),
+                    style: txt.style.clone(),
+                }],
+                style: ParagraphStyle {
+                    align: txt.style.align.clone(),
+                    level: 0,
+                    margin_left: 0.0,
+                    indent: 0.0,
+                    east_asian_line_break: false,
+                    hanging_punctuation: false,
+                    font_alignment: "auto".to_string(),
+                    line_spacing: None,
+                    space_before: 0.0,
+                    space_after: 0.0,
+                },
+                bullet: None,
+            })
+            .collect();
+        TextElement {
+            id: txt.id.clone(),
+            rect: txt.rect.clone(),
+            content: txt.content.clone(),
+            style: txt.style.clone(),
+            paragraphs,
+            body: txt.body.clone().or_else(|| {
+                Some(TextBodyProperties {
+                    margin_left: 8.0,
+                    margin_right: 8.0,
+                    margin_top: 4.0,
+                    margin_bottom: 4.0,
+                    vertical_anchor: "top".to_string(),
+                    auto_fit: "none".to_string(),
+                    font_scale: 1.0,
+                })
+            }),
+        }
+    }
+
+    fn build_cosmic_paragraphs(
+        font_system: &mut FontSystem,
+        txt: &TextElement,
+        scale: f32,
+    ) -> (Vec<CosmicParagraph>, f32) {
         let (margin_left, margin_right, margin_top, margin_bottom) = txt
             .body
             .as_ref()
@@ -138,249 +444,444 @@ impl RustPptRenderer {
                 )
             })
             .unwrap_or((8.0, 8.0, 4.0, 4.0));
-        let inner_left = txt.rect.x + margin_left;
         let inner_width = (txt.rect.w - margin_left - margin_right).max(1.0);
-        let mut positioned_lines = Vec::new();
         let mut cursor_y = margin_top;
-        let mut max_width: f32 = 0.0;
+        let mut layouts = Vec::new();
 
         for paragraph in &txt.paragraphs {
             cursor_y += paragraph.style.space_before * scale;
             let first_style = paragraph
                 .runs
                 .first()
-                .map(|run| run.style.clone())
-                .unwrap_or_else(|| txt.style.clone());
+                .map(|run| &run.style)
+                .unwrap_or(&txt.style);
+            let font_size = paragraph
+                .runs
+                .iter()
+                .map(|run| run.style.font_size * scale)
+                .fold(first_style.font_size * scale, f32::max)
+                .max(1.0);
+            // A PPT percentage line spacing is based on the font's alignment box,
+            // not only on the em-sized glyph. This preserves ascent/descent/leading
+            // from the backend font and is the difference visible in WPS comparisons.
+            let font_metrics = paragraph
+                .runs
+                .iter()
+                .filter_map(|run| {
+                    Self::font_metric_line_height(font_system, &run.style, &run.content, scale)
+                })
+                .max_by(|left, right| {
+                    left.line_height
+                        .partial_cmp(&right.line_height)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+            let metric_line_height = font_metrics
+                .as_ref()
+                .map(|metrics| metrics.line_height)
+                .unwrap_or(font_size);
+            let line_height = paragraph
+                .style
+                .line_spacing
+                .as_ref()
+                .map(|spacing| {
+                    if spacing.unit == "points" {
+                        (spacing.value * scale).max(font_size)
+                    } else {
+                        (metric_line_height * spacing.value).max(font_size)
+                    }
+                })
+                // PPT paragraphs without an explicit lnSpc use the font's line box.
+                // Explicit spcPct/spcPts values are handled above.
+                .unwrap_or(metric_line_height);
+
+            let mut text = String::new();
+            for run in &paragraph.runs {
+                text.push_str(&run.content);
+            }
+            let default_attrs = Self::cosmic_attrs(first_style, &text, scale, line_height);
+            let mut attrs_list = AttrsList::new(&default_attrs);
+            let mut byte_offset = 0;
+            for run in &paragraph.runs {
+                let end = byte_offset + run.content.len();
+                let run_attrs = Self::cosmic_attrs(&run.style, &run.content, scale, line_height);
+                attrs_list.add_span(byte_offset..end, &run_attrs);
+                byte_offset = end;
+            }
+
             let paragraph_left = paragraph.style.margin_left.max(0.0);
-            let available_width = (inner_width - paragraph_left).max(1.0);
-            let first_line_indent = if paragraph.bullet.is_none() {
+            let text_indent = if paragraph.bullet.is_none() {
+                paragraph.style.indent.max(0.0)
+            } else {
+                0.0
+            };
+            let x = margin_left + paragraph_left;
+            let first_line_offset = if paragraph.bullet.is_none() {
                 paragraph.style.indent
             } else {
                 0.0
             };
+            let available_width = (inner_width - paragraph_left - text_indent).max(1.0);
+            let mut line = BufferLine::new(&text, LineEnding::None, attrs_list, Shaping::Advanced);
+            line.set_align(Some(match paragraph.style.align.as_str() {
+                "center" => Align::Center,
+                "right" => Align::Right,
+                _ => Align::Left,
+            }));
+            let mut buffer = Buffer::new_empty(Metrics::new(font_size, line_height));
+            buffer.lines.push(line);
+            buffer.set_hinting(Hinting::Disabled);
+            buffer.set_size(Some(available_width), Some(100_000.0));
+            // PowerPoint's eaLnBrk allows CJK glyph boundaries as legal break points.
+            // Word-only wrapping leaves long Chinese runs on one line or breaks them at
+            // different places from Office, which changes the total text-box height.
+            buffer.set_wrap(
+                if paragraph.style.east_asian_line_break || Self::is_east_asian_text(&text) {
+                    Wrap::WordOrGlyph
+                } else {
+                    Wrap::Word
+                },
+            );
+            buffer.shape_until_scroll(font_system, false);
 
-            let mut lines: Vec<RichLine> = Vec::new();
-            let mut current = RichLine {
-                fragments: Vec::new(),
-                width: 0.0,
-                height: 0.0,
-                x: 0.0,
-                y: 0.0,
-                bullet: None,
-            };
+            let paragraph_height = buffer
+                .layout_runs()
+                .map(|run| run.line_top + run.line_height)
+                .fold(line_height, f32::max);
 
-            for run in &paragraph.runs {
-                for token in Self::layout_tokens(&run.content) {
-                    if token == "\n" {
-                        lines.push(current);
-                        current = RichLine {
-                            fragments: Vec::new(),
-                            width: 0.0,
-                            height: 0.0,
-                            x: 0.0,
-                            y: 0.0,
-                            bullet: None,
-                        };
-                        continue;
-                    }
+            let bullet_buffer = paragraph.bullet.as_ref().map(|bullet| {
+                let mut bullet_style = first_style.clone();
+                bullet_style.color = bullet.color.clone();
+                let bullet_attrs =
+                    Self::cosmic_attrs(&bullet_style, &bullet.char, scale, line_height);
+                let attrs = AttrsList::new(&bullet_attrs);
+                let bullet_line =
+                    BufferLine::new(&bullet.char, LineEnding::None, attrs, Shaping::Advanced);
+                let mut bullet_buffer = Buffer::new_empty(Metrics::new(font_size, line_height));
+                bullet_buffer.lines.push(bullet_line);
+                bullet_buffer.set_hinting(Hinting::Disabled);
+                bullet_buffer.set_size(Some(font_size * 4.0), Some(line_height * 2.0));
+                bullet_buffer.set_wrap(Wrap::None);
+                bullet_buffer.shape_until_scroll(font_system, false);
+                bullet_buffer
+            });
 
-                    let current_indent = if lines.is_empty() {
-                        first_line_indent.max(0.0)
-                    } else {
-                        0.0
-                    };
-                    let current_width_limit = (available_width - current_indent).max(1.0);
-                    let token_width = self.measure_fragment(&token, &run.style, scale);
-                    if token.trim().is_empty()
-                        && current.width > 0.0
-                        && current.width + token_width > current_width_limit
-                    {
-                        lines.push(current);
-                        current = RichLine {
-                            fragments: Vec::new(),
-                            width: 0.0,
-                            height: 0.0,
-                            x: 0.0,
-                            y: 0.0,
-                            bullet: None,
-                        };
-                        continue;
-                    }
-                    if !token.trim().is_empty()
-                        && current.width > 0.0
-                        && current.width + token_width > current_width_limit
-                    {
-                        lines.push(current);
-                        current = RichLine {
-                            fragments: Vec::new(),
-                            width: 0.0,
-                            height: 0.0,
-                            x: 0.0,
-                            y: 0.0,
-                            bullet: None,
-                        };
-                    }
-                    if token.trim().is_empty() && current.width == 0.0 {
-                        continue;
-                    }
+            layouts.push(CosmicParagraph {
+                buffer,
+                bullet_buffer,
+                x,
+                first_line_offset,
+                bullet_x: margin_left + paragraph_left + paragraph.style.indent,
+                top: cursor_y,
+                hanging_punctuation: paragraph.style.hanging_punctuation,
+                font_alignment: paragraph.style.font_alignment.clone(),
+                font_size,
+                metric_line_height,
+                line_height,
+                font_metrics,
+            });
+            cursor_y += paragraph_height + paragraph.style.space_after * scale;
+        }
 
-                    for ch in token.chars() {
-                        let mut candidate_width =
-                            self.measure_fragment(&ch.to_string(), &run.style, scale);
-                        let mut extends_last = false;
-                        if let Some(last) = current.fragments.last() {
-                            if last.style == run.style {
-                                let candidate = format!("{}{}", last.text, ch);
-                                candidate_width =
-                                    self.measure_fragment(&candidate, &run.style, scale);
-                                extends_last = true;
-                            }
-                        }
-                        let next_width = if extends_last {
-                            current.width - current.fragments.last().map(|f| f.width).unwrap_or(0.0)
-                                + candidate_width
-                        } else {
-                            current.width + candidate_width
-                        };
+        (layouts, cursor_y + margin_bottom)
+    }
 
-                        let current_indent = if lines.is_empty() {
-                            first_line_indent.max(0.0)
-                        } else {
-                            0.0
-                        };
-                        let current_width_limit = (available_width - current_indent).max(1.0);
-                        if next_width > current_width_limit && current.width > 0.0 {
-                            lines.push(current);
-                            current = RichLine {
-                                fragments: Vec::new(),
-                                width: 0.0,
-                                height: 0.0,
-                                x: 0.0,
-                                y: 0.0,
-                                bullet: None,
-                            };
-                            candidate_width =
-                                self.measure_fragment(&ch.to_string(), &run.style, scale);
-                            extends_last = false;
-                        }
+    fn blend_pixel(target: &mut [u8], index: usize, color: Color) {
+        let source_alpha = color.a() as f32 / 255.0;
+        if source_alpha <= 0.0 {
+            return;
+        }
+        let destination_alpha = target[index + 3] as f32 / 255.0;
+        let output_alpha = source_alpha + destination_alpha * (1.0 - source_alpha);
+        if output_alpha <= 0.0 {
+            return;
+        }
+        for (offset, source) in [color.r(), color.g(), color.b()].iter().enumerate() {
+            let destination = target[index + offset] as f32;
+            target[index + offset] = (((*source as f32 * source_alpha)
+                + destination * destination_alpha * (1.0 - source_alpha))
+                / output_alpha)
+                .round() as u8;
+        }
+        target[index + 3] = (output_alpha * 255.0).round() as u8;
+    }
 
-                        if extends_last {
-                            if let Some(last) = current.fragments.last_mut() {
-                                last.text.push(ch);
-                                current.width = current.width - last.width + candidate_width;
-                                last.width = candidate_width;
-                            }
-                        } else {
-                            current.fragments.push(RichFragment {
-                                text: ch.to_string(),
-                                style: run.style.clone(),
-                                width: candidate_width,
-                            });
-                            current.width += candidate_width;
-                        }
-                    }
-                }
-            }
-            lines.push(current);
-
-            for (line_index, mut line) in lines.into_iter().enumerate() {
-                let max_font_size = line
-                    .fragments
-                    .iter()
-                    .map(|fragment| fragment.style.font_size * scale)
-                    .fold(first_style.font_size * scale, f32::max);
-                line.height = paragraph
-                    .style
-                    .line_spacing
-                    .as_ref()
-                    .map(|spacing| {
-                        if spacing.unit == "points" {
-                            (spacing.value * scale).max(max_font_size)
-                        } else {
-                            (max_font_size * spacing.value).max(max_font_size)
-                        }
-                    })
-                    .unwrap_or(max_font_size * 1.2);
-
-                let indent = if line_index == 0 {
-                    first_line_indent
+    #[allow(clippy::too_many_arguments)]
+    fn rasterize_buffer(
+        font_system: &mut FontSystem,
+        swash_cache: &mut SwashCache,
+        buffer: &Buffer,
+        origin_x: f32,
+        origin_y: f32,
+        device_scale: f32,
+        pixels: &mut [u8],
+        bitmap_width: u32,
+        bitmap_height: u32,
+        first_line_offset: f32,
+        hanging_punctuation: bool,
+        font_alignment: &str,
+        font_size: f32,
+        metric_line_height: f32,
+        requested_line_height: f32,
+        font_metrics: Option<FontMetricSample>,
+    ) {
+        for (visual_line_index, run) in buffer.layout_runs().enumerate() {
+            // cosmic-text's line_y is computed from the actual font ascent/descent and
+            // centers that glyph box inside the requested line height. The current sample
+            // uses fontAlgn="auto"; keep the metric-derived baseline instead of inventing
+            // offsets for values whose glyph metrics are not exposed by LayoutRun.
+            let _ = font_alignment;
+            let baseline_y = ((origin_y + run.line_y) * device_scale).round() as i32;
+            #[cfg(debug_assertions)]
+            let mut ink_min_y = f32::INFINITY;
+            #[cfg(debug_assertions)]
+            let mut ink_max_y = f32::NEG_INFINITY;
+            for (glyph_index, glyph) in run.glyphs.iter().enumerate() {
+                let cluster = &run.text[glyph.start..glyph.end];
+                let line_offset = if visual_line_index == 0 {
+                    first_line_offset
                 } else {
                     0.0
                 };
-                let line_left = inner_left + paragraph_left + indent;
-                let line_width = (available_width - indent.max(0.0)).max(1.0);
-                line.x = match paragraph.style.align.as_str() {
-                    "center" => line_left + (line_width - line.width).max(0.0) / 2.0,
-                    "right" => line_left + (line_width - line.width).max(0.0),
-                    _ => line_left,
-                };
-                line.y = cursor_y;
-                if line_index == 0 {
-                    if let Some(bullet) = &paragraph.bullet {
-                        let mut bullet_style = first_style.clone();
-                        bullet_style.color = bullet.color.clone();
-                        line.bullet = Some((
-                            bullet.char.clone(),
-                            bullet_style,
-                            inner_left + paragraph_left + paragraph.style.indent,
-                        ));
+                let hanging_offset = if hanging_punctuation {
+                    let starts_with_hanging = glyph_index == 0
+                        && cluster
+                            .chars()
+                            .next()
+                            .is_some_and(Self::is_hanging_opening_punctuation);
+                    let ends_with_hanging = glyph_index + 1 == run.glyphs.len()
+                        && cluster
+                            .chars()
+                            .last()
+                            .is_some_and(Self::is_hanging_closing_punctuation);
+                    if starts_with_hanging {
+                        -glyph.w * 0.5
+                    } else if ends_with_hanging {
+                        glyph.w * 0.5
+                    } else {
+                        0.0
                     }
-                }
-                max_width = max_width.max(line.width);
-                cursor_y += line.height;
-                positioned_lines.push(line);
+                } else {
+                    0.0
+                };
+                let physical = glyph.physical(
+                    (
+                        (origin_x + line_offset + hanging_offset) * device_scale,
+                        0.0,
+                    ),
+                    device_scale,
+                );
+                let color = glyph.color_opt.unwrap_or_else(|| Color::rgb(0, 0, 0));
+                swash_cache.with_pixels(
+                    font_system,
+                    physical.cache_key,
+                    color,
+                    |offset_x, offset_y, pixel_color| {
+                        let x = physical.x + offset_x;
+                        let y = baseline_y + physical.y + offset_y;
+                        #[cfg(debug_assertions)]
+                        {
+                            ink_min_y = ink_min_y.min((physical.y + offset_y) as f32);
+                            ink_max_y = ink_max_y.max((physical.y + offset_y) as f32);
+                        }
+                        if x < 0 || y < 0 || x >= bitmap_width as i32 || y >= bitmap_height as i32 {
+                            return;
+                        }
+                        let index = ((y as u32 * bitmap_width + x as u32) * 4) as usize;
+                        Self::blend_pixel(pixels, index, pixel_color);
+                    },
+                );
             }
-            cursor_y += paragraph.style.space_after * scale;
-        }
-
-        RichLayout {
-            lines: positioned_lines,
-            height: cursor_y + margin_bottom,
-            max_width,
+            #[cfg(debug_assertions)]
+            {
+                let metrics = font_metrics
+                    .map(|value| {
+                        format!(
+                            "ascent={:.2} descent={:.2} leading={:.2}",
+                            value.ascent, value.descent, value.leading
+                        )
+                    })
+                    .unwrap_or_else(|| "ascent=? descent=? leading=?".to_string());
+                let ink_height = if ink_min_y.is_finite() {
+                    (ink_max_y - ink_min_y + 1.0) / device_scale
+                } else {
+                    0.0
+                };
+                let preview: String = run.text.chars().take(24).collect();
+                web_sys::console::log_1(&JsValue::from_str(&format!(
+                    "[TextLayout] text={:?} line={} fontSize={:.2} {} metricLineHeight={:.2} requestedLineHeight={:.2} layoutLineHeight={:.2} lineY={:.2} lineTop={:.2} inkHeight={:.2}",
+                    preview,
+                    visual_line_index,
+                    font_size,
+                    metrics,
+                    metric_line_height,
+                    requested_line_height,
+                    run.line_height,
+                    run.line_y,
+                    run.line_top,
+                    ink_height
+                )));
+            }
         }
     }
 
-    fn render_rich_text(&self, txt: &TextElement) {
+    fn is_hanging_opening_punctuation(ch: char) -> bool {
+        matches!(
+            ch,
+            '"' | '\''
+                | '('
+                | '['
+                | '{'
+                | '<'
+                | '“'
+                | '‘'
+                | '（'
+                | '【'
+                | '《'
+                | '「'
+                | '『'
+                | '〈'
+                | '〔'
+                | '［'
+                | '｛'
+        )
+    }
+
+    fn is_hanging_closing_punctuation(ch: char) -> bool {
+        matches!(
+            ch,
+            ',' | '.'
+                | ':'
+                | ';'
+                | '!'
+                | '?'
+                | ')'
+                | ']'
+                | '}'
+                | '>'
+                | '，'
+                | '。'
+                | '、'
+                | '：'
+                | '；'
+                | '！'
+                | '？'
+                | '）'
+                | '】'
+                | '》'
+                | '」'
+                | '』'
+                | '〉'
+                | '〕'
+                | '］'
+                | '｝'
+        )
+    }
+
+    fn render_rich_text(&mut self, txt: &TextElement) -> Result<(), JsValue> {
         let body = txt.body.as_ref();
         let available_height = txt.rect.h.max(1.0);
         let mut scale = body
             .map(|value| value.font_scale)
             .unwrap_or(1.0)
             .clamp(0.2, 1.0);
-        let mut layout = self.build_rich_layout(txt, scale);
+        let transform = self.ctx.get_transform()?;
+        let device_scale = ((transform.a() * transform.a() + transform.b() * transform.b()).sqrt()
+            as f32)
+            .max(0.1);
+        let raster_scale = device_scale * MAC_TEXT_OVERSAMPLE;
+        let bitmap_width = (txt.rect.w.max(1.0) * raster_scale).ceil() as u32;
+        let bitmap_height = (txt.rect.h.max(1.0) * raster_scale).ceil() as u32;
+
+        let (font_system_opt, swash_cache) = (&mut self.font_system, &mut self.swash_cache);
+        let font_system = font_system_opt.as_mut().ok_or_else(|| {
+            JsValue::from_str("Rich text rendering requires backend fonts to be registered")
+        })?;
+        let (mut paragraphs, mut layout_height) =
+            Self::build_cosmic_paragraphs(font_system, txt, scale);
 
         if body.map(|value| value.auto_fit.as_str()) == Some("shrink") {
-            while (layout.height > available_height || layout.max_width > txt.rect.w) && scale > 0.2
-            {
+            while layout_height > available_height && scale > 0.2 {
                 scale = (scale - 0.05).max(0.2);
-                layout = self.build_rich_layout(txt, scale);
+                (paragraphs, layout_height) =
+                    Self::build_cosmic_paragraphs(font_system, txt, scale);
             }
         }
 
         let vertical_offset = match body.map(|value| value.vertical_anchor.as_str()) {
-            Some("middle") => (available_height - layout.height).max(0.0) / 2.0,
-            Some("bottom") => (available_height - layout.height).max(0.0),
+            Some("middle") => (available_height - layout_height).max(0.0) / 2.0,
+            Some("bottom") => (available_height - layout_height).max(0.0),
             _ => 0.0,
         };
 
-        self.ctx.set_text_align("left");
-        self.ctx.set_text_baseline("top");
-        for line in &layout.lines {
-            let y = txt.rect.y + line.y + vertical_offset;
-            if let Some((bullet, style, x)) = &line.bullet {
-                self.set_text_font(style, bullet, scale);
-                self.ctx.set_fill_style_str(&style.color);
-                let _ = self.ctx.fill_text(bullet, *x as f64, y as f64);
-            }
-
-            let mut x = line.x;
-            for fragment in &line.fragments {
-                self.set_text_font(&fragment.style, &fragment.text, scale);
-                self.ctx.set_fill_style_str(&fragment.style.color);
-                let _ = self.ctx.fill_text(&fragment.text, x as f64, y as f64);
-                x += fragment.width;
+        let mut pixels = vec![0_u8; bitmap_width as usize * bitmap_height as usize * 4];
+        for paragraph in &mut paragraphs {
+            let top = paragraph.top + vertical_offset;
+            Self::rasterize_buffer(
+                font_system,
+                swash_cache,
+                &paragraph.buffer,
+                paragraph.x,
+                top,
+                raster_scale,
+                &mut pixels,
+                bitmap_width,
+                bitmap_height,
+                paragraph.first_line_offset,
+                paragraph.hanging_punctuation,
+                &paragraph.font_alignment,
+                paragraph.font_size,
+                paragraph.metric_line_height,
+                paragraph.line_height,
+                paragraph.font_metrics,
+            );
+            if let Some(bullet_buffer) = &paragraph.bullet_buffer {
+                Self::rasterize_buffer(
+                    font_system,
+                    swash_cache,
+                    bullet_buffer,
+                    paragraph.bullet_x,
+                    top,
+                    raster_scale,
+                    &mut pixels,
+                    bitmap_width,
+                    bitmap_height,
+                    0.0,
+                    false,
+                    &paragraph.font_alignment,
+                    paragraph.font_size,
+                    paragraph.metric_line_height,
+                    paragraph.line_height,
+                    paragraph.font_metrics,
+                );
             }
         }
+
+        let document = web_sys::window()
+            .and_then(|window| window.document())
+            .ok_or_else(|| {
+                JsValue::from_str("Document is unavailable for text bitmap compositing")
+            })?;
+        let canvas: HtmlCanvasElement = document.create_element("canvas")?.dyn_into()?;
+        canvas.set_width(bitmap_width);
+        canvas.set_height(bitmap_height);
+        let bitmap_ctx: CanvasRenderingContext2d = canvas
+            .get_context("2d")?
+            .ok_or_else(|| JsValue::from_str("Could not create text bitmap context"))?
+            .dyn_into()?;
+        let image_data = ImageData::new_with_u8_clamped_array_and_sh(
+            Clamped(&pixels),
+            bitmap_width,
+            bitmap_height,
+        )?;
+        bitmap_ctx.put_image_data(&image_data, 0.0, 0.0)?;
+        self.ctx.draw_image_with_html_canvas_element_and_dw_and_dh(
+            &canvas,
+            txt.rect.x as f64,
+            txt.rect.y as f64,
+            txt.rect.w as f64,
+            txt.rect.h as f64,
+        )?;
+        Ok(())
     }
 }
 
@@ -389,14 +890,29 @@ mod tests {
     use super::RustPptRenderer;
 
     #[test]
-    fn layout_tokens_keep_words_and_split_east_asian_text() {
+    fn parses_text_colors_for_rasterization() {
+        let solid = RustPptRenderer::parse_text_color("#c00000");
         assert_eq!(
-            RustPptRenderer::layout_tokens("Hello world中文\nnext"),
-            vec!["Hello", " ", "world", "中", "文", "\n", "next"]
+            (solid.r(), solid.g(), solid.b(), solid.a()),
+            (192, 0, 0, 255)
         );
+
+        let translucent = RustPptRenderer::parse_text_color("rgba(1,2,3,0.5)");
+        assert_eq!(
+            (translucent.r(), translucent.g(), translucent.b()),
+            (1, 2, 3)
+        );
+        assert!((126..=128).contains(&translucent.a()));
+    }
+
+    #[test]
+    fn blends_rasterized_glyph_pixels() {
+        let mut target = [0_u8; 4];
+        RustPptRenderer::blend_pixel(&mut target, 0, cosmic_text::Color::rgba(10, 20, 30, 128));
+        assert_eq!((target[0], target[1], target[2]), (10, 20, 30));
+        assert!((127..=129).contains(&target[3]));
     }
 }
-
 #[wasm_bindgen]
 impl RustPptRenderer {
     #[wasm_bindgen(constructor)]
@@ -405,6 +921,7 @@ impl RustPptRenderer {
         Self {
             ctx,
             font_system: None,
+            swash_cache: SwashCache::new(),
             registered_fonts: Vec::new(),
         }
     }
@@ -450,6 +967,7 @@ impl RustPptRenderer {
         }
 
         self.font_system = Some(fs);
+        self.swash_cache = SwashCache::new();
     }
 
     // Render single slide from JSON AST, with images_obj mapping URLs to HTMLImageElements
@@ -498,273 +1016,57 @@ impl RustPptRenderer {
             match element {
                 Element::Shape(shp) => {
                     self.ctx.save();
-                    let is_filled = shp.fill != "transparent";
-                    if is_filled {
-                        self.ctx.set_fill_style_str(&shp.fill);
+                    let has_outer_shadow = shp
+                        .computed_style
+                        .as_ref()
+                        .and_then(|style| style.effects.as_ref())
+                        .and_then(|effects| effects.outer_shadow.as_ref())
+                        .is_some();
+                    let has_effect = shp
+                        .computed_style
+                        .as_ref()
+                        .and_then(|style| style.effects.as_ref())
+                        .map(|effects| effects.outer_shadow.is_some() || effects.glow.is_some())
+                        .unwrap_or(false);
+
+                    if has_effect {
+                        // Office renders outerShdw/glow behind the shape. Draw that pass
+                        // separately so the normal fill and outline do not dilute it.
+                        self.ctx.save();
+                        if has_outer_shadow {
+                            self.apply_shadow_transform(shp);
+                        }
+                        self.apply_shape_effects(shp);
+                        self.paint_shape(shp);
+                        self.ctx.restore();
+                        self.clear_shape_effects();
                     }
 
-                    if shp.shape_type == "rect" {
-                        if is_filled {
-                            self.ctx.fill_rect(
-                                shp.rect.x as f64,
-                                shp.rect.y as f64,
-                                shp.rect.w as f64,
-                                shp.rect.h as f64,
-                            );
-                        }
-                        if let Some(border) = &shp.border {
-                            self.ctx.set_stroke_style_str(&border.color);
-                            self.ctx.set_line_width(border.width as f64);
-                            self.ctx.stroke_rect(
-                                shp.rect.x as f64,
-                                shp.rect.y as f64,
-                                shp.rect.w as f64,
-                                shp.rect.h as f64,
-                            );
-                        }
-                    } else if shp.shape_type == "roundRect" {
-                        let x = shp.rect.x as f64;
-                        let y = shp.rect.y as f64;
-                        let w = shp.rect.w as f64;
-                        let h = shp.rect.h as f64;
-                        let radius = (w.min(h) * 0.13).max(1.0);
-                        self.ctx.begin_path();
-                        self.ctx.move_to(x + radius, y);
-                        self.ctx.line_to(x + w - radius, y);
-                        self.ctx.quadratic_curve_to(x + w, y, x + w, y + radius);
-                        self.ctx.line_to(x + w, y + h - radius);
-                        self.ctx
-                            .quadratic_curve_to(x + w, y + h, x + w - radius, y + h);
-                        self.ctx.line_to(x + radius, y + h);
-                        self.ctx.quadratic_curve_to(x, y + h, x, y + h - radius);
-                        self.ctx.line_to(x, y + radius);
-                        self.ctx.quadratic_curve_to(x, y, x + radius, y);
-                        self.ctx.close_path();
-                        if is_filled {
-                            self.ctx.fill();
-                        }
-                        if let Some(border) = &shp.border {
-                            self.ctx.set_stroke_style_str(&border.color);
-                            self.ctx.set_line_width(border.width as f64);
-                            self.ctx.stroke();
-                        }
-                    } else if shp.shape_type == "ellipse" {
-                        self.ctx.begin_path();
-                        let _ = self.ctx.ellipse(
-                            (shp.rect.x + shp.rect.w / 2.0) as f64,
-                            (shp.rect.y + shp.rect.h / 2.0) as f64,
-                            (shp.rect.w / 2.0) as f64,
-                            (shp.rect.h / 2.0) as f64,
-                            0.0,
-                            0.0,
-                            2.0 * std::f64::consts::PI,
-                        );
-                        if is_filled {
-                            self.ctx.fill();
-                        }
-                        if let Some(border) = &shp.border {
-                            self.ctx.set_stroke_style_str(&border.color);
-                            self.ctx.set_line_width(border.width as f64);
-                            self.ctx.stroke();
-                        }
-                    } else if shp.shape_type == "triangle" {
-                        self.ctx.begin_path();
-                        self.ctx
-                            .move_to((shp.rect.x + shp.rect.w / 2.0) as f64, shp.rect.y as f64);
-                        self.ctx.line_to(
-                            (shp.rect.x + shp.rect.w) as f64,
-                            (shp.rect.y + shp.rect.h) as f64,
-                        );
-                        self.ctx
-                            .line_to(shp.rect.x as f64, (shp.rect.y + shp.rect.h) as f64);
-                        self.ctx.close_path();
-                        if is_filled {
-                            self.ctx.fill();
-                        }
-                        if let Some(border) = &shp.border {
-                            self.ctx.set_stroke_style_str(&border.color);
-                            self.ctx.set_line_width(border.width as f64);
-                            self.ctx.stroke();
-                        }
-                    }
+                    self.paint_shape(shp);
                     self.ctx.restore();
                 }
                 Element::Text(txt) => {
                     self.ctx.save();
-                    if !txt.paragraphs.is_empty() {
-                        self.ctx.begin_path();
-                        self.ctx.rect(
-                            txt.rect.x as f64,
-                            txt.rect.y as f64,
-                            txt.rect.w as f64,
-                            txt.rect.h as f64,
-                        );
-                        self.ctx.clip();
-                        self.render_rich_text(txt);
-                        self.ctx.restore();
-                        continue;
-                    }
-                    self.ctx.set_fill_style_str(&txt.style.color);
-
-                    let font_weight = if txt.style.bold { "bold" } else { "normal" };
-
-                    // Set Canvas font parameters
-                    let font_style = if txt.style.italic { "italic" } else { "normal" };
-                    self.ctx.set_font(&format!(
-                        "{} {} {}px {}",
-                        font_style, font_weight, txt.style.font_size, txt.style.font_family
-                    ));
-
-                    // Alignments
-                    let text_align = match txt.style.align.as_str() {
-                        "center" => "center",
-                        "right" => "right",
-                        _ => "left",
-                    };
-                    self.ctx.set_text_align(text_align);
-                    self.ctx.set_text_baseline("top");
-
-                    // Safety check: Verify that the font database is initialized and has at least one font queryable.
-                    // If it is empty, we fall back gracefully to standard Canvas text wrapping.
-                    let font_system = match &mut self.font_system {
-                        Some(fs) => {
-                            let query = cosmic_text::fontdb::Query {
-                                families: &[cosmic_text::fontdb::Family::SansSerif],
-                                ..Default::default()
-                            };
-                            if fs.db().query(&query).is_none() {
-                                None
-                            } else {
-                                Some(fs)
-                            }
-                        }
-                        None => None,
-                    };
-
-                    let font_system = match font_system {
-                        Some(fs) => fs,
-                        None => {
-                            let _ = web_sys::console::warn_1(&JsValue::from_str(
-                                "[WASM Warning] WASM Font Database is empty or lacks a valid SansSerif fallback font. Falling back to native browser Canvas renderer with auto-wrap."
-                            ));
-
-                            // Native canvas wrapping layout
-                            let pad_x = if txt.body.is_some() { 0.0 } else { 8.0 };
-                            let max_width = (txt.rect.w - pad_x * 2.0) as f64;
-                            let mut wrapped_lines = Vec::new();
-                            let raw_lines = txt.content.split('\n');
-
-                            for raw_line in raw_lines {
-                                if raw_line.is_empty() {
-                                    wrapped_lines.push("".to_string());
-                                    continue;
-                                }
-                                let mut current_line = String::new();
-                                for c in raw_line.chars() {
-                                    let test_line = if current_line.is_empty() {
-                                        c.to_string()
-                                    } else {
-                                        format!("{}{}", current_line, c)
-                                    };
-                                    if let Ok(metrics) = self.ctx.measure_text(&test_line) {
-                                        if metrics.width() > max_width && !current_line.is_empty() {
-                                            wrapped_lines.push(current_line);
-                                            current_line = c.to_string();
-                                        } else {
-                                            current_line = test_line;
-                                        }
-                                    } else {
-                                        current_line = test_line;
-                                    }
-                                }
-                                if !current_line.is_empty() {
-                                    wrapped_lines.push(current_line);
-                                }
-                            }
-
-                            let line_height = (txt.style.font_size * 1.25) as f64;
-                            let pad_y = if txt.body.is_some() { 0.0 } else { 4.0 };
-                            let start_y = txt.rect.y as f64 + pad_y;
-                            for (i, line) in wrapped_lines.iter().enumerate() {
-                                let y = start_y + (i as f64) * line_height;
-                                let x = match text_align {
-                                    "center" => (txt.rect.x + txt.rect.w / 2.0) as f64,
-                                    "right" => (txt.rect.x + txt.rect.w) as f64,
-                                    _ => txt.rect.x as f64 + pad_x as f64,
-                                };
-                                let _ = self.ctx.fill_text(line, x, y);
-                            }
-                            self.ctx.restore();
-                            continue;
-                        }
-                    };
-
-                    // 2a. Perform text layout using cosmic-text
-                    let font_size = txt.style.font_size;
-                    let line_height = font_size * 1.25;
-                    let mut buffer = Buffer::new(font_system, Metrics::new(font_size, line_height));
-
-                    let pad_x = if txt.body.is_some() { 0.0 } else { 8.0 };
-                    let pad_y = if txt.body.is_some() { 0.0 } else { 4.0 };
-                    let wrap_w = txt.rect.w - pad_x * 2.0;
-                    let wrap_h = txt.rect.h - pad_y * 2.0;
-
-                    // Set layout constraints
-                    buffer.set_size(font_system, wrap_w, wrap_h);
-
-                    // Shape with the exact family supplied by the backend-resolved AST.
-                    let mut attrs = Attrs::new().family(Family::Name(&txt.style.font_family));
-                    if txt.style.bold {
-                        attrs = attrs.weight(Weight::BOLD);
-                    }
-                    if txt.style.italic {
-                        attrs = attrs.style(Style::Italic);
-                    }
-
-                    // Feed content & layout
-                    buffer.set_text(font_system, &txt.content, attrs, Shaping::Advanced);
-                    buffer.shape_until_scroll(font_system);
-
-                    // 2b. Draw wrapped layout lines
-                    let start_x = txt.rect.x as f64 + pad_x as f64;
-                    let start_y = txt.rect.y as f64 + pad_y as f64;
-
-                    for run in buffer.layout_runs() {
-                        let paragraph_text = &buffer.lines[run.line_i].text();
-
-                        // Extract run substring via glyph boundaries
-                        let mut min_index = paragraph_text.len();
-                        let mut max_index = 0;
-                        for glyph in run.glyphs {
-                            let start = glyph.start;
-                            let end = glyph.end;
-                            if start < min_index {
-                                min_index = start;
-                            }
-                            if end > max_index {
-                                max_index = end;
-                            }
-                        }
-
-                        let line_text = if min_index < max_index {
-                            &paragraph_text[min_index..max_index]
-                        } else {
-                            ""
-                        };
-
-                        let y = start_y + run.line_y as f64;
-                        let x = match text_align {
-                            "center" => start_x + (wrap_w / 2.0) as f64,
-                            "right" => start_x + wrap_w as f64,
-                            _ => start_x,
-                        };
-
-                        let _ = self.ctx.fill_text(line_text, x, y);
-                    }
+                    self.ctx.begin_path();
+                    self.ctx.rect(
+                        txt.rect.x as f64,
+                        txt.rect.y as f64,
+                        txt.rect.w as f64,
+                        txt.rect.h as f64,
+                    );
+                    self.ctx.clip();
+                    let normalized = Self::normalize_text_element(txt);
+                    self.render_rich_text(&normalized)?;
                     self.ctx.restore();
                 }
                 Element::Image(img) => {
                     self.ctx.save();
+                    self.ctx.set_image_smoothing_enabled(true);
+                    let _ = js_sys::Reflect::set(
+                        self.ctx.as_ref(),
+                        &JsValue::from_str("imageSmoothingQuality"),
+                        &JsValue::from_str("high"),
+                    );
                     if let Some(img_val) =
                         js_sys::Reflect::get(images_obj, &JsValue::from_str(&img.url)).ok()
                     {

@@ -1,6 +1,6 @@
 import format from "xml-formatter";
 import PptViewer from "./index";
-import { PresentationAST, Slide } from "./pptx-parser";
+import { PptVirtualDocument, Slide } from "./pptx-parser";
 import "./style.css";
 
 // Pretty-print XML text using standard 'xml-formatter' library
@@ -19,8 +19,9 @@ function prettyPrintXml(xmlString: string, indentString: string = "  "): string 
 }
 
 // Setup Mock Presentation Demo with embedded mock XML strings
-const mockPresentation: PresentationAST = {
+const mockPresentation: PptVirtualDocument = {
   size: { width: 1920, height: 1080 },
+  styleRegistry: { rules: {} },
   slides: [
     {
       id: "slide_1",
@@ -66,7 +67,7 @@ const mockPresentation: PresentationAST = {
               <a:rPr sz="6400" b="1">
                 <a:solidFill><a:srgbClr val="38BDF8"/></a:solidFill>
               </a:rPr>
-              <a:t>PPTX AST &amp; WASM Rendering Engine</a:t>
+              <a:t>PPTX Virtual DOM &amp; WASM Rendering Engine</a:t>
             </a:r>
           </a:p>
           <a:p>
@@ -102,7 +103,7 @@ const mockPresentation: PresentationAST = {
           type: "text",
           id: "title",
           rect: { x: 300, y: 350, w: 1320, h: 200 },
-          content: "PPTX AST & WASM Rendering Engine",
+          content: "PPTX Virtual DOM & WASM Rendering Engine",
           style: { fontSize: 64, color: "#38bdf8", bold: true, align: "center" }
         },
         {
@@ -225,7 +226,7 @@ const mockPresentation: PresentationAST = {
           type: "text",
           id: "col_3_txt",
           rect: { x: 1350, y: 280, w: 440, h: 540 },
-          content: "Single Source of Truth\n\nEverything you see is parsed from an AST JSON Virtual DOM. Extremely flexible for interactive editors, dragging, and resizing.",
+          content: "Single Source of Truth\n\nEverything you see is parsed into a JSON Virtual DOM. Extremely flexible for interactive editors, dragging, and resizing.",
           style: { fontSize: 24, color: "#e2e8f0", bold: false, align: "left" }
         }
       ]
@@ -389,7 +390,7 @@ document.addEventListener("DOMContentLoaded", () => {
         }
       });
 
-      // Display current slide AST JSON (excluding rawXml to keep it clean)
+      // Display the current slide Virtual DOM (excluding rawXml to keep it clean).
       const cleanAst = { ...ast };
       delete (cleanAst as any).rawXml;
       astInspector.textContent = JSON.stringify(cleanAst, null, 2);
@@ -427,7 +428,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // Load Demo triggers
   const loadDemo = () => {
-    viewer.loadAST(mockPresentation);
+    viewer.loadVirtualDocument(mockPresentation);
   };
 
   const btnLoadDemo = document.getElementById("btn-load-demo");

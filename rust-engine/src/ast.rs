@@ -64,6 +64,8 @@ pub struct TextStyle {
     pub east_asian_font_family: String,
     #[serde(default)]
     pub italic: bool,
+    #[serde(rename = "letterSpacing", default)]
+    pub letter_spacing: f32,
 }
 
 fn default_align() -> String {
@@ -87,12 +89,22 @@ pub struct ParagraphStyle {
     #[serde(rename = "marginLeft")]
     pub margin_left: f32,
     pub indent: f32,
+    #[serde(rename = "eastAsianLineBreak", default)]
+    pub east_asian_line_break: bool,
+    #[serde(rename = "hangingPunctuation", default)]
+    pub hanging_punctuation: bool,
+    #[serde(rename = "fontAlignment", default = "default_font_alignment")]
+    pub font_alignment: String,
     #[serde(rename = "lineSpacing", default)]
     pub line_spacing: Option<LineSpacing>,
     #[serde(rename = "spaceBefore", default)]
     pub space_before: f32,
     #[serde(rename = "spaceAfter", default)]
     pub space_after: f32,
+}
+
+fn default_font_alignment() -> String {
+    "auto".to_string()
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -144,6 +156,87 @@ pub struct Border {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(tag = "type")]
+pub enum FillStyle {
+    #[serde(rename = "none")]
+    None,
+    #[serde(rename = "solid")]
+    Solid { color: String },
+    #[serde(rename = "gradient")]
+    Gradient {
+        kind: String,
+        stops: Vec<GradientStop>,
+        #[serde(default)]
+        angle: Option<f32>,
+        #[serde(rename = "rotateWithShape", default)]
+        rotate_with_shape: Option<bool>,
+    },
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct GradientStop {
+    pub position: f32,
+    pub color: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct LineStyle {
+    pub fill: FillStyle,
+    pub width: f32,
+    #[serde(default)]
+    pub dash: Option<String>,
+    #[serde(default)]
+    pub cap: Option<String>,
+    #[serde(default)]
+    pub join: Option<String>,
+    #[serde(default)]
+    pub compound: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ShadowStyle {
+    pub color: String,
+    pub opacity: f32,
+    pub blur: f32,
+    pub distance: f32,
+    pub direction: f32,
+    #[serde(rename = "scaleX", default = "default_shadow_scale")]
+    pub scale_x: f32,
+    #[serde(rename = "scaleY", default = "default_shadow_scale")]
+    pub scale_y: f32,
+    #[serde(default)]
+    pub alignment: Option<String>,
+}
+
+fn default_shadow_scale() -> f32 {
+    1.0
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct GlowStyle {
+    pub color: String,
+    pub opacity: f32,
+    pub radius: f32,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct EffectStyle {
+    #[serde(rename = "outerShadow", default)]
+    pub outer_shadow: Option<ShadowStyle>,
+    #[serde(default)]
+    pub glow: Option<GlowStyle>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ComputedShapeStyle {
+    pub fill: FillStyle,
+    #[serde(default)]
+    pub line: Option<LineStyle>,
+    #[serde(default)]
+    pub effects: Option<EffectStyle>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ShapeElement {
     pub id: String,
     pub rect: Rect,
@@ -152,6 +245,8 @@ pub struct ShapeElement {
     pub fill: String,
     #[serde(default)]
     pub border: Option<Border>,
+    #[serde(rename = "computedStyle", default)]
+    pub computed_style: Option<ComputedShapeStyle>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -231,6 +326,55 @@ mod tests {
             1.2
         );
         assert_eq!(text.paragraphs[0].style.space_after, 3.0);
+        assert!(!text.paragraphs[0].style.east_asian_line_break);
+        assert!(!text.paragraphs[0].style.hanging_punctuation);
+        assert_eq!(text.paragraphs[0].style.font_alignment, "auto");
         assert_eq!(text.body.as_ref().unwrap().margin_left, 8.0);
+    }
+
+    #[test]
+    fn computed_shape_style_deserializes() {
+        let json = r##"{
+            "id":"slide_1",
+            "elements":[{
+                "type":"shape",
+                "id":"shape_1",
+                "rect":{"x":10,"y":20,"w":300,"h":80},
+                "shapeType":"roundRect",
+                "fill":"#ffffff",
+                "computedStyle":{
+                    "fill":{"type":"gradient","kind":"radial","stops":[
+                        {"position":0,"color":"#ffffff"},
+                        {"position":1,"color":"#ff0000"}
+                    ]},
+                    "line":{"fill":{"type":"solid","color":"#222222"},"width":2},
+                    "effects":{"outerShadow":{
+                        "color":"#000000","opacity":0.4,"blur":8,"distance":3,"direction":45
+                    }}
+                }
+            }]
+        }"##;
+
+        let slide: Slide = serde_json::from_str(json).expect("shape style should deserialize");
+        let Element::Shape(shape) = &slide.elements[0] else {
+            panic!("expected shape element");
+        };
+        let style = shape.computed_style.as_ref().unwrap();
+        let super::FillStyle::Gradient { stops, .. } = &style.fill else {
+            panic!("expected gradient fill");
+        };
+        assert_eq!(stops.len(), 2);
+        assert_eq!(style.line.as_ref().unwrap().width, 2.0);
+        assert_eq!(
+            style
+                .effects
+                .as_ref()
+                .unwrap()
+                .outer_shadow
+                .as_ref()
+                .unwrap()
+                .opacity,
+            0.4
+        );
     }
 }
