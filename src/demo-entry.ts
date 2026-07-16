@@ -1,22 +1,6 @@
-import format from "xml-formatter";
 import PptViewer from "./index";
-import { PptVirtualDocument, Slide } from "./pptx-parser";
+import { PptVirtualDocument } from "./pptx-parser";
 import "./style.css";
-
-// Pretty-print XML text using standard 'xml-formatter' library
-function prettyPrintXml(xmlString: string, indentString: string = "  "): string {
-  if (!xmlString) return "No XML data available for this slide.";
-  try {
-    return format(xmlString, {
-      indentation: indentString,
-      collapseContent: true,
-      lineSeparator: "\n"
-    });
-  } catch (err) {
-    console.error("xml-formatter failed, returning raw XML string:", err);
-    return xmlString;
-  }
-}
 
 // Setup Mock Presentation Demo with embedded mock XML strings
 const mockPresentation: PptVirtualDocument = {
@@ -328,51 +312,20 @@ document.addEventListener("DOMContentLoaded", () => {
   const btnPrev = document.getElementById("btn-prev") as HTMLButtonElement;
   const btnNext = document.getElementById("btn-next") as HTMLButtonElement;
   const slideList = document.getElementById("slide-list");
-  
-  // Inspectors
-  const astInspector = document.getElementById("ast-inspector");
-  const xmlInspector = document.getElementById("xml-inspector");
-  
-  // Tab buttons
-  const tabBtnJson = document.getElementById("tab-btn-json") as HTMLButtonElement;
-  const tabBtnXml = document.getElementById("tab-btn-xml") as HTMLButtonElement;
+  const sidebarCount = document.getElementById("sidebar-count");
+  const debugTextBoxes = document.getElementById("debug-text-boxes") as HTMLInputElement;
+  const fileUploader = document.getElementById("file-uploader") as HTMLInputElement;
 
-  if (!container || !welcomeView || !pageIndicator || !btnPrev || !btnNext || !slideList || !astInspector || !xmlInspector || !tabBtnJson || !tabBtnXml) {
+  if (!container || !welcomeView || !pageIndicator || !btnPrev || !btnNext || !slideList || !sidebarCount || !debugTextBoxes || !fileUploader) {
     console.error("Missing required DOM elements");
     return;
   }
 
-  // Hook up Inspector Tab Toggle
-  tabBtnJson.onclick = () => {
-    tabBtnJson.classList.add("active");
-    tabBtnJson.style.color = "#3b82f6";
-    tabBtnJson.style.borderBottomColor = "#3b82f6";
-    
-    tabBtnXml.classList.remove("active");
-    tabBtnXml.style.color = "#6b7280";
-    tabBtnXml.style.borderBottomColor = "transparent";
-    
-    astInspector.style.display = "block";
-    xmlInspector.style.display = "none";
-  };
-
-  tabBtnXml.onclick = () => {
-    tabBtnXml.classList.add("active");
-    tabBtnXml.style.color = "#3b82f6";
-    tabBtnXml.style.borderBottomColor = "#3b82f6";
-    
-    tabBtnJson.classList.remove("active");
-    tabBtnJson.style.color = "#6b7280";
-    tabBtnJson.style.borderBottomColor = "transparent";
-    
-    xmlInspector.style.display = "block";
-    astInspector.style.display = "none";
-  };
-
   // Initialize Viewer
   const viewer = new PptViewer({
     container,
-    onSlideChange: (index, ast) => {
+    debugTextBoxes: debugTextBoxes.checked,
+    onSlideChange: (index) => {
       // Update page indicator
       pageIndicator.textContent = `Slide ${index + 1} / ${viewer.getSlidesCount()}`;
       
@@ -390,18 +343,11 @@ document.addEventListener("DOMContentLoaded", () => {
         }
       });
 
-      // Display the current slide Virtual DOM (excluding rawXml to keep it clean).
-      const cleanAst = { ...ast };
-      delete (cleanAst as any).rawXml;
-      astInspector.textContent = JSON.stringify(cleanAst, null, 2);
-      
-      // Display current slide formatted XML data
-      tabBtnXml.textContent = `Raw XML (${ast.id}.xml)`;
-      xmlInspector.textContent = prettyPrintXml(ast.rawXml || "");
     },
     onLoadComplete: (ast) => {
       // Hide welcome view
       welcomeView.style.display = "none";
+      sidebarCount.textContent = ast.slides.length.toString();
       
       // Populate Slide list sidebar
       slideList.innerHTML = "";
@@ -437,30 +383,31 @@ document.addEventListener("DOMContentLoaded", () => {
   const btnWelcomeDemo = document.getElementById("btn-welcome-demo");
   if (btnWelcomeDemo) btnWelcomeDemo.onclick = loadDemo;
 
+  const btnWelcomeUpload = document.getElementById("btn-welcome-upload");
+  if (btnWelcomeUpload) btnWelcomeUpload.onclick = () => fileUploader?.click();
+
   // Controls
   btnPrev.onclick = () => viewer.prevSlide();
   btnNext.onclick = () => viewer.nextSlide();
+  debugTextBoxes.onchange = () => viewer.setDebugTextBoxes(debugTextBoxes.checked);
 
   // File Uploader
-  const fileUploader = document.getElementById("file-uploader") as HTMLInputElement;
-  if (fileUploader) {
-    fileUploader.onchange = async (e) => {
-      const file = (e.target as HTMLInputElement).files?.[0];
-      if (!file) return;
+  fileUploader.onchange = async (e) => {
+    const file = (e.target as HTMLInputElement).files?.[0];
+    if (!file) return;
 
-      const reader = new FileReader();
-      reader.onload = async (evt) => {
-        try {
-          if (evt.target?.result instanceof ArrayBuffer) {
-            await viewer.loadPptx(evt.target.result);
-          }
-        } catch (err: any) {
-          alert(`Error loading PPTX: ${err.message}`);
+    const reader = new FileReader();
+    reader.onload = async (evt) => {
+      try {
+        if (evt.target?.result instanceof ArrayBuffer) {
+          await viewer.loadPptx(evt.target.result);
         }
-      };
-      reader.readAsArrayBuffer(file);
+      } catch (err: any) {
+        alert(`Error loading PPTX: ${err.message}`);
+      }
     };
-  }
+    reader.readAsArrayBuffer(file);
+  };
 
   // Drag & Drop
   const dropzone = document.getElementById("dropzone");

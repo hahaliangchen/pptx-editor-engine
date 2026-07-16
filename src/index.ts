@@ -13,6 +13,7 @@ export interface ViewerOptions {
   width?: number; // CSS width
   height?: number; // CSS height
   fontBackendUrl?: string;
+  debugTextBoxes?: boolean;
   onSlideChange?: (slideIndex: number, slide: Slide) => void;
   onLoadComplete?: (document: PptVirtualDocument) => void;
 }
@@ -24,6 +25,12 @@ interface FontRequest {
   eastAsian: boolean;
 }
 
+interface RenderedSlideSnapshot {
+  width: number;
+  height: number;
+  canvas: HTMLCanvasElement;
+}
+
 export default class PptViewer {
   private container: HTMLElement;
   private canvas: HTMLCanvasElement;
@@ -33,6 +40,8 @@ export default class PptViewer {
   private presentation: PptVirtualDocument | null = null;
   private currentSlideIndex: number = 0;
   private imageCache: Record<string, HTMLImageElement> = {};
+  private slideJsonCache = new Map<string, string>();
+  private renderedSlideCache = new Map<string, RenderedSlideSnapshot>();
   private fontBackendUrl: string;
   private engineReady: Promise<void>;
   private fontCatalogPromise: Promise<string[]> | null = null;
@@ -40,6 +49,8 @@ export default class PptViewer {
   private fontLoads = new Map<string, Promise<void>>();
   private preferredWidth?: number;
   private preferredHeight?: number;
+  private debugTextBoxes: boolean;
+  private renderEpoch = 0;
   
   // Callbacks
   private onSlideChange?: (slideIndex: number, slide: Slide) => void;
@@ -51,6 +62,7 @@ export default class PptViewer {
     this.onLoadComplete = options.onLoadComplete;
     this.preferredWidth = options.width;
     this.preferredHeight = options.height;
+    this.debugTextBoxes = options.debugTextBoxes ?? false;
     this.fontBackendUrl = (options.fontBackendUrl || "http://127.0.0.1:8080").replace(/\/$/, "");
 
     // Create Canvas element
@@ -122,20 +134,20 @@ export default class PptViewer {
 
   private collectPresentationFonts(document: PptVirtualDocument): FontRequest[] {
     const requests = new Map<string, FontRequest>();
+    const addFamily = (
+      family: string | undefined,
+      eastAsian: boolean,
+      bold = false,
+      italic = false
+    ) => {
+      if (!family) return;
+      const request: FontRequest = { family, bold, italic, eastAsian };
+      const key = `${family.toLowerCase()}|${request.bold}|${request.italic}|${eastAsian}`;
+      requests.set(key, request);
+    };
     const addStyle = (style: { fontFamily?: string; eastAsianFontFamily?: string; bold: boolean; italic?: boolean }) => {
-      const add = (family: string | undefined, eastAsian: boolean) => {
-        if (!family) return;
-        const request: FontRequest = {
-          family,
-          bold: style.bold,
-          italic: style.italic || false,
-          eastAsian
-        };
-        const key = `${family.toLowerCase()}|${request.bold}|${request.italic}|${eastAsian}`;
-        requests.set(key, request);
-      };
-      add(style.fontFamily, false);
-      add(style.eastAsianFontFamily, true);
+      addFamily(style.fontFamily, false, style.bold, style.italic || false);
+      addFamily(style.eastAsianFontFamily, true, style.bold, style.italic || false);
     };
 
     for (const slide of document.slides) {
@@ -144,6 +156,7 @@ export default class PptViewer {
         addStyle(element.style);
         for (const paragraph of element.paragraphs || []) {
           for (const run of paragraph.runs) addStyle(run.style);
+          addFamily(paragraph.bullet?.fontFamily, false);
         }
       }
     }
@@ -220,6 +233,10 @@ export default class PptViewer {
         applyBackendFamily(element.style);
         for (const paragraph of element.paragraphs || []) {
           for (const run of paragraph.runs) applyBackendFamily(run.style);
+          if (paragraph.bullet?.fontFamily) {
+            paragraph.bullet.fontFamily = latinFallbacks.get(paragraph.bullet.fontFamily.toLowerCase())
+              || paragraph.bullet.fontFamily;
+          }
         }
       }
     }
@@ -236,6 +253,8 @@ export default class PptViewer {
     await this.ensurePresentationFonts(this.presentation);
     this.currentSlideIndex = 0;
     this.imageCache = {}; // Clear old image cache
+    this.slideJsonCache.clear();
+    this.renderedSlideCache.clear();
     
     if (this.onLoadComplete) {
       this.onLoadComplete(this.presentation);
@@ -252,6 +271,8 @@ export default class PptViewer {
     await this.ensurePresentationFonts(document);
     this.currentSlideIndex = 0;
     this.imageCache = {};
+    this.slideJsonCache.clear();
+    this.renderedSlideCache.clear();
     
     if (this.onLoadComplete) {
       this.onLoadComplete(this.presentation);
@@ -309,11 +330,22 @@ export default class PptViewer {
     return this.presentation.slides[this.currentSlideIndex];
   }
 
+  public setDebugTextBoxes(enabled: boolean): void {
+    if (this.debugTextBoxes === enabled) return;
+    this.debugTextBoxes = enabled;
+    this.resizeAndRedraw();
+  }
+
+  public isDebugTextBoxesEnabled(): boolean {
+    return this.debugTextBoxes;
+  }
+
   private async renderCurrentSlide() {
     if (!this.presentation || !this.renderer) return;
 
     const slide = this.getCurrentSlideAST();
     if (!slide) return;
+    const renderEpoch = ++this.renderEpoch;
 
     // Trigger callback
     if (this.onSlideChange) {
@@ -334,14 +366,43 @@ export default class PptViewer {
 
     await Promise.all(loadPromises);
 
+    // A rapid click sequence may finish image loading out of order. Drop a
+    // stale request so it cannot render over the newest selected slide.
+    if (renderEpoch !== this.renderEpoch) return;
+
     // 2. Setup canvas dimensions and scale
-    this.resizeAndRedraw();
+    this.resizeAndRedraw(slide);
   }
 
-  private resizeAndRedraw() {
+  private serializeSlideForRenderer(slide: Slide): string {
+    const cached = this.slideJsonCache.get(slide.id);
+    if (cached) return cached;
+
+    // rawXml is only for the inspector. Rust deserializes id/elements and
+    // should not receive the complete source XML on every page switch.
+    const json = JSON.stringify({ id: slide.id, elements: slide.elements });
+    this.slideJsonCache.set(slide.id, json);
+    return json;
+  }
+
+  private cacheRenderedSlide(slide: Slide): void {
+    const snapshot = document.createElement("canvas");
+    snapshot.width = this.canvas.width;
+    snapshot.height = this.canvas.height;
+    const snapshotContext = snapshot.getContext("2d");
+    if (!snapshotContext) return;
+    snapshotContext.drawImage(this.canvas, 0, 0);
+    this.renderedSlideCache.set(slide.id, {
+      width: this.canvas.width,
+      height: this.canvas.height,
+      canvas: snapshot
+    });
+  }
+
+  private resizeAndRedraw(slideOverride?: Slide) {
     if (!this.presentation || !this.renderer) return;
 
-    const slide = this.getCurrentSlideAST();
+    const slide = slideOverride || this.getCurrentSlideAST();
     if (!slide) return;
 
     const logicalSize = this.presentation.size;
@@ -382,8 +443,13 @@ export default class PptViewer {
 
     // Device Pixel Ratio scaling for Retina screens (sharp rendering)
     const dpr = window.devicePixelRatio || 1;
-    this.canvas.width = Math.max(1, Math.round(cssWidth * dpr));
-    this.canvas.height = Math.max(1, Math.round(cssHeight * dpr));
+    const pixelWidth = Math.max(1, Math.round(cssWidth * dpr));
+    const pixelHeight = Math.max(1, Math.round(cssHeight * dpr));
+    if (this.canvas.width !== pixelWidth || this.canvas.height !== pixelHeight) {
+      this.canvas.width = pixelWidth;
+      this.canvas.height = pixelHeight;
+      this.renderedSlideCache.clear();
+    }
 
     this.ctx.save();
     
@@ -394,15 +460,49 @@ export default class PptViewer {
     );
     const offsetX = (this.canvas.width - logicalSize.width * scale) / 2;
     const offsetY = (this.canvas.height - logicalSize.height * scale) / 2;
-    this.ctx.setTransform(scale, 0, 0, scale, offsetX, offsetY);
+    const cached = this.renderedSlideCache.get(slide.id);
+    const hasCachedSlide = cached
+      && cached.width === this.canvas.width
+      && cached.height === this.canvas.height;
 
-    // Call Rust WASM renderer
-    try {
-      this.renderer.render_slide(JSON.stringify(slide), this.imageCache);
-    } catch (err) {
-      console.error("Error during Rust rendering:", err);
+    if (hasCachedSlide) {
+      this.ctx.setTransform(1, 0, 0, 1, 0, 0);
+      this.ctx.drawImage(cached.canvas, 0, 0);
+      this.ctx.setTransform(scale, 0, 0, scale, offsetX, offsetY);
+    } else {
+      this.ctx.setTransform(scale, 0, 0, scale, offsetX, offsetY);
+
+      try {
+        this.renderer.render_slide(this.serializeSlideForRenderer(slide), this.imageCache);
+        this.cacheRenderedSlide(slide);
+      } catch (err) {
+        console.error("Error during Rust rendering:", err);
+      }
     }
 
+    if (this.debugTextBoxes) {
+      this.drawDebugTextBoxes(slide);
+    }
+
+    this.ctx.restore();
+  }
+
+  private drawDebugTextBoxes(slide: Slide): void {
+    this.ctx.save();
+    this.ctx.strokeStyle = "#000000";
+    const transform = this.ctx.getTransform();
+    const deviceScale = Math.hypot(transform.a, transform.b);
+    this.ctx.lineWidth = 1 / Math.max(deviceScale, 0.1);
+    this.ctx.setLineDash([5, 3]);
+    for (const element of slide.elements) {
+      if (element.type !== "text" || !element.content.trim()) continue;
+      this.ctx.strokeRect(
+        element.rect.x,
+        element.rect.y,
+        element.rect.w,
+        element.rect.h
+      );
+    }
     this.ctx.restore();
   }
 

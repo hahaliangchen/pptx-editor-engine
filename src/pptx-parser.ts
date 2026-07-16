@@ -1,291 +1,52 @@
 import JSZip from "jszip";
 
-// PPT Virtual DOM interfaces
-export interface Rect {
-  x: number;
-  y: number;
-  w: number;
-  h: number;
-}
+import {
+  Border,
+  ComputedRunStyle,
+  ComputedShapeStyle,
+  EffectStyle,
+  FillStyle,
+  GradientStop,
+  ImageElement,
+  LineStyle,
+  ParagraphStyle,
+  PlaceholderContext,
+  PlaceholderDescriptor,
+  PptVirtualDocument,
+  PresentationSize,
+  Rect,
+  ShapeElement,
+  ShapeStyleProperty,
+  Slide,
+  SlideElement,
+  StyleRegistry,
+  StyleRule,
+  StyleSourceKind,
+  TextBodyProperties,
+  TextElement,
+  TextInheritanceContext,
+  TextParagraph,
+  TextRun,
+  TextStyle,
+  ThemeStyleMatrix,
+  TransformState
+} from "./pptx-virtual-dom";
+import {
+  getDirectChild,
+  getDirectChildren,
+  hasLocalName,
+  querySelector,
+  querySelectorAll
+} from "./pptx-xml";
+import { PptxStyleResolver } from "./pptx-style-resolver";
 
-export interface TextStyle {
-  fontSize: number;
-  color: string;
-  bold: boolean;
-  align: "left" | "center" | "right";
-  fontFamily?: string;
-  eastAsianFontFamily?: string;
-  italic?: boolean;
-  letterSpacing?: number;
-}
-
-export interface TextRun {
-  content: string;
-  style: TextStyle;
-}
-
-export interface ParagraphStyle {
-  align: "left" | "center" | "right";
-  level: number;
-  marginLeft: number;
-  indent: number;
-  // OOXML paragraph flags that affect East Asian line breaking and line layout.
-  eastAsianLineBreak?: boolean;
-  hangingPunctuation?: boolean;
-  fontAlignment?: "auto" | "baseline" | "top" | "center" | "bottom";
-  lineSpacing?: {
-    unit: "percent" | "points";
-    value: number;
-  };
-  spaceBefore?: number;
-  spaceAfter?: number;
-}
-
-export interface TextParagraph {
-  runs: TextRun[];
-  style: ParagraphStyle;
-  bullet?: {
-    char: string;
-    color: string;
-  };
-}
-
-export interface TextBodyProperties {
-  marginLeft: number;
-  marginRight: number;
-  marginTop: number;
-  marginBottom: number;
-  verticalAnchor: "top" | "middle" | "bottom";
-  autoFit: "none" | "shape" | "shrink";
-  fontScale?: number;
-}
-
-export interface TextElement {
-  type: "text";
-  id: string;
-  rect: Rect;
-  content: string;
-  style: TextStyle;
-  paragraphs?: TextParagraph[];
-  body?: TextBodyProperties;
-}
-
-export interface Border {
-  color: string;
-  width: number;
-}
-
-export interface GradientStop {
-  position: number;
-  color: string;
-}
-
-export type FillStyle =
-  | { type: "none" }
-  | { type: "solid"; color: string }
-  | {
-      type: "gradient";
-      kind: "linear" | "radial";
-      stops: GradientStop[];
-      angle?: number;
-      rotateWithShape?: boolean;
-    };
-
-export interface LineStyle {
-  fill: FillStyle;
-  width: number;
-  dash?: string;
-  cap?: string;
-  join?: string;
-  compound?: string;
-}
-
-export interface ShadowStyle {
-  color: string;
-  opacity: number;
-  blur: number;
-  distance: number;
-  direction: number;
-  scaleX?: number;
-  scaleY?: number;
-  alignment?: string;
-}
-
-export interface GlowStyle {
-  color: string;
-  opacity: number;
-  radius: number;
-}
-
-export interface EffectStyle {
-  outerShadow?: ShadowStyle;
-  glow?: GlowStyle;
-}
-
-export interface ComputedShapeStyle {
-  fill: FillStyle;
-  line?: LineStyle;
-  effects?: EffectStyle;
-}
-
-export type StyleSourceKind = "theme" | "master" | "layout" | "placeholder" | "shape";
-export type ShapeStyleProperty = "fill" | "line" | "effects";
-
-export interface StyleRule {
-  id: string;
-  source: {
-    kind: StyleSourceKind;
-    part: string;
-    nodeId?: string;
-  };
-  parents: string[];
-  declarations: Partial<ComputedShapeStyle>;
-}
-
-export interface StyleRegistry {
-  rules: Record<string, StyleRule>;
-}
-
-export interface ShapeElement {
-  type: "shape";
-  id: string;
-  rect: Rect;
-  shapeType: "rect" | "roundRect" | "ellipse" | "triangle";
-  fill: string;
-  border?: Border;
-  styleRefs?: string[];
-  computedStyle?: ComputedShapeStyle;
-  styleTrace?: Partial<Record<ShapeStyleProperty, string>>;
-}
-
-export interface ImageElement {
-  type: "image";
-  id: string;
-  rect: Rect;
-  url: string;
-  crop?: ImageCrop;
-}
-
-export interface ImageCrop {
-  left: number;
-  top: number;
-  right: number;
-  bottom: number;
-}
-
-export type SlideElement = TextElement | ShapeElement | ImageElement;
-
-export interface Slide {
-  id: string;
-  elements: SlideElement[];
-  rawXml: string; // Raw slide XML text
-}
-
-export interface PresentationSize {
-  width: number;
-  height: number;
-}
-
-export interface PptVirtualDocument {
-  size: PresentationSize;
-  slides: Slide[];
-  styleRegistry: StyleRegistry;
-}
-
-/** @deprecated Use PptVirtualDocument. */
-export type PresentationAST = Omit<PptVirtualDocument, "styleRegistry"> & {
-  styleRegistry?: StyleRegistry;
-};
-
-interface PlaceholderDescriptor {
-  idx: string | null;
-  type: string;
-}
-
-interface PlaceholderContext {
-  layoutShapes: globalThis.Element[];
-  masterShapes: globalThis.Element[];
-  masterTextStyles: globalThis.Element | null;
-  slidePart: string;
-  layoutPart: string | null;
-  masterPart: string | null;
-}
-
-interface TextInheritanceContext {
-  textBodies: globalThis.Element[];
-  masterTextStyle: globalThis.Element | null;
-}
-
-interface ComputedRunStyle {
-  fontSize: number;
-  color: string;
-  bold: boolean;
-  fontFamily: string;
-  eastAsianFontFamily: string;
-  italic: boolean;
-  letterSpacing: number;
-}
-
-// XML Namespaces query helper
-function querySelector(parent: Element | Document, selectors: string): Element | null {
-  const parts = selectors.split(",").map(s => s.trim());
-  for (const part of parts) {
-    try {
-      const el = parent.querySelector(part);
-      if (el) return el as Element;
-    } catch (e) {}
-  }
-  // LocalName fallback
-  for (const part of parts) {
-    const cleanTag = part.replace(/^.*\\:/, "").replace(/^.*:/, "");
-    const els = parent.getElementsByTagName(cleanTag);
-    if (els.length > 0) return els[0] as Element;
-  }
-  return null;
-}
-
-function querySelectorAll(parent: Element | Document, selectors: string): Element[] {
-  const parts = selectors.split(",").map(s => s.trim());
-  for (const part of parts) {
-    try {
-      const list = parent.querySelectorAll(part);
-      if (list.length > 0) return Array.from(list) as Element[];
-    } catch (e) {}
-  }
-  // LocalName fallback
-  for (const part of parts) {
-    const cleanTag = part.replace(/^.*\\:/, "").replace(/^.*:/, "");
-    const els = parent.getElementsByTagName(cleanTag);
-    if (els.length > 0) return Array.from(els) as Element[];
-  }
-  return [];
-}
-
-function hasLocalName(node: Element, names: string[]): boolean {
-  const localName = node.localName || node.nodeName.replace(/^.*:/, "");
-  return names.includes(localName);
-}
-
-function getDirectChildren(parent: Element | Document, ...names: string[]): Element[] {
-  return Array.from(parent.childNodes)
-    .filter((node): node is Element => node.nodeType === 1)
-    .filter(node => hasLocalName(node, names));
-}
-
-function getDirectChild(parent: Element | Document, ...names: string[]): Element | null {
-  return getDirectChildren(parent, ...names)[0] || null;
-}
+export * from "./pptx-virtual-dom";
 
 export class PptxParser {
   private zip: JSZip | null = null;
   private styleRegistry: StyleRegistry = { rules: {} };
   private nextStyleRuleId = 1;
-  private themeStyleMatrix: {
-    fills: globalThis.Element[];
-    backgroundFills: globalThis.Element[];
-    lines: globalThis.Element[];
-    effects: globalThis.Element[];
-  } = { fills: [], backgroundFills: [], lines: [], effects: [] };
+  private themeStyleMatrix: ThemeStyleMatrix = { fills: [], backgroundFills: [], lines: [], effects: [] };
   private themeColors: Record<string, string> = {
     "dk1": "#000000",
     "lt1": "#ffffff",
@@ -321,6 +82,15 @@ export class PptxParser {
     "+mn-Jpan": "",
     "+mn-Hang": ""
   };
+
+  private get styleResolver(): PptxStyleResolver {
+    return new PptxStyleResolver({
+      themeColors: this.themeColors,
+      themeFonts: this.themeFonts,
+      themeStyleMatrix: this.themeStyleMatrix,
+      registerStyleRule: rule => this.registerStyleRule(rule)
+    });
+  }
 
   public async parse(buffer: ArrayBuffer): Promise<PptVirtualDocument> {
     this.zip = await JSZip.loadAsync(buffer);
@@ -374,7 +144,7 @@ export class PptxParser {
       // Find node under schemeNode with localName = key or prefix:key
       const colorNode = querySelector(schemeNode, `a\\:${key}, ${key}`);
       if (colorNode) {
-        const hex = this.extractHexColor(colorNode);
+        const hex = this.styleResolver.extractHexColor(colorNode);
         if (hex) {
           this.themeColors[key] = hex;
           // Set text and bg aliases
@@ -618,6 +388,7 @@ export class PptxParser {
       })
       .filter((stop): stop is GradientStop => stop !== null);
     if (stops.length === 0) return undefined;
+    stops.sort((left, right) => left.position - right.position);
 
     const linear = getDirectChild(fillNode, "lin");
     const path = getDirectChild(fillNode, "path");
@@ -1064,7 +835,10 @@ export class PptxParser {
       marginBottom: 45720 * scaleY,
       verticalAnchor: "top",
       autoFit: "none",
-      fontScale: 1
+      verticalOverflow: "overflow",
+      horizontalOverflow: "overflow",
+      fontScale: 1,
+      textDirection: "horz"
     };
 
     for (const txBody of [...textBodies].reverse()) {
@@ -1080,7 +854,14 @@ export class PptxParser {
       else if (anchor === "b") result.verticalAnchor = "bottom";
       else if (anchor === "t") result.verticalAnchor = "top";
 
-      if (querySelector(bodyPr, "a\\:spAutoFit, spAutoFit")) result.autoFit = "shape";
+      const textDirection = bodyPr.getAttribute("vert");
+      if (textDirection) {
+        result.textDirection = textDirection as NonNullable<TextBodyProperties["textDirection"]>;
+      }
+
+      if (querySelector(bodyPr, "a\\:spAutoFit, spAutoFit")) {
+        result.autoFit = "shape";
+      }
       else if (querySelector(bodyPr, "a\\:normAutofit, normAutofit")) {
         result.autoFit = "shrink";
         const normAutofit = querySelector(bodyPr, "a\\:normAutofit, normAutofit");
@@ -1088,6 +869,15 @@ export class PptxParser {
         if (fontScale) result.fontScale = parseInt(fontScale, 10) / 100000;
       }
       else if (querySelector(bodyPr, "a\\:noAutofit, noAutofit")) result.autoFit = "none";
+
+      const verticalOverflow = bodyPr.getAttribute("vertOverflow");
+      if (verticalOverflow === "clip" || verticalOverflow === "ellipsis" || verticalOverflow === "overflow") {
+        result.verticalOverflow = verticalOverflow;
+      }
+      const horizontalOverflow = bodyPr.getAttribute("horzOverflow");
+      if (horizontalOverflow === "clip" || horizontalOverflow === "ellipsis" || horizontalOverflow === "overflow") {
+        result.horizontalOverflow = horizontalOverflow;
+      }
     }
     return result;
   }
@@ -1185,11 +975,14 @@ export class PptxParser {
     }
     const latin = querySelector(rPr, "a\\:latin, latin");
     const typeface = latin?.getAttribute("typeface");
-    if (typeface) res.fontFamily = this.resolveThemeTypeface(typeface);
+    if (typeface) res.fontFamily = this.styleResolver.resolveThemeTypeface(typeface);
     const eastAsian = querySelector(rPr, "a\\:ea, ea");
     const eastAsianTypeface = eastAsian?.getAttribute("typeface");
-    if (eastAsianTypeface) res.eastAsianFontFamily = this.resolveThemeTypeface(eastAsianTypeface);
-    const runColor = this.extractHexColor(rPr);
+    if (eastAsianTypeface) res.eastAsianFontFamily = this.styleResolver.resolveThemeTypeface(eastAsianTypeface);
+    // A run's fill and its effect list are siblings. Reading the first color
+    // anywhere below rPr can accidentally select outerShdw's color instead of
+    // the text fill.
+    const runColor = this.styleResolver.extractDirectFillColor(rPr);
     if (runColor) {
       res.color = runColor;
     }
@@ -1210,9 +1003,11 @@ export class PptxParser {
       const source = index >= 1000
         ? this.themeStyleMatrix.backgroundFills[index - 1001]
         : this.themeStyleMatrix.fills[index - 1];
-      const fill = source
-        ? this.parseFillStyle(source, placeholderColor)
-        : (placeholderColor ? { type: "solid" as const, color: placeholderColor } : undefined);
+      const fill = index <= 0
+        ? { type: "none" as const }
+        : source
+          ? this.parseFillStyle(source, placeholderColor)
+          : (placeholderColor ? { type: "solid" as const, color: placeholderColor } : undefined);
       if (fill) {
         const id = this.registerStyleRule({
           source: { kind: "theme", part: "ppt/theme/theme1.xml", nodeId: `fillRef:${index}` },
@@ -1296,7 +1091,7 @@ export class PptxParser {
     const prstGeom = spPrNodes
       .map(candidate => getDirectChild(candidate, "prstGeom"))
       .find((candidate): candidate is globalThis.Element => candidate !== null) || null;
-    let shapeType: "rect" | "roundRect" | "ellipse" | "triangle" = "rect";
+    let shapeType: "rect" | "roundRect" | "ellipse" | "triangle" | "line" | "mathPlus" = "rect";
     if (prstGeom) {
       const prst = prstGeom.getAttribute("prst");
       if (prst === "ellipse" || prst === "oval") {
@@ -1305,6 +1100,27 @@ export class PptxParser {
         shapeType = "roundRect";
       } else if (prst === "triangle") {
         shapeType = "triangle";
+      } else if (prst === "line") {
+        shapeType = "line";
+      } else if (prst === "mathPlus" || prst === "plus") {
+        shapeType = "mathPlus";
+      }
+    }
+    const xfrm = spPrNodes
+      .map(candidate => getDirectChild(candidate, "xfrm"))
+      .find((candidate): candidate is globalThis.Element => candidate !== null) || null;
+    const rotation = xfrm ? parseInt(xfrm.getAttribute("rot") || "0", 10) / 60000 : 0;
+    const flipH = xfrm?.getAttribute("flipH") === "1" || xfrm?.getAttribute("flipH") === "true";
+    const flipV = xfrm?.getAttribute("flipV") === "1" || xfrm?.getAttribute("flipV") === "true";
+    let cornerRadius: number | undefined;
+    if (shapeType === "roundRect" && prstGeom) {
+      const avLst = getDirectChild(prstGeom, "avLst");
+      const adjustment = avLst
+        ? getDirectChildren(avLst, "gd").find(node => node.getAttribute("name") === "adj")
+        : null;
+      const value = adjustment?.getAttribute("fmla")?.match(/val\s+(-?\d+(?:\.\d+)?)/)?.[1];
+      if (value !== undefined) {
+        cornerRadius = Math.max(0, Math.min(0.5, parseFloat(value) / 100000));
       }
     }
 
@@ -1334,7 +1150,7 @@ export class PptxParser {
             ? placeholderContext?.masterPart || "master"
             : sourceKind;
       const sourceNodeId = querySelector(sourceShape, "p\\:cNvPr, cNvPr")?.getAttribute("id") || undefined;
-      const themeRules = this.resolveThemeStyleRules(sourceStyle, transform.absoluteUnitScale);
+      const themeRules = this.styleResolver.resolveThemeStyleRules(sourceStyle, transform.absoluteUnitScale);
       const declarations: Partial<ComputedShapeStyle> = {};
 
       for (const themeRule of themeRules) {
@@ -1346,13 +1162,13 @@ export class PptxParser {
       }
 
       if (sourceSpPr) {
-        const directFill = this.parseFillStyle(sourceSpPr);
+        const directFill = this.styleResolver.parseFillStyle(sourceSpPr);
         const directLineNode = getDirectChild(sourceSpPr, "ln");
         const directEffectNode = getDirectChild(sourceSpPr, "effectLst", "effectDag");
-        const directEffects = this.parseEffectStyle(sourceSpPr, transform.absoluteUnitScale);
+        const directEffects = this.styleResolver.parseEffectStyle(sourceSpPr, transform.absoluteUnitScale);
         if (directFill) declarations.fill = directFill;
         if (directLineNode) {
-          const directLine = this.parseLineStyle(directLineNode, transform.absoluteUnitScale);
+          const directLine = this.styleResolver.parseLineStyle(directLineNode, transform.absoluteUnitScale);
           // An explicit a:ln/a:noFill clears an inherited line.
           declarations.line = directLine || { fill: { type: "none" }, width: 0 };
         }
@@ -1406,6 +1222,10 @@ export class PptxParser {
         id: `shape_bg_${id}`,
         rect: { ...rect },
         shapeType,
+        rotation,
+        flipH,
+        flipV,
+        cornerRadius,
         fill: fallbackFill,
         border,
         styleRefs,
@@ -1439,14 +1259,14 @@ export class PptxParser {
     if (styleNode) {
       const fontRef = querySelector(styleNode, "a\\:fontRef, fontRef");
       if (fontRef) {
-        const color = this.extractHexColor(fontRef);
+        const color = this.styleResolver.extractHexColor(fontRef);
         if (color) defaultTextColor = color;
         const fontScheme = fontRef.getAttribute("idx");
         if (fontScheme === "major" || fontScheme === "minor") {
           const prefix = fontScheme === "major" ? "+mj" : "+mn";
-          defaultFontFamily = this.resolveThemeTypeface(`${prefix}-lt`);
+          defaultFontFamily = this.styleResolver.resolveThemeTypeface(`${prefix}-lt`);
           defaultEastAsianFontFamily = this.themeFonts[`${prefix}-Hans`]
-            || this.resolveThemeTypeface(`${prefix}-ea`);
+            || this.styleResolver.resolveThemeTypeface(`${prefix}-ea`);
         }
       }
     }
@@ -1480,7 +1300,6 @@ export class PptxParser {
         rect.y,
         rect.w,
         rect.h,
-        transform.absoluteUnitScale,
         transform.absoluteUnitScale,
         id,
         elements,
@@ -1564,7 +1383,7 @@ export class PptxParser {
         if (tcPr) {
           const solidFill = querySelector(tcPr, "a\\:solidFill, solidFill");
           if (solidFill) {
-            const color = this.extractHexColor(solidFill);
+            const color = this.styleResolver.extractHexColor(solidFill);
             if (color) fill = color;
           }
           // Border color styling (accent-based or custom)
@@ -1572,7 +1391,7 @@ export class PptxParser {
           if (lnL) {
             const solidFillLn = querySelector(lnL, "a\\:solidFill, solidFill");
             if (solidFillLn) {
-              const color = this.extractHexColor(solidFillLn);
+              const color = this.styleResolver.extractHexColor(solidFillLn);
               if (color) cellBorderColor = color;
             }
           }
@@ -1599,7 +1418,6 @@ export class PptxParser {
             actualWidth,
             rowHeight,
             transform.absoluteUnitScale,
-            transform.scaleY,
             cellId,
             elements,
             "#333333"
@@ -1612,16 +1430,18 @@ export class PptxParser {
     }
   }
 
-  private getBulletChar(buCharNode: Element | null, buFontNode: Element | null): string {
-    if (!buCharNode) return "•";
-    const char = buCharNode.getAttribute("char") || "•";
-    const font = buFontNode ? buFontNode.getAttribute("typeface") : "";
-    if (font === "Wingdings" || font === "Wingdings 2" || font === "Wingdings 3") {
-      if (char === "n") return "■";
-      if (char === "u") return "◆";
-      if (char === "o") return "○";
-    }
-    return char;
+  private getBulletDescriptor(
+    buCharNode: Element | null,
+    buFontNode: Element | null
+  ): { char: string; fontFamily?: string } {
+    const char = buCharNode?.getAttribute("char") || "•";
+    const typeface = buFontNode?.getAttribute("typeface") || "";
+    return {
+      // Keep the font-private character intact. The renderer must use the
+      // XML-specified bullet font instead of guessing a Unicode replacement.
+      char,
+      fontFamily: typeface ? this.styleResolver.resolveThemeTypeface(typeface) : undefined
+    };
   }
 
   private async parseTextBody(
@@ -1631,7 +1451,6 @@ export class PptxParser {
     w: number,
     h: number,
     absoluteUnitScale: number,
-    layoutScaleY: number,
     id: string,
     elements: SlideElement[],
     defaultTextColor: string = "#333333",
@@ -1650,7 +1469,10 @@ export class PptxParser {
       marginBottom: 4,
       verticalAnchor: "top" as const,
       autoFit: "none" as const,
-      fontScale: 1
+      verticalOverflow: "overflow" as const,
+      horizontalOverflow: "overflow" as const,
+      fontScale: 1,
+      textDirection: "horz" as const
     };
     const computedParagraphs: TextParagraph[] = [];
 
@@ -1716,8 +1538,11 @@ export class PptxParser {
 
         const marL = inheritedPPr.getAttribute("marL");
         const indentAttr = inheritedPPr.getAttribute("indent");
-        if (marL !== null) marginLeft = parseInt(marL, 10) * layoutScaleY;
-        if (indentAttr !== null) indent = parseInt(indentAttr, 10) * layoutScaleY;
+        // Paragraph margins and hanging indents are EMU values in the
+        // presentation coordinate system. They are not coordinates inside a
+        // group, so groupScale must never be applied here.
+        if (marL !== null) marginLeft = parseInt(marL, 10) * absoluteUnitScale;
+        if (indentAttr !== null) indent = parseInt(indentAttr, 10) * absoluteUnitScale;
 
         const eaLnBrk = inheritedPPr.getAttribute("eaLnBrk");
         if (eaLnBrk !== null) eastAsianLineBreak = eaLnBrk === "1" || eaLnBrk === "true";
@@ -1756,20 +1581,34 @@ export class PptxParser {
       // Check if bullet exists
       let bulletChar = "";
       let bulletColor = pDefaults.color;
+      let bulletFontFamily: string | undefined;
+      let bulletFontSize: number | undefined;
       let hasExplicitBulletColor = false;
 
       for (const inheritedPPr of inheritedParagraphProperties) {
         if (getDirectChild(inheritedPPr, "buNone")) {
           bulletChar = "";
+          bulletFontFamily = undefined;
+          bulletFontSize = undefined;
         }
         const buChar = getDirectChild(inheritedPPr, "buChar");
         if (buChar) {
           const buFont = getDirectChild(inheritedPPr, "buFont");
-          bulletChar = this.getBulletChar(buChar, buFont);
+          const descriptor = this.getBulletDescriptor(buChar, buFont);
+          bulletChar = descriptor.char;
+          if (descriptor.fontFamily) bulletFontFamily = descriptor.fontFamily;
+
+          const buSzPct = getDirectChild(inheritedPPr, "buSzPct")?.getAttribute("val");
+          const buSzPts = getDirectChild(inheritedPPr, "buSzPts")?.getAttribute("val");
+          if (buSzPct !== null && buSzPct !== undefined) {
+            bulletFontSize = pDefaults.fontSize * Math.max(0, parseInt(buSzPct, 10) / 100000);
+          } else if (buSzPts !== null && buSzPts !== undefined) {
+            bulletFontSize = (parseInt(buSzPts, 10) / 100) * 12700 * absoluteUnitScale;
+          }
 
           const buClr = getDirectChild(inheritedPPr, "buClr");
           if (buClr) {
-            const color = this.extractHexColor(buClr);
+            const color = this.styleResolver.extractHexColor(buClr);
             if (color) {
               bulletColor = color;
               hasExplicitBulletColor = true;
@@ -1788,6 +1627,16 @@ export class PptxParser {
         let runStyle = pDefaults;
         const rPr = querySelector(run, "a\\:rPr, rPr");
         if (rPr) runStyle = this.parseRunProperties(rPr, absoluteUnitScale, pDefaults);
+        const directRunColor = rPr ? this.styleResolver.extractDirectFillColor(rPr) : null;
+        if (
+          bulletChar
+          && !directRunColor
+          && (runStyle.color.toLowerCase() === "#ffffff" || runStyle.color.toLowerCase() === "#fff")
+        ) {
+          // A colored bullet can inherit lt1 from a template while its body
+          // text remains the ordinary dark body style.
+          runStyle = { ...runStyle, color: "#333333" };
+        }
 
         const content = runName.endsWith("br")
           ? "\n"
@@ -1846,7 +1695,14 @@ export class PptxParser {
           spaceBefore,
           spaceAfter
         },
-        bullet: bulletChar ? { char: bulletChar, color: bulletColor } : undefined,
+        bullet: bulletChar
+          ? {
+              char: bulletChar,
+              color: bulletColor,
+              fontFamily: bulletFontFamily,
+              fontSize: bulletFontSize
+            }
+          : undefined,
         runs: computedRuns
       });
     }
@@ -1947,15 +1803,4 @@ export class PptxParser {
       h: cy * transform.scaleY
     };
   }
-}
-
-// Coordinate transform state interface
-export interface TransformState {
-  // Cumulative group-space transform for geometry coordinates.
-  scaleX: number;
-  scaleY: number;
-  // Page-level conversion for pt/EMU visual properties; never multiplied by group scale.
-  absoluteUnitScale: number;
-  offsetX: number;
-  offsetY: number;
 }

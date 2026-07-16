@@ -117,6 +117,10 @@ pub struct LineSpacing {
 pub struct Bullet {
     pub char: String,
     pub color: String,
+    #[serde(rename = "fontFamily", default)]
+    pub font_family: Option<String>,
+    #[serde(rename = "fontSize", default)]
+    pub font_size: Option<f32>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -141,12 +145,26 @@ pub struct TextBodyProperties {
     pub vertical_anchor: String,
     #[serde(rename = "autoFit")]
     pub auto_fit: String,
+    #[serde(rename = "verticalOverflow", default = "default_overflow")]
+    pub vertical_overflow: String,
+    #[serde(rename = "horizontalOverflow", default = "default_overflow")]
+    pub horizontal_overflow: String,
     #[serde(rename = "fontScale", default = "default_font_scale")]
     pub font_scale: f32,
+    #[serde(rename = "textDirection", default = "default_text_direction")]
+    pub text_direction: String,
+}
+
+fn default_overflow() -> String {
+    "overflow".to_string()
 }
 
 fn default_font_scale() -> f32 {
     1.0
+}
+
+fn default_text_direction() -> String {
+    "horz".to_string()
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -241,7 +259,15 @@ pub struct ShapeElement {
     pub id: String,
     pub rect: Rect,
     #[serde(rename = "shapeType")]
-    pub shape_type: String, // "rect" | "ellipse" | "triangle"
+    pub shape_type: String, // "rect" | "roundRect" | "ellipse" | "triangle" | "line" | "mathPlus"
+    #[serde(default)]
+    pub rotation: f32,
+    #[serde(rename = "flipH", default)]
+    pub flip_h: bool,
+    #[serde(rename = "flipV", default)]
+    pub flip_v: bool,
+    #[serde(rename = "cornerRadius", default)]
+    pub corner_radius: Option<f32>,
     pub fill: String,
     #[serde(default)]
     pub border: Option<Border>,
@@ -304,7 +330,8 @@ mod tests {
                 "style":{"fontSize":24,"color":"#000000","bold":true,"align":"center","fontFamily":"Aptos","italic":false},
                 "paragraphs":[{
                     "style":{"align":"center","level":0,"marginLeft":0,"indent":0,"lineSpacing":{"unit":"percent","value":1.2},"spaceBefore":2,"spaceAfter":3},
-                    "runs":[{"content":"Title","style":{"fontSize":24,"color":"#000000","bold":true,"align":"center","fontFamily":"Aptos"}}]
+                    "runs":[{"content":"Title","style":{"fontSize":24,"color":"#000000","bold":true,"align":"center","fontFamily":"Aptos"}}],
+                    "bullet":{"char":"p","color":"#000000","fontFamily":"Wingdings","fontSize":19.2}
                 }],
                 "body":{"marginLeft":8,"marginRight":8,"marginTop":4,"marginBottom":4,"verticalAnchor":"top","autoFit":"none"}
             }]
@@ -316,6 +343,19 @@ mod tests {
         };
         assert_eq!(text.style.font_family, "Aptos");
         assert_eq!(text.paragraphs[0].runs[0].content, "Title");
+        assert_eq!(
+            text.paragraphs[0]
+                .bullet
+                .as_ref()
+                .unwrap()
+                .font_family
+                .as_deref(),
+            Some("Wingdings")
+        );
+        assert_eq!(
+            text.paragraphs[0].bullet.as_ref().unwrap().font_size,
+            Some(19.2)
+        );
         assert_eq!(
             text.paragraphs[0]
                 .style
