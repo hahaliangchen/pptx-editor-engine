@@ -15,7 +15,7 @@ export interface ViewerOptions {
   fontBackendUrl?: string;
   debugTextBoxes?: boolean;
   onSlideChange?: (slideIndex: number, slide: Slide) => void;
-  onLoadComplete?: (document: PptVirtualDocument) => void;
+  onLoadComplete?: (document: PptVirtualDocument) => void | Promise<void>;
 }
 
 interface FontRequest {
@@ -51,10 +51,11 @@ export default class PptViewer {
   private preferredHeight?: number;
   private debugTextBoxes: boolean;
   private renderEpoch = 0;
-  
+  private isRenderingThumbnails = false;
+
   // Callbacks
   private onSlideChange?: (slideIndex: number, slide: Slide) => void;
-  private onLoadComplete?: (document: PptVirtualDocument) => void;
+  private onLoadComplete?: (document: PptVirtualDocument) => void | Promise<void>;
 
   constructor(options: ViewerOptions) {
     this.container = options.container;
@@ -255,12 +256,15 @@ export default class PptViewer {
     this.imageCache = {}; // Clear old image cache
     this.slideJsonCache.clear();
     this.renderedSlideCache.clear();
-    
+
+    // Paint the active slide first so it is on screen, then run any
+    // onLoadComplete work (e.g. thumbnail generation, which repurposes the
+    // shared canvas) with the main canvas already in its final state.
+    await this.renderCurrentSlide();
     if (this.onLoadComplete) {
-      this.onLoadComplete(this.presentation);
+      await this.onLoadComplete(this.presentation);
     }
 
-    await this.renderCurrentSlide();
     return this.presentation;
   }
 
@@ -273,12 +277,80 @@ export default class PptViewer {
     this.imageCache = {};
     this.slideJsonCache.clear();
     this.renderedSlideCache.clear();
-    
-    if (this.onLoadComplete) {
-      this.onLoadComplete(this.presentation);
-    }
-    
+
+    // Paint the active slide first so it is on screen, then run any
+    // onLoadComplete work (e.g. thumbnail generation, which repurposes the
+    // shared canvas) with the main canvas already in its final state.
     await this.renderCurrentSlide();
+    if (this.onLoadComplete) {
+      await this.onLoadComplete(this.presentation);
+    }
+  }
+
+  /**
+   * Render every slide to an offscreen-sized bitmap and return PNG data URLs,
+   * used to build real page thumbnails for the sidebar filmstrip. The Rust
+   * renderer is bound to a single 2D context, so this temporarily repurposes
+   * the main canvas, then restores and repaints the active slide.
+   */
+  public async renderThumbnails(targetCssWidth = 240): Promise<string[]> {
+    if (!this.presentation || !this.renderer) return [];
+    await this.engineReady;
+
+    const logicalSize = this.presentation.size;
+    const ratio = logicalSize.width / logicalSize.height;
+    const dpr = window.devicePixelRatio || 1;
+    const pixelWidth = Math.max(1, Math.round(targetCssWidth * dpr));
+    const pixelHeight = Math.max(1, Math.round(pixelWidth / ratio));
+
+    const savedWidth = this.canvas.width;
+    const savedHeight = this.canvas.height;
+
+    // Block any concurrent resizeAndRedraw (e.g. from a window resize event)
+    // from clobbering the shared canvas while it is repurposed for thumbnails.
+    this.isRenderingThumbnails = true;
+    // Hide the working canvas while it is repurposed for thumbnail rasters.
+    this.canvas.style.visibility = "hidden";
+    this.canvas.width = pixelWidth;
+    this.canvas.height = pixelHeight;
+
+    const scale = Math.min(pixelWidth / logicalSize.width, pixelHeight / logicalSize.height);
+    const thumbnails: string[] = [];
+
+    try {
+      for (const slide of this.presentation.slides) {
+        // Preload images referenced by this slide so the thumbnail is complete.
+        const imageElements = slide.elements.filter(el => el.type === "image") as ImageElement[];
+        await Promise.all(imageElements.map(async (img) => {
+          if (this.imageCache[img.url]) return;
+          try {
+            this.imageCache[img.url] = await this.loadImage(img.url);
+          } catch (err) {
+            console.error(`Failed to preload thumbnail image: ${img.url}`, err);
+          }
+        }));
+
+        this.ctx.setTransform(scale, 0, 0, scale, 0, 0);
+        try {
+          this.renderer.render_slide(this.serializeSlideForRenderer(slide), this.imageCache);
+          thumbnails.push(this.canvas.toDataURL("image/png"));
+        } catch (err) {
+          console.error("Error while rendering thumbnail:", err);
+          thumbnails.push("");
+        }
+      }
+    } finally {
+      // Restore the main canvas and repaint the active slide, then release the
+      // resize guard even if a slide threw mid-loop.
+      this.canvas.width = savedWidth;
+      this.canvas.height = savedHeight;
+      this.canvas.style.visibility = "visible";
+      this.renderedSlideCache.clear();
+      this.isRenderingThumbnails = false;
+      await this.renderCurrentSlide();
+    }
+
+    return thumbnails;
   }
 
   /** @deprecated Use loadVirtualDocument. */
@@ -401,6 +473,9 @@ export default class PptViewer {
 
   private resizeAndRedraw(slideOverride?: Slide) {
     if (!this.presentation || !this.renderer) return;
+    // The shared canvas is temporarily resized for thumbnail rasters; ignore
+    // resize-driven repaints until that finishes to avoid clobbering it.
+    if (this.isRenderingThumbnails) return;
 
     const slide = slideOverride || this.getCurrentSlideAST();
     if (!slide) return;

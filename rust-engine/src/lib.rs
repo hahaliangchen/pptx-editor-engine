@@ -5,7 +5,7 @@ mod image_renderer;
 mod shape_renderer;
 mod text_layout;
 
-use ast::{Element, Slide, TextElement};
+use ast::{Element, ReflectionStyle, Slide, TextElement};
 use cosmic_text::fontdb::Source;
 use cosmic_text::{FontSystem, SwashCache};
 use std::sync::Arc;
@@ -26,6 +26,14 @@ pub struct RustPptRenderer {
 const MAC_TEXT_OVERSAMPLE: f32 = 2.0;
 
 impl RustPptRenderer {
+    fn text_reflection(txt: &TextElement) -> Option<ReflectionStyle> {
+        txt.paragraphs
+            .iter()
+            .flat_map(|paragraph| paragraph.runs.iter())
+            .find_map(|run| run.style.reflection.clone())
+            .or_else(|| txt.style.reflection.clone())
+    }
+
     fn render_rich_text(&mut self, txt: &TextElement) -> Result<(), JsValue> {
         let body = txt.body.as_ref();
         let available_height = txt.rect.h.max(1.0);
@@ -56,15 +64,17 @@ impl RustPptRenderer {
         }
 
         // spAutoFit grows the text shape when its content needs more height.
-        // Keep the original height for normal/noAutofit text, but do not make
-        // an auto-fit bitmap smaller than the measured paragraph layout.
+        // With vertOverflow=overflow, the shape geometry stays fixed but the
+        // text bitmap must still extend far enough to paint overflowing lines.
         let vertical_text = body
             .map(|value| value.text_direction != "horz")
             .unwrap_or(false);
-        // `vertOverflow="overflow"` controls how text behaves inside the
-        // shape; it does not turn a `noAutofit` text box into an auto-growing
-        // bitmap. Only spAutoFit is allowed to increase the rendered height.
-        let render_height = if body.map(|value| value.auto_fit.as_str()) == Some("shape") {
+        let allows_vertical_overflow = body
+            .map(|value| value.vertical_overflow == "overflow")
+            .unwrap_or(true);
+        let render_height = if body.map(|value| value.auto_fit.as_str()) == Some("shape")
+            || allows_vertical_overflow
+        {
             available_height.max(layout_height)
         } else {
             available_height
@@ -186,6 +196,61 @@ impl RustPptRenderer {
             txt.rect.w as f64,
             render_height as f64,
         )?;
+
+        if let Some(reflection) = Self::text_reflection(txt) {
+            // Run effects apply to rendered glyphs, not to the text line box.
+            // Cropping transparent leading/margins keeps a bottom-aligned
+            // reflection attached to the actual glyph boundary.
+            let Some((source_top, source_bottom)) =
+                font_renderer::alpha_vertical_bounds(&pixels, bitmap_width, bitmap_height)
+            else {
+                return Ok(());
+            };
+            let source_height = source_bottom - source_top;
+            let row_stride = bitmap_width as usize * 4;
+            let source_start = source_top as usize * row_stride;
+            let source_end = source_bottom as usize * row_stride;
+            let reflection_height = (source_height as f32 * reflection.scale_y.abs().max(0.01))
+                .ceil()
+                .max(1.0) as u32;
+            let reflection_pixels = font_renderer::build_reflection_bitmap(
+                &pixels[source_start..source_end],
+                bitmap_width,
+                source_height,
+                reflection_height,
+                reflection.scale_y,
+                reflection.start_alpha,
+                reflection.end_alpha,
+                reflection.end_position,
+                reflection.blur_radius * raster_scale,
+            );
+            let reflection_canvas: HtmlCanvasElement =
+                document.create_element("canvas")?.dyn_into()?;
+            reflection_canvas.set_width(bitmap_width);
+            reflection_canvas.set_height(reflection_height);
+            let reflection_ctx: CanvasRenderingContext2d = reflection_canvas
+                .get_context("2d")?
+                .ok_or_else(|| JsValue::from_str("Could not create reflection canvas context"))?
+                .dyn_into()?;
+            let reflection_image = ImageData::new_with_u8_clamped_array_and_sh(
+                Clamped(&reflection_pixels),
+                bitmap_width,
+                reflection_height,
+            )?;
+            reflection_ctx.put_image_data(&reflection_image, 0.0, 0.0)?;
+            let direction = reflection.direction.to_radians();
+            let reflection_x = txt.rect.x + reflection.distance * direction.cos();
+            let reflection_y = txt.rect.y
+                + source_bottom as f32 / raster_scale
+                + reflection.distance * direction.sin();
+            self.ctx.draw_image_with_html_canvas_element_and_dw_and_dh(
+                &reflection_canvas,
+                reflection_x as f64,
+                reflection_y as f64,
+                txt.rect.w as f64,
+                reflection_height as f64 / raster_scale as f64,
+            )?;
+        }
         Ok(())
     }
 }

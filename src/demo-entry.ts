@@ -344,31 +344,50 @@ document.addEventListener("DOMContentLoaded", () => {
       });
 
     },
-    onLoadComplete: (ast) => {
+    onLoadComplete: async (ast) => {
       // Hide welcome view
       welcomeView.style.display = "none";
       sidebarCount.textContent = ast.slides.length.toString();
-      
-      // Populate Slide list sidebar
+
+      // Build the thumbnail filmstrip with loading placeholders first.
       slideList.innerHTML = "";
-      ast.slides.forEach((slide, idx) => {
+      const thumbImgs: HTMLImageElement[] = [];
+      const thumbBoxes: HTMLElement[] = [];
+      ast.slides.forEach((_, idx) => {
         const li = document.createElement("li");
-        li.className = `slide-item ${idx === 0 ? 'active' : ''}`;
+        li.className = `slide-item ${idx === 0 ? "active" : ""}`;
         li.onclick = () => viewer.selectSlide(idx);
+        li.setAttribute("aria-label", `幻灯片 ${idx + 1}`);
 
         const thumb = document.createElement("div");
-        thumb.className = "slide-thumb";
-        thumb.textContent = (idx + 1).toString();
+        thumb.className = "slide-thumb is-loading";
 
-        const label = document.createElement("div");
-        label.textContent = `Slide ${idx + 1}`;
-        label.style.fontSize = "14px";
-        label.style.fontWeight = "500";
+        const img = document.createElement("img");
+        img.alt = `幻灯片 ${idx + 1} 缩略图`;
+        img.style.display = "none";
+        thumb.appendChild(img);
 
         li.appendChild(thumb);
-        li.appendChild(label);
         slideList.appendChild(li);
+        thumbImgs.push(img);
+        thumbBoxes.push(thumb);
       });
+
+      // Pre-render every slide to a real bitmap thumbnail.
+      try {
+        const dataUrls = await viewer.renderThumbnails();
+        dataUrls.forEach((url, idx) => {
+          const box = thumbBoxes[idx];
+          box.classList.remove("is-loading");
+          if (url) {
+            thumbImgs[idx].src = url;
+            thumbImgs[idx].style.display = "block";
+          }
+        });
+      } catch (err) {
+        console.error("Failed to render thumbnails:", err);
+        thumbBoxes.forEach((box) => box.classList.remove("is-loading"));
+      }
     }
   });
 

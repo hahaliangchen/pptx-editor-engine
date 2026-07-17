@@ -11,9 +11,9 @@
     <header class="app-header">
       <div class="brand">
         <span class="brand-mark" aria-hidden="true">P</span>
-        <div>
-          <h1>PPTX Editor Engine</h1>
-          <span class="brand-subtitle">Precision rendering workspace</span>
+        <div class="brand-text">
+          <h1 id="doc-title">PPTX Editor Engine</h1>
+          <span class="brand-subtitle" id="doc-subtitle">Precision rendering workspace</span>
         </div>
       </div>
 
@@ -31,18 +31,20 @@
     </header>
 
     <div class="main-layout">
-      <aside class="sidebar" aria-label="幻灯片列表">
+      <aside class="sidebar" aria-label="幻灯片缩略图">
         <div class="sidebar-heading">
-          <span class="eyebrow">DOCUMENT</span>
+          <span class="eyebrow">幻灯片</span>
           <span class="sidebar-count" id="sidebar-count">0</span>
         </div>
-        <ul id="slide-list" class="slide-list">
+        <ol id="slide-list" class="slide-list">
           <li class="empty-slide-list">尚未加载演示文稿</li>
-        </ul>
+        </ol>
       </aside>
 
       <main id="viewport" class="viewport-area">
-        <div id="canvas-wrapper" class="canvas-container"></div>
+        <div id="stage" class="stage">
+          <div id="canvas-wrapper" class="canvas-container"></div>
+        </div>
 
         <div class="control-bar" aria-label="幻灯片控制">
           <button id="btn-prev" class="icon-button" type="button" aria-label="上一页" title="上一页" disabled>

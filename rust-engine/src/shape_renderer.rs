@@ -128,6 +128,26 @@ pub fn begin_shape_path(ctx: &CanvasRenderingContext2d, shp: &ShapeElement) {
             ctx.line_to(x, top);
             ctx.line_to(left, top);
         }
+        "upArrow" => {
+            // OOXML's upArrow is a single filled path: a centered shaft with
+            // a triangular head. The defaults match the preset geometry;
+            // explicit a:avLst adjustments are supplied by the parser.
+            let head_height = shp.arrow_head_height.unwrap_or(0.5).clamp(0.001, 0.5);
+            let shaft_width = shp.arrow_shaft_width.unwrap_or(0.5).clamp(0.001, 1.0);
+            let shaft_width = shaft_width as f64;
+            let head_height = w.min(h) * head_height as f64;
+            let shaft_left = x + (w - w * shaft_width) / 2.0;
+            let shaft_right = x + (w + w * shaft_width) / 2.0;
+            let head_bottom = y + head_height;
+            ctx.move_to(x + w / 2.0, y);
+            ctx.line_to(x + w, head_bottom);
+            ctx.line_to(shaft_right, head_bottom);
+            ctx.line_to(shaft_right, y + h);
+            ctx.line_to(shaft_left, y + h);
+            ctx.line_to(shaft_left, head_bottom);
+            ctx.line_to(x, head_bottom);
+            ctx.line_to(x + w / 2.0, y);
+        }
         "line" => {
             ctx.move_to(x, y);
             ctx.line_to(x + w, y + h);

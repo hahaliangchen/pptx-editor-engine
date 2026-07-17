@@ -51,6 +51,27 @@ pub struct TextElement {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct ReflectionStyle {
+    #[serde(rename = "blurRadius")]
+    pub blur_radius: f32,
+    #[serde(rename = "startAlpha")]
+    pub start_alpha: f32,
+    #[serde(rename = "endAlpha")]
+    pub end_alpha: f32,
+    #[serde(rename = "endPosition")]
+    pub end_position: f32,
+    pub direction: f32,
+    #[serde(default)]
+    pub distance: f32,
+    #[serde(rename = "scaleY")]
+    pub scale_y: f32,
+    #[serde(default)]
+    pub alignment: Option<String>,
+    #[serde(rename = "rotationWithShape", default)]
+    pub rotation_with_shape: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct TextStyle {
     #[serde(rename = "fontSize")]
     pub font_size: f32,
@@ -66,6 +87,8 @@ pub struct TextStyle {
     pub italic: bool,
     #[serde(rename = "letterSpacing", default)]
     pub letter_spacing: f32,
+    #[serde(default)]
+    pub reflection: Option<ReflectionStyle>,
 }
 
 fn default_align() -> String {
@@ -259,7 +282,7 @@ pub struct ShapeElement {
     pub id: String,
     pub rect: Rect,
     #[serde(rename = "shapeType")]
-    pub shape_type: String, // "rect" | "roundRect" | "ellipse" | "triangle" | "line" | "mathPlus"
+    pub shape_type: String, // "rect" | "roundRect" | "ellipse" | "triangle" | "line" | "mathPlus" | "upArrow"
     #[serde(default)]
     pub rotation: f32,
     #[serde(rename = "flipH", default)]
@@ -268,6 +291,10 @@ pub struct ShapeElement {
     pub flip_v: bool,
     #[serde(rename = "cornerRadius", default)]
     pub corner_radius: Option<f32>,
+    #[serde(rename = "arrowHeadHeight", default)]
+    pub arrow_head_height: Option<f32>,
+    #[serde(rename = "arrowShaftWidth", default)]
+    pub arrow_shaft_width: Option<f32>,
     pub fill: String,
     #[serde(default)]
     pub border: Option<Border>,

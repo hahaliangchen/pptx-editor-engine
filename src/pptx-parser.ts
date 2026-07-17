@@ -15,6 +15,7 @@ import {
   PptVirtualDocument,
   PresentationSize,
   Rect,
+  ReflectionStyle,
   ShapeElement,
   ShapeStyleProperty,
   Slide,
@@ -979,6 +980,21 @@ export class PptxParser {
     const eastAsian = querySelector(rPr, "a\\:ea, ea");
     const eastAsianTypeface = eastAsian?.getAttribute("typeface");
     if (eastAsianTypeface) res.eastAsianFontFamily = this.styleResolver.resolveThemeTypeface(eastAsianTypeface);
+    const reflection = querySelector(rPr, "a\\:reflection, reflection");
+    if (reflection) {
+      res.reflection = {
+        blurRadius: parseInt(reflection.getAttribute("blurRad") || "0", 10) * absoluteUnitScale,
+        startAlpha: Math.max(0, Math.min(1, parseInt(reflection.getAttribute("stA") || "0", 10) / 100000)),
+        endAlpha: Math.max(0, Math.min(1, parseInt(reflection.getAttribute("endA") || "0", 10) / 100000)),
+        endPosition: Math.max(0, Math.min(1, parseInt(reflection.getAttribute("endPos") || "100000", 10) / 100000)),
+        direction: parseInt(reflection.getAttribute("dir") || "0", 10) / 60000,
+        distance: parseInt(reflection.getAttribute("dist") || "0", 10) * absoluteUnitScale,
+        scaleY: parseInt(reflection.getAttribute("sy") || "-100000", 10) / 100000,
+        alignment: reflection.getAttribute("algn") || undefined,
+        rotationWithShape: reflection.getAttribute("rotWithShape") === "1"
+          || reflection.getAttribute("rotWithShape") === "true"
+      } satisfies ReflectionStyle;
+    }
     // A run's fill and its effect list are siblings. Reading the first color
     // anywhere below rPr can accidentally select outerShdw's color instead of
     // the text fill.
@@ -1091,7 +1107,7 @@ export class PptxParser {
     const prstGeom = spPrNodes
       .map(candidate => getDirectChild(candidate, "prstGeom"))
       .find((candidate): candidate is globalThis.Element => candidate !== null) || null;
-    let shapeType: "rect" | "roundRect" | "ellipse" | "triangle" | "line" | "mathPlus" = "rect";
+    let shapeType: "rect" | "roundRect" | "ellipse" | "triangle" | "line" | "mathPlus" | "upArrow" = "rect";
     if (prstGeom) {
       const prst = prstGeom.getAttribute("prst");
       if (prst === "ellipse" || prst === "oval") {
@@ -1104,6 +1120,8 @@ export class PptxParser {
         shapeType = "line";
       } else if (prst === "mathPlus" || prst === "plus") {
         shapeType = "mathPlus";
+      } else if (prst === "upArrow") {
+        shapeType = "upArrow";
       }
     }
     const xfrm = spPrNodes
@@ -1121,6 +1139,25 @@ export class PptxParser {
       const value = adjustment?.getAttribute("fmla")?.match(/val\s+(-?\d+(?:\.\d+)?)/)?.[1];
       if (value !== undefined) {
         cornerRadius = Math.max(0, Math.min(0.5, parseFloat(value) / 100000));
+      }
+    }
+    let arrowHeadHeight: number | undefined;
+    let arrowShaftWidth: number | undefined;
+    if (shapeType === "upArrow" && prstGeom) {
+      const avLst = getDirectChild(prstGeom, "avLst");
+      const adjustments = avLst ? getDirectChildren(avLst, "gd") : [];
+      for (const adjustment of adjustments) {
+        const value = adjustment.getAttribute("fmla")?.match(/val\s+(-?\d+(?:\.\d+)?)/)?.[1];
+        if (value === undefined) continue;
+        const normalized = parseFloat(value) / 100000;
+        const name = adjustment.getAttribute("name");
+        if (name === "adj1") {
+          // upArrow's first guide is the arrowhead height.
+          arrowHeadHeight = Math.max(0.001, Math.min(0.5, normalized));
+        } else if (name === "adj2") {
+          // The second guide is the full shaft width.
+          arrowShaftWidth = Math.max(0.001, Math.min(1, normalized));
+        }
       }
     }
 
@@ -1226,6 +1263,8 @@ export class PptxParser {
         flipH,
         flipV,
         cornerRadius,
+        arrowHeadHeight,
+        arrowShaftWidth,
         fill: fallbackFill,
         border,
         styleRefs,
@@ -1652,7 +1691,8 @@ export class PptxParser {
               fontFamily: runStyle.fontFamily,
               eastAsianFontFamily: runStyle.eastAsianFontFamily || undefined,
               italic: runStyle.italic,
-              letterSpacing: runStyle.letterSpacing
+              letterSpacing: runStyle.letterSpacing,
+              reflection: runStyle.reflection
             }
           });
         }
@@ -1673,7 +1713,8 @@ export class PptxParser {
             fontFamily: emptyStyle.fontFamily,
             eastAsianFontFamily: emptyStyle.eastAsianFontFamily || undefined,
             italic: emptyStyle.italic,
-            letterSpacing: emptyStyle.letterSpacing
+            letterSpacing: emptyStyle.letterSpacing,
+            reflection: emptyStyle.reflection
           }
         });
       }

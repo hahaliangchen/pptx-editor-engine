@@ -46,6 +46,17 @@ fn shape_contains(shp: &ShapeElement, x: f32, y: f32) -> bool {
             let top = (height - arm) / 2.0;
             (local_x >= left && local_x <= left + arm) || (local_y >= top && local_y <= top + arm)
         }
+        "upArrow" => {
+            let head_height = shp.arrow_head_height.unwrap_or(0.5).clamp(0.001, 0.5);
+            let shaft_width = shp.arrow_shaft_width.unwrap_or(0.5).clamp(0.001, 1.0);
+            let shaft_left = (width - width * shaft_width) / 2.0;
+            let shaft_right = (width + width * shaft_width) / 2.0;
+            let head_bottom = width.min(height) * head_height;
+            (local_y <= head_bottom
+                && local_x >= width / 2.0 - (local_y / head_bottom.max(0.001)) * width / 2.0
+                && local_x <= width / 2.0 + (local_y / head_bottom.max(0.001)) * width / 2.0)
+                || (local_y >= head_bottom && local_x >= shaft_left && local_x <= shaft_right)
+        }
         "roundRect" => {
             let radius = (width.min(height)
                 * shp.corner_radius.unwrap_or(1.0 / 6.0).clamp(0.0, 0.5))

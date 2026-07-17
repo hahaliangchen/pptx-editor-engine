@@ -5,6 +5,18 @@ export interface Rect {
   h: number;
 }
 
+export interface ReflectionStyle {
+  blurRadius: number;
+  startAlpha: number;
+  endAlpha: number;
+  endPosition: number;
+  direction: number;
+  distance: number;
+  scaleY: number;
+  alignment?: string;
+  rotationWithShape?: boolean;
+}
+
 export interface TextStyle {
   fontSize: number;
   color: string;
@@ -14,6 +26,7 @@ export interface TextStyle {
   eastAsianFontFamily?: string;
   italic?: boolean;
   letterSpacing?: number;
+  reflection?: ReflectionStyle;
 }
 
 export interface TextRun {
@@ -154,13 +167,16 @@ export interface ShapeElement {
   type: "shape";
   id: string;
   rect: Rect;
-  shapeType: "rect" | "roundRect" | "ellipse" | "triangle" | "line" | "mathPlus";
+  shapeType: "rect" | "roundRect" | "ellipse" | "triangle" | "line" | "mathPlus" | "upArrow";
   /** xfrm rotation, in canvas degrees. */
   rotation?: number;
   flipH?: boolean;
   flipV?: boolean;
   /** Normalized OOXML roundRect adjustment (adj / 100000). */
   cornerRadius?: number;
+  /** Normalized OOXML upArrow adjustments. */
+  arrowHeadHeight?: number;
+  arrowShaftWidth?: number;
   fill: string;
   border?: Border;
   styleRefs?: string[];
@@ -234,6 +250,7 @@ export interface ComputedRunStyle {
   eastAsianFontFamily: string;
   italic: boolean;
   letterSpacing: number;
+  reflection?: ReflectionStyle;
 }
 
 export interface ThemeStyleMatrix {

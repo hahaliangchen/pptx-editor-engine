@@ -21,6 +21,90 @@ pub fn blend_pixel(target: &mut [u8], index: usize, color: Color) {
     target[index + 3] = (output_alpha * 255.0).round() as u8;
 }
 
+pub fn alpha_vertical_bounds(source: &[u8], width: u32, height: u32) -> Option<(u32, u32)> {
+    let width = width as usize;
+    let height = height as usize;
+    if width == 0 || height == 0 || source.len() < width * height * 4 {
+        return None;
+    }
+
+    let mut top = height;
+    let mut bottom = 0_usize;
+    for y in 0..height {
+        let row_start = y * width * 4;
+        let row_has_alpha = (0..width).any(|x| source[row_start + x * 4 + 3] != 0);
+        if row_has_alpha {
+            top = top.min(y);
+            bottom = bottom.max(y + 1);
+        }
+    }
+
+    (top < bottom).then_some((top as u32, bottom as u32))
+}
+
+pub fn build_reflection_bitmap(
+    source: &[u8],
+    width: u32,
+    source_height: u32,
+    reflection_height: u32,
+    scale_y: f32,
+    start_alpha: f32,
+    end_alpha: f32,
+    end_position: f32,
+    blur_radius: f32,
+) -> Vec<u8> {
+    let width = width as usize;
+    let source_height = source_height as usize;
+    let reflection_height = reflection_height as usize;
+    let mut reflected = vec![0_u8; width * reflection_height * 4];
+    let scale_y = scale_y.abs().max(0.01);
+
+    for target_y in 0..reflection_height {
+        let source_y = (((reflection_height - 1 - target_y) as f32 / scale_y).floor() as usize)
+            .min(source_height.saturating_sub(1));
+        let position = if reflection_height <= 1 {
+            1.0
+        } else {
+            target_y as f32 / (reflection_height - 1) as f32
+        };
+        let fade = if end_position > 0.0 {
+            (position / end_position).clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        let opacity = (start_alpha + (end_alpha - start_alpha) * fade).clamp(0.0, 1.0);
+
+        for x in 0..width {
+            let source_index = (source_y * width + x) * 4;
+            let target_index = (target_y * width + x) * 4;
+            reflected[target_index] = source[source_index];
+            reflected[target_index + 1] = source[source_index + 1];
+            reflected[target_index + 2] = source[source_index + 2];
+            reflected[target_index + 3] = (source[source_index + 3] as f32 * opacity).round() as u8;
+        }
+    }
+
+    let radius = (blur_radius * 0.5).ceil().clamp(0.0, 8.0) as i32;
+    if radius == 0 {
+        return reflected;
+    }
+
+    let mut blurred = reflected.clone();
+    for y in 0..reflection_height {
+        for x in 0..width {
+            let mut sum = 0_u32;
+            let mut count = 0_u32;
+            for offset in -radius..=radius {
+                let sample_x = (x as i32 + offset).clamp(0, width as i32 - 1) as usize;
+                sum += reflected[(y * width + sample_x) * 4 + 3] as u32;
+                count += 1;
+            }
+            blurred[(y * width + x) * 4 + 3] = (sum / count) as u8;
+        }
+    }
+    blurred
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn rasterize_buffer(
     font_system: &mut FontSystem,

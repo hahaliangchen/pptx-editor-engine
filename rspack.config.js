@@ -37,6 +37,7 @@ module.exports = {
       {
         test: /\.css$/,
         use: ["style-loader", "css-loader"],
+        type: "javascript/auto",
       },
     ],
   },
@@ -49,7 +50,7 @@ module.exports = {
     asyncWebAssembly: true,
   },
   devServer: {
-    port: 3000,
+    port: process.env.PORT ? Number(process.env.PORT) : 3000,
     hot: true,
   },
 };
