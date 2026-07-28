@@ -3,7 +3,9 @@ import {
   EffectStyle,
   FillStyle,
   GradientStop,
+  LineEndStyle,
   LineStyle,
+  ShadowStyle,
   ShapeStyleProperty,
   StyleRule,
   ThemeStyleMatrix
@@ -130,9 +132,9 @@ export class PptxStyleResolver {
   }
 
   parseFillStyle(container: Element, placeholderColor?: string | null): FillStyle | undefined {
-    const fillNode = hasLocalName(container, ["solidFill", "gradFill", "noFill"])
+    const fillNode = hasLocalName(container, ["solidFill", "gradFill", "noFill", "pattFill", "blipFill"])
       ? container
-      : getDirectChild(container, "noFill", "solidFill", "gradFill");
+      : getDirectChild(container, "noFill", "solidFill", "gradFill", "pattFill", "blipFill");
     if (!fillNode) return undefined;
     if (hasLocalName(fillNode, ["noFill"])) return { type: "none" };
 
@@ -141,6 +143,33 @@ export class PptxStyleResolver {
       return color
         ? { type: "solid", color: this.applyColorOpacity(color, this.extractOpacity(fillNode)) }
         : undefined;
+    }
+
+    if (hasLocalName(fillNode, ["pattFill"])) {
+      const preset = getDirectChild(fillNode, "prst")?.getAttribute("val") || "5Percent";
+      const foreground = this.extractHexColor(getDirectChild(fillNode, "fgClr") || fillNode, placeholderColor);
+      const background = this.extractHexColor(getDirectChild(fillNode, "bgClr") || fillNode, placeholderColor);
+      if (!foreground && !background) return undefined;
+      return {
+        type: "pattern",
+        preset,
+        foreground: foreground || "#000000",
+        background: background || "#ffffff"
+      };
+    }
+
+    if (hasLocalName(fillNode, ["blipFill"])) {
+      const blip = getDirectChild(fillNode, "blip");
+      const srcRect = getDirectChild(fillNode, "srcRect");
+      const readCrop = (name: string) => Math.max(0, Math.min(1, parseInt(srcRect?.getAttribute(name) || "0", 10) / 100000));
+      return {
+        type: "picture",
+        embed: blip?.getAttribute("r:embed") || blip?.getAttribute("embed") || undefined,
+        mode: getDirectChild(fillNode, "tile") ? "tile" : "stretch",
+        srcRect: srcRect
+          ? { left: readCrop("l"), top: readCrop("t"), right: readCrop("r"), bottom: readCrop("b") }
+          : undefined
+      };
     }
 
     const stopList = getDirectChild(fillNode, "gsLst");
@@ -185,13 +214,26 @@ export class PptxStyleResolver {
     const dashNode = getDirectChild(line, "prstDash");
     const joinNode = getDirectChild(line, "round", "bevel", "miter");
     const cap = line.getAttribute("cap");
+    const parseLineEnd = (name: "headEnd" | "tailEnd"): LineEndStyle | undefined => {
+      const end = getDirectChild(line, name);
+      if (!end) return undefined;
+      const width = end.getAttribute("w");
+      const length = end.getAttribute("len");
+      return {
+        type: end.getAttribute("type") || "none",
+        width: width === "sm" || width === "med" || width === "lg" ? width : undefined,
+        length: length === "sm" || length === "med" || length === "lg" ? length : undefined
+      };
+    };
     return {
       fill: resolvedFill,
       width,
       dash: dashNode?.getAttribute("val") || undefined,
       cap: cap === "rnd" ? "round" : cap === "sq" ? "square" : cap === "flat" ? "butt" : undefined,
       join: joinNode ? (joinNode.localName || joinNode.nodeName.replace(/^.*:/, "")) : undefined,
-      compound: line.getAttribute("cmpd") || undefined
+      compound: line.getAttribute("cmpd") || undefined,
+      headEnd: parseLineEnd("headEnd"),
+      tailEnd: parseLineEnd("tailEnd")
     };
   }
 
@@ -204,23 +246,34 @@ export class PptxStyleResolver {
       ? container
       : getDirectChild(container, "effectLst", "effectDag") || container;
     const shadow = querySelector(effectRoot, "a\\:outerShdw, outerShdw");
+    const innerShadow = querySelector(effectRoot, "a\\:innerShdw, innerShdw");
     const glow = querySelector(effectRoot, "a\\:glow, glow");
+    const reflection = querySelector(effectRoot, "a\\:reflection, reflection");
+    const softEdge = querySelector(effectRoot, "a\\:softEdge, softEdge");
+    const blur = querySelector(effectRoot, "a\\:blur, blur");
+    const fillOverlay = querySelector(effectRoot, "a\\:fillOverlay, fillOverlay");
     const result: EffectStyle = {};
 
+    const parseShadow = (node: Element): ShadowStyle | undefined => {
+      const color = this.extractHexColor(node, placeholderColor);
+      if (!color) return undefined;
+      return {
+        color,
+        opacity: this.extractOpacity(node),
+        blur: parseInt(node.getAttribute("blurRad") || "0", 10) * absoluteUnitScale,
+        distance: parseInt(node.getAttribute("dist") || "0", 10) * absoluteUnitScale,
+        direction: parseInt(node.getAttribute("dir") || "0", 10) / 60000,
+        scaleX: parseInt(node.getAttribute("sx") || "100000", 10) / 100000,
+        scaleY: parseInt(node.getAttribute("sy") || "100000", 10) / 100000,
+        alignment: node.getAttribute("algn") || undefined
+      };
+    };
+
     if (shadow) {
-      const color = this.extractHexColor(shadow, placeholderColor);
-      if (color) {
-        result.outerShadow = {
-          color,
-          opacity: this.extractOpacity(shadow),
-          blur: parseInt(shadow.getAttribute("blurRad") || "0", 10) * absoluteUnitScale,
-          distance: parseInt(shadow.getAttribute("dist") || "0", 10) * absoluteUnitScale,
-          direction: parseInt(shadow.getAttribute("dir") || "0", 10) / 60000,
-          scaleX: parseInt(shadow.getAttribute("sx") || "100000", 10) / 100000,
-          scaleY: parseInt(shadow.getAttribute("sy") || "100000", 10) / 100000,
-          alignment: shadow.getAttribute("algn") || undefined
-        };
-      }
+      result.outerShadow = parseShadow(shadow);
+    }
+    if (innerShadow) {
+      result.innerShadow = parseShadow(innerShadow);
     }
     if (glow) {
       const color = this.extractHexColor(glow, placeholderColor);
@@ -232,7 +285,25 @@ export class PptxStyleResolver {
         };
       }
     }
-    return result.outerShadow || result.glow ? result : undefined;
+    if (reflection) {
+      result.reflection = {
+        blurRadius: parseInt(reflection.getAttribute("blurRad") || "0", 10) * absoluteUnitScale,
+        startAlpha: Math.max(0, Math.min(1, parseInt(reflection.getAttribute("stA") || "0", 10) / 100000)),
+        endAlpha: Math.max(0, Math.min(1, parseInt(reflection.getAttribute("endA") || "0", 10) / 100000)),
+        endPosition: Math.max(0, Math.min(1, parseInt(reflection.getAttribute("endPos") || "100000", 10) / 100000)),
+        direction: parseInt(reflection.getAttribute("dir") || "0", 10) / 60000,
+        distance: parseInt(reflection.getAttribute("dist") || "0", 10) * absoluteUnitScale,
+        scaleY: parseInt(reflection.getAttribute("sy") || "-100000", 10) / 100000,
+        alignment: reflection.getAttribute("algn") || undefined,
+        rotationWithShape: reflection.getAttribute("rotWithShape") === "1"
+          || reflection.getAttribute("rotWithShape") === "true"
+      };
+    }
+    if (softEdge) result.softEdge = { radius: parseInt(softEdge.getAttribute("rad") || "0", 10) * absoluteUnitScale };
+    if (blur) result.blur = { radius: parseInt(blur.getAttribute("rad") || "0", 10) * absoluteUnitScale };
+    if (fillOverlay) result.fillOverlay = this.parseFillStyle(fillOverlay, placeholderColor);
+    return result.outerShadow || result.innerShadow || result.glow || result.reflection
+      || result.softEdge || result.blur || result.fillOverlay ? result : undefined;
   }
 
   resolveThemeStyleRules(

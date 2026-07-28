@@ -27,6 +27,11 @@ export interface TextStyle {
   italic?: boolean;
   letterSpacing?: number;
   reflection?: ReflectionStyle;
+  /** DrawingML run outline (a:rPr/a:ln). */
+  outline?: {
+    color: string;
+    width: number;
+  };
 }
 
 export interface TextRun {
@@ -70,6 +75,8 @@ export interface TextBodyProperties {
   marginBottom: number;
   verticalAnchor: "top" | "middle" | "bottom";
   autoFit: "none" | "shape" | "shrink";
+  /** DrawingML bodyPr@wrap controls whether lines may wrap inside the body. */
+  wrap?: "square" | "none";
   verticalOverflow?: "overflow" | "clip" | "ellipsis";
   horizontalOverflow?: "overflow" | "clip" | "ellipsis";
   fontScale?: number;
@@ -106,7 +113,26 @@ export type FillStyle =
       stops: GradientStop[];
       angle?: number;
       rotateWithShape?: boolean;
+    }
+  | {
+      type: "pattern";
+      preset: string;
+      foreground: string;
+      background: string;
+    }
+  | {
+      type: "picture";
+      embed?: string;
+      url?: string;
+      mode?: "stretch" | "tile";
+      srcRect?: { left: number; top: number; right: number; bottom: number };
     };
+
+export interface LineEndStyle {
+  type: string;
+  width?: "sm" | "med" | "lg";
+  length?: "sm" | "med" | "lg";
+}
 
 export interface LineStyle {
   fill: FillStyle;
@@ -115,6 +141,8 @@ export interface LineStyle {
   cap?: string;
   join?: string;
   compound?: string;
+  headEnd?: LineEndStyle;
+  tailEnd?: LineEndStyle;
 }
 
 export interface ShadowStyle {
@@ -134,9 +162,22 @@ export interface GlowStyle {
   radius: number;
 }
 
+export interface SoftEdgeStyle {
+  radius: number;
+}
+
+export interface BlurStyle {
+  radius: number;
+}
+
 export interface EffectStyle {
   outerShadow?: ShadowStyle;
+  innerShadow?: ShadowStyle;
   glow?: GlowStyle;
+  reflection?: ReflectionStyle;
+  softEdge?: SoftEdgeStyle;
+  blur?: BlurStyle;
+  fillOverlay?: FillStyle;
 }
 
 export interface ComputedShapeStyle {
@@ -163,11 +204,56 @@ export interface StyleRegistry {
   rules: Record<string, StyleRule>;
 }
 
+export type CustomGeometryCommand =
+  | { type: "moveTo"; x: number; y: number }
+  | { type: "lineTo"; x: number; y: number }
+  | {
+      type: "quadBezier";
+      controlX: number;
+      controlY: number;
+      x: number;
+      y: number;
+    }
+  | {
+      type: "cubicBezier";
+      control1X: number;
+      control1Y: number;
+      control2X: number;
+      control2Y: number;
+      x: number;
+      y: number;
+    }
+  | {
+      type: "arc";
+      widthRadius: number;
+      heightRadius: number;
+      startAngle: number;
+      sweepAngle: number;
+    }
+  | { type: "close" };
+
+export interface CustomGeometryPath {
+  width: number;
+  height: number;
+  commands: CustomGeometryCommand[];
+  /** DrawingML path-level fill mode; omitted means normal shape fill. */
+  fill?: "norm" | "none" | "lighten" | "lightenLess" | "darken" | "darkenLess";
+  /** DrawingML path-level stroke switch; omitted means stroke enabled. */
+  stroke?: boolean;
+}
+
+export interface CustomGeometry {
+  paths: CustomGeometryPath[];
+}
+
 export interface ShapeElement {
   type: "shape";
   id: string;
   rect: Rect;
-  shapeType: "rect" | "roundRect" | "ellipse" | "triangle" | "line" | "mathPlus" | "upArrow";
+  /** Raw a:prstGeom@prst value. Keeping it intact lets the renderer dispatch
+   * complete geometry families instead of silently reducing unknown shapes to
+   * rectangles. */
+  shapeType: string;
   /** xfrm rotation, in canvas degrees. */
   rotation?: number;
   flipH?: boolean;
@@ -177,6 +263,10 @@ export interface ShapeElement {
   /** Normalized OOXML upArrow adjustments. */
   arrowHeadHeight?: number;
   arrowShaftWidth?: number;
+  /** Normalized a:prstGeom/a:avLst adjustment guides. */
+  adjustments?: Record<string, number>;
+  /** Parsed a:custGeom paths, kept separate from preset geometry dispatch. */
+  customGeometry?: CustomGeometry;
   fill: string;
   border?: Border;
   styleRefs?: string[];
@@ -190,6 +280,10 @@ export interface ImageElement {
   rect: Rect;
   url: string;
   crop?: ImageCrop;
+  rotation?: number;
+  flipH?: boolean;
+  flipV?: boolean;
+  effects?: EffectStyle;
 }
 
 export interface ImageCrop {
@@ -251,6 +345,10 @@ export interface ComputedRunStyle {
   italic: boolean;
   letterSpacing: number;
   reflection?: ReflectionStyle;
+  outline?: {
+    color: string;
+    width: number;
+  };
 }
 
 export interface ThemeStyleMatrix {

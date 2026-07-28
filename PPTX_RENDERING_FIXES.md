@@ -15,6 +15,7 @@
 
 - `src/pptx-virtual-dom.ts`：虚拟 DOM、文本、形状和样式类型；
 - `src/pptx-xml.ts`：命名空间兼容的 XML 查询工具；
+- `src/pptx-custom-geometry.ts`：`custGeom/pathLst`、guide 公式和自定义路径命令解析；
 - `src/pptx-style-resolver.ts`：theme 颜色/字体、填充、线条、效果和 style reference 解析；
 - `src/pptx-parser.ts`：ZIP/XML 流程、placeholder 关系和元素组装。
 
@@ -29,6 +30,7 @@ Rust 首轮已经拆出：
 - `rust-engine/src/text_layout.rs`：字体指标、paragraph/run 布局、CJK 换行、行距和 bullet buffer；
 - `rust-engine/src/font_renderer.rs`：glyph 光栅化、像素 alpha blend、悬挂标点和文本诊断；
 - `rust-engine/src/image_renderer.rs`：图片平滑、裁剪和 Canvas 合成；
+- `rust-engine/src/shape_geometry/custom.rs`：自定义几何路径、贝塞尔曲线、椭圆弧和命中区域采样；
 - `rust-engine/src/lib.rs`：WASM 生命周期、字体注册、元素遍历和模块编排；不再保留 shape/effects 或文本布局的重复实现。
 
 当前渲染路径已经调用上述模块。`lib.rs` 只负责 WASM 生命周期、字体注册、文本位图合成和元素遍历，具体的 shape、effect、image、layout 和 glyph 渲染分别由对应模块实现。
@@ -193,9 +195,14 @@ WPS 中“目标客户”“智能体核心能力”“核心亮点”和“业�
 
 同页文字使用 run 级 `a:reflection`，参数包含 `blurRad=6350`、`stA=55000`、
 `endA=300`、`endPos=45500`、`dir=5400000`、`sy=-100000` 和 `algn=bl`。
-反射作用于实际字形轮廓，不是包含 margin、leading 的整块文本行盒。Rust 现在先从
-RGBA 文本位图提取非透明像素的垂直边界，再以实际 glyph 底边作为镜像轴；同时保留
-`dist/dir` 位移。这样不会因为行盒底部的透明区域而把镜像整体向下推远。
+反射作用于每个排版行的实际字形轮廓，不是把多行文字作为一个整块文本行盒翻转。
+Rust 现在按 `LayoutRun` 分行，从 RGBA 文本位图提取每行非透明像素的垂直边界，
+再以该行 glyph 底边作为镜像轴；同时保留
+`dist/dir` 位移。`endPos` 同时限制可见反射位图的高度，并在该范围内完成
+`stA -> endA` 渐隐，避免把终点之后的低透明尾巴继续绘制出来。这样不会因为行盒
+底部的透明区域或渐隐尾巴而把镜像视觉上暴露得过长。反射绘制还单独使用文本框
+几何范围作为 clip；正文的 `vertOverflow` 仍按 XML 决定，不能用这个效果 clip
+代替正文溢出策略。元素之间的覆盖继续遵循 slide `spTree` 顺序。
 
 ## 核心亮点文本框的实际值
 
@@ -237,7 +244,31 @@ The percentage increment is currently multiplied by a small WPS compatibility
 factor (`0.8`) so the final baseline distance is slightly tighter than the
 literal metric-plus-120% result while the XML `spcPct` value remains intact.
 
+## Text-box measure and line alignment
+
+第三页中，文字框和三角形虽然视觉上相邻，但 PPTX 文本排版仍应以文本框自身的
+固定可用宽度为准。相邻 shape 不参与正文换行，也不能动态改变某一行的宽度。Rust
+现在让每个段落使用同一个 `innerWidth` 进行换行和 glyph 绘制：左边界、右边界和
+段落对齐方式保持一致，不再沿三角形斜边逐行增加可用宽度。
+
+该规则约束的是实际字形 advance，而不是简单的字符数量。中文全角字符通常会表现
+为每行相同的字数；英文、标点和不同字体仍按真实 glyph 宽度换行。
+
 ## 当前仍需完善
+
+## 2D 效果能力扩展（不含 3D 场景）
+
+本轮把效果节点按数据类型接入统一 AST，而不是把所有效果降级成一个布尔值：
+
+- `a:outerShdw`、`a:innerShdw`、`a:glow`、`a:softEdge`、`a:blur`、`a:fillOverlay` 和 `a:reflection` 由 `PptxStyleResolver` 解析。
+- 形状外阴影继续使用独立 alpha mask；内阴影使用形状内部裁剪的反向模糊近似；柔化边缘使用 `destination-in` 的模糊 alpha mask。
+- 图片元素现在保留 `p:spPr/a:effectLst`，图片外阴影和图片裁剪共用同一绘制路径，不再只绘制图片本体。
+- `a:pattFill`、`a:blipFill` 的图案/图片填充元数据已保留。图案目前使用前景色兼容回退，图片填充会加载关系图片并按当前形状路径裁剪绘制，复杂 tile/srcRect 的精确采样仍需补齐。
+- 图片 `a:xfrm` 的 `rot/flipH/flipV` 已围绕图片中心应用；形状 `blipFill` 现在会加载关系图片并在当前形状路径内裁剪绘制，默认按 stretch 模式处理。
+- 线条 `headEnd/tailEnd` 已解析，直线和直连接器支持三角、菱形、圆形和 open 端点的近似绘制；弯折连接器的路由箭头和 Office 精确尺寸仍需校准。
+- `a:rPr/a:ln` 的文字轮廓已解析到 run AST；字形级描边仍需在 glyph mask 层实现。
+- `a:custGeom` 已按独立类型解析和渲染：支持常见 guide 公式、`moveTo/lnTo/quadBezTo/cubicBezTo/arcTo/close`，并尊重路径级 `fill="none"`、`fill="lighten/lightenLess/darken/darkenLess"` 与 `stroke="0"`。多路径按 XML 顺序逐条绘制；lighten/darken 使用 Canvas `screen/multiply` 近似，DrawingML `arcTo` 的极端连接语义仍需更多样本校准。
+- `a:scene3d`、`a:sp3d`、`a:prstShdw` 和 WordArt 变形暂不处理，避免用 2D 近似破坏现有版式。
 
 - `spAutoFit` 已支持按实际排版高度生成文本位图；TS 虚拟 DOM 中的 shape 几何和后续元素位置仍不会随自动增高同步重排。
 - `normAutofit` 目前只做字号缩小循环，尚未完整复现 Office 的最小字号和迭代策略。

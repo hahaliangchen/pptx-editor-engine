@@ -237,6 +237,7 @@ pub fn normalize_text_element(txt: &TextElement) -> TextElement {
                 margin_bottom: 4.0,
                 vertical_anchor: "top".to_string(),
                 auto_fit: "none".to_string(),
+                wrap: "square".to_string(),
                 vertical_overflow: "overflow".to_string(),
                 horizontal_overflow: "overflow".to_string(),
                 font_scale: 1.0,
@@ -731,7 +732,13 @@ pub fn build_cosmic_paragraphs(
                 _ => Align::Left,
             };
             let mut buffer = Buffer::new_empty(Metrics::new(font_size, line_height));
-            if is_east_asian_text(&text)
+            let wrap_none = txt
+                .body
+                .as_ref()
+                .map(|body| body.wrap == "none")
+                .unwrap_or(false);
+            if !wrap_none
+                && is_east_asian_text(&text)
                 && (paragraph.style.hanging_punctuation || paragraph.style.indent != 0.0)
             {
                 for (start, end) in build_explicit_wrap_ranges(
@@ -778,13 +785,13 @@ pub fn build_cosmic_paragraphs(
                     BufferLine::new(&text, LineEnding::None, attrs_list, Shaping::Advanced);
                 line.set_align(Some(align));
                 buffer.lines.push(line);
-                buffer.set_wrap(
-                    if paragraph.style.east_asian_line_break || is_east_asian_text(&text) {
-                        Wrap::WordOrGlyph
-                    } else {
-                        Wrap::Word
-                    },
-                );
+                buffer.set_wrap(if wrap_none {
+                    Wrap::None
+                } else if paragraph.style.east_asian_line_break || is_east_asian_text(&text) {
+                    Wrap::WordOrGlyph
+                } else {
+                    Wrap::Word
+                });
             }
             buffer.set_hinting(Hinting::Disabled);
             let alignment_width = if centered_hanging_paragraph {

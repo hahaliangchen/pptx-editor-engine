@@ -4,6 +4,7 @@ import {
   PptxParser,
   PresentationAST,
   Slide,
+  ShapeElement,
   PresentationSize
 } from "./pptx-parser";
 import * as wasm from "../rust-engine/pkg/ppt_engine";
@@ -36,10 +37,14 @@ export default class PptViewer {
   private canvas: HTMLCanvasElement;
   private ctx: CanvasRenderingContext2D;
   private renderer: wasm.RustPptRenderer | null = null;
+  private cacheCanvas: HTMLCanvasElement | null = null;
+  private cacheContext: CanvasRenderingContext2D | null = null;
+  private cacheRenderer: wasm.RustPptRenderer | null = null;
   private parser: PptxParser;
   private presentation: PptVirtualDocument | null = null;
   private currentSlideIndex: number = 0;
   private imageCache: Record<string, HTMLImageElement> = {};
+  private registeredFontBytes: Uint8Array[] = [];
   private slideJsonCache = new Map<string, string>();
   private renderedSlideCache = new Map<string, RenderedSlideSnapshot>();
   private fontBackendUrl: string;
@@ -52,6 +57,8 @@ export default class PptViewer {
   private debugTextBoxes: boolean;
   private renderEpoch = 0;
   private isRenderingThumbnails = false;
+  private cacheWarmupEpoch = 0;
+  private loadSequence = 0;
 
   // Callbacks
   private onSlideChange?: (slideIndex: number, slide: Slide) => void;
@@ -99,9 +106,31 @@ export default class PptViewer {
     }
   }
 
+  private async fetchFontBackend(path: string): Promise<Response> {
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 10000);
+    console.log(`[Font Backend] request ${path}`);
+    try {
+      const response = await fetch(`${this.fontBackendUrl}${path}`, {
+        signal: controller.signal
+      });
+      console.log(`[Font Backend] response ${path} status=${response.status}`);
+      return response;
+    } catch (err) {
+      if (controller.signal.aborted) {
+        console.error(`[Font Backend] timeout ${path}`);
+        throw new Error("字体后端请求超时，请确认 8080 端口服务正在运行。");
+      }
+      console.error(`[Font Backend] failed ${path}`, err);
+      throw new Error("无法连接字体后端，请确认 8080 端口服务正在运行。");
+    } finally {
+      window.clearTimeout(timeout);
+    }
+  }
+
   private getFontCatalog(): Promise<string[]> {
     if (!this.fontCatalogPromise) {
-      this.fontCatalogPromise = fetch(`${this.fontBackendUrl}/api/fonts`)
+      this.fontCatalogPromise = this.fetchFontBackend("/api/fonts")
         .then(response => {
           if (!response.ok) throw new Error(`Font backend returned HTTP ${response.status}`);
           return response.json() as Promise<string[]>;
@@ -109,6 +138,10 @@ export default class PptViewer {
         .then(families => {
           console.log(`[Font Manager] Backend exposes ${families.length} font families.`);
           return families;
+        })
+        .catch(err => {
+          this.fontCatalogPromise = null;
+          throw err;
         });
     }
     return this.fontCatalogPromise;
@@ -181,17 +214,22 @@ export default class PptViewer {
 
     const load = (async () => {
       if (!this.renderer) throw new Error("WASM renderer is not initialized");
+      console.log(`[Font Manager] loading ${family} (${weight}, italic=${italic})`);
       const query = new URLSearchParams({
         family,
         weight: weight.toString(),
         italic: italic.toString()
       });
-      const response = await fetch(`${this.fontBackendUrl}/api/font?${query}`);
+      const response = await this.fetchFontBackend(`/api/font?${query}`);
       if (!response.ok) {
         throw new Error(`Font backend could not provide ${family} (${weight}, italic=${italic})`);
       }
-      const buffer = await response.arrayBuffer();
-      this.renderer.register_font(new Uint8Array(buffer));
+      const fontBytes = new Uint8Array(await response.arrayBuffer());
+      this.renderer.register_font(fontBytes);
+      this.registeredFontBytes.push(fontBytes);
+      if (this.cacheRenderer) {
+        this.cacheRenderer.register_font(fontBytes);
+      }
       this.loadedFontKeys.add(key);
       console.log(`[Font Manager] Registered backend font in Rust: ${family} (${weight}, italic=${italic}).`);
     })().finally(() => this.fontLoads.delete(key));
@@ -249,23 +287,50 @@ export default class PptViewer {
 
   // Load PPTX file from ArrayBuffer
   public async loadPptx(buffer: ArrayBuffer): Promise<PptVirtualDocument> {
-    this.presentation = await this.parser.parse(buffer);
-    await this.engineReady;
-    await this.ensurePresentationFonts(this.presentation);
-    this.currentSlideIndex = 0;
-    this.imageCache = {}; // Clear old image cache
-    this.slideJsonCache.clear();
-    this.renderedSlideCache.clear();
+    const loadId = ++this.loadSequence;
+    const startedAt = performance.now();
+    const log = (message: string, ...args: unknown[]) => {
+      console.log(
+        `[PPTX Load #${loadId}] +${Math.round(performance.now() - startedAt)}ms ${message}`,
+        ...args
+      );
+    };
+    log(`start bytes=${buffer.byteLength}`);
 
-    // Paint the active slide first so it is on screen, then run any
-    // onLoadComplete work (e.g. thumbnail generation, which repurposes the
-    // shared canvas) with the main canvas already in its final state.
-    await this.renderCurrentSlide();
-    if (this.onLoadComplete) {
-      await this.onLoadComplete(this.presentation);
+    try {
+      log("parse:start");
+      this.presentation = await this.parser.parse(buffer);
+      log(`parse:done slides=${this.presentation.slides.length}`);
+
+      log("wasm:init:wait");
+      await this.engineReady;
+      log("wasm:init:ready");
+
+      log("fonts:start");
+      await this.ensurePresentationFonts(this.presentation);
+      log("fonts:done");
+
+      this.currentSlideIndex = 0;
+      this.imageCache = {}; // Clear old image cache
+      this.slideJsonCache.clear();
+      this.renderedSlideCache.clear();
+
+      log("first-slide:start");
+      await this.renderCurrentSlide();
+      log("first-slide:done");
+
+      if (this.onLoadComplete) {
+        log("onLoadComplete:start");
+        await this.onLoadComplete(this.presentation);
+        log("onLoadComplete:done");
+      }
+
+      log("complete");
+      return this.presentation;
+    } catch (error) {
+      log("failed", error);
+      throw error;
     }
-
-    return this.presentation;
   }
 
   // Load a pre-built PPT Virtual DOM (for demos / testing).
@@ -297,6 +362,9 @@ export default class PptViewer {
     if (!this.presentation || !this.renderer) return [];
     await this.engineReady;
 
+    const startedAt = performance.now();
+    console.log(`[Thumbnails] start slides=${this.presentation.slides.length}`);
+
     const logicalSize = this.presentation.size;
     const ratio = logicalSize.width / logicalSize.height;
     const dpr = window.devicePixelRatio || 1;
@@ -319,21 +387,15 @@ export default class PptViewer {
 
     try {
       for (const slide of this.presentation.slides) {
+        console.log(`[Thumbnails] render:start slide=${slide.id}`);
         // Preload images referenced by this slide so the thumbnail is complete.
-        const imageElements = slide.elements.filter(el => el.type === "image") as ImageElement[];
-        await Promise.all(imageElements.map(async (img) => {
-          if (this.imageCache[img.url]) return;
-          try {
-            this.imageCache[img.url] = await this.loadImage(img.url);
-          } catch (err) {
-            console.error(`Failed to preload thumbnail image: ${img.url}`, err);
-          }
-        }));
+        await this.preloadSlideImages(slide, "thumbnail");
 
         this.ctx.setTransform(scale, 0, 0, scale, 0, 0);
         try {
           this.renderer.render_slide(this.serializeSlideForRenderer(slide), this.imageCache);
           thumbnails.push(this.canvas.toDataURL("image/png"));
+          console.log(`[Thumbnails] render:done slide=${slide.id}`);
         } catch (err) {
           console.error("Error while rendering thumbnail:", err);
           thumbnails.push("");
@@ -350,6 +412,7 @@ export default class PptViewer {
       await this.renderCurrentSlide();
     }
 
+    console.log(`[Thumbnails] complete +${Math.round(performance.now() - startedAt)}ms`);
     return thumbnails;
   }
 
@@ -425,18 +488,7 @@ export default class PptViewer {
     }
 
     // 1. Preload all images in the slide
-    const imageElements = slide.elements.filter(el => el.type === "image") as ImageElement[];
-    const loadPromises = imageElements.map(async (img) => {
-      if (this.imageCache[img.url]) return;
-      try {
-        const loadedImg = await this.loadImage(img.url);
-        this.imageCache[img.url] = loadedImg;
-      } catch (err) {
-        console.error(`Failed to preload image: ${img.url}`, err);
-      }
-    });
-
-    await Promise.all(loadPromises);
+    await this.preloadSlideImages(slide, "slide");
 
     // A rapid click sequence may finish image loading out of order. Drop a
     // stale request so it cannot render over the newest selected slide.
@@ -444,6 +496,26 @@ export default class PptViewer {
 
     // 2. Setup canvas dimensions and scale
     this.resizeAndRedraw(slide);
+  }
+
+  private async preloadSlideImages(slide: Slide, context: "slide" | "thumbnail" | "cache") {
+    const imageElements = slide.elements.filter(el => el.type === "image") as ImageElement[];
+    const shapeFillUrls = slide.elements
+      .filter((el): el is ShapeElement => el.type === "shape")
+      .map(el => el.computedStyle?.fill)
+      .flatMap(fill => fill?.type === "picture" && fill.url ? [fill.url] : []);
+    const imageUrls = [
+      ...imageElements.map(img => img.url),
+      ...shapeFillUrls
+    ];
+    await Promise.all(imageUrls.map(async (url) => {
+      if (this.imageCache[url]) return;
+      try {
+        this.imageCache[url] = await this.loadImage(url);
+      } catch (err) {
+        console.error(`Failed to preload ${context} image: ${url}`, err);
+      }
+    }));
   }
 
   private serializeSlideForRenderer(slide: Slide): string {
@@ -457,18 +529,110 @@ export default class PptViewer {
     return json;
   }
 
-  private cacheRenderedSlide(slide: Slide): void {
+  private cacheRenderedSlide(
+    slide: Slide,
+    sourceCanvas: HTMLCanvasElement = this.canvas
+  ): void {
     const snapshot = document.createElement("canvas");
-    snapshot.width = this.canvas.width;
-    snapshot.height = this.canvas.height;
+    snapshot.width = sourceCanvas.width;
+    snapshot.height = sourceCanvas.height;
     const snapshotContext = snapshot.getContext("2d");
     if (!snapshotContext) return;
-    snapshotContext.drawImage(this.canvas, 0, 0);
+    snapshotContext.drawImage(sourceCanvas, 0, 0);
     this.renderedSlideCache.set(slide.id, {
-      width: this.canvas.width,
-      height: this.canvas.height,
+      width: sourceCanvas.width,
+      height: sourceCanvas.height,
       canvas: snapshot
     });
+  }
+
+  private ensureCacheRenderer(width: number, height: number): void {
+    if (
+      this.cacheRenderer
+      && this.cacheCanvas
+      && this.cacheCanvas.width === width
+      && this.cacheCanvas.height === height
+    ) {
+      return;
+    }
+
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const context = canvas.getContext("2d");
+    if (!context) throw new Error("Failed to create the background slide cache context");
+
+    const renderer = new wasm.RustPptRenderer(context);
+    for (const fontBytes of this.registeredFontBytes) {
+      renderer.register_font(fontBytes);
+    }
+    this.cacheCanvas = canvas;
+    this.cacheContext = context;
+    this.cacheRenderer = renderer;
+  }
+
+  private scheduleSlideCacheWarmup(): void {
+    if (!this.presentation || !this.renderer || this.isRenderingThumbnails) return;
+
+    const epoch = ++this.cacheWarmupEpoch;
+    window.setTimeout(() => {
+      void this.warmNextSlide(epoch);
+    }, 0);
+  }
+
+  private async warmNextSlide(epoch: number): Promise<void> {
+    if (
+      epoch !== this.cacheWarmupEpoch
+      || !this.presentation
+      || !this.renderer
+      || this.isRenderingThumbnails
+    ) {
+      return;
+    }
+
+    const width = this.canvas.width;
+    const height = this.canvas.height;
+    if (width < 1 || height < 1) return;
+
+    const logicalSize = this.presentation.size;
+    const scale = Math.min(width / logicalSize.width, height / logicalSize.height);
+    const offsetX = (width - logicalSize.width * scale) / 2;
+    const offsetY = (height - logicalSize.height * scale) / 2;
+    const orderedIndices = this.presentation.slides
+      .map((_, index) => index)
+      .sort((a, b) => {
+        const distanceA = Math.abs(a - this.currentSlideIndex);
+        const distanceB = Math.abs(b - this.currentSlideIndex);
+        return distanceA - distanceB;
+      });
+    const slide = orderedIndices
+      .map(index => this.presentation?.slides[index])
+      .find(candidate => {
+        if (!candidate) return false;
+        const cached = this.renderedSlideCache.get(candidate.id);
+        return !cached || cached.width !== width || cached.height !== height;
+      });
+    if (!slide) return;
+
+    this.ensureCacheRenderer(width, height);
+    await this.preloadSlideImages(slide, "cache");
+    if (
+      epoch !== this.cacheWarmupEpoch
+      || !this.presentation
+      || !this.cacheRenderer
+      || !this.cacheContext
+    ) {
+      return;
+    }
+
+    this.cacheContext.setTransform(scale, 0, 0, scale, offsetX, offsetY);
+    this.cacheRenderer.render_slide(this.serializeSlideForRenderer(slide), this.imageCache);
+    this.cacheRenderedSlide(slide, this.cacheCanvas!);
+
+    // Yield between pages so a large deck does not monopolize the main thread.
+    window.setTimeout(() => {
+      void this.warmNextSlide(epoch);
+    }, 0);
   }
 
   private resizeAndRedraw(slideOverride?: Slide) {
@@ -560,6 +724,7 @@ export default class PptViewer {
     }
 
     this.ctx.restore();
+    this.scheduleSlideCacheWarmup();
   }
 
   private drawDebugTextBoxes(slide: Slide): void {

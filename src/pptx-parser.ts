@@ -40,6 +40,7 @@ import {
   querySelectorAll
 } from "./pptx-xml";
 import { PptxStyleResolver } from "./pptx-style-resolver";
+import { parseCustomGeometry } from "./pptx-custom-geometry";
 
 export * from "./pptx-virtual-dom";
 
@@ -364,42 +365,7 @@ export class PptxParser {
   }
 
   private parseFillStyle(container: Element, placeholderColor?: string | null): FillStyle | undefined {
-    const fillNode = hasLocalName(container, ["solidFill", "gradFill", "noFill"])
-      ? container
-      : getDirectChild(container, "noFill", "solidFill", "gradFill");
-    if (!fillNode) return undefined;
-    if (hasLocalName(fillNode, ["noFill"])) return { type: "none" };
-
-    if (hasLocalName(fillNode, ["solidFill"])) {
-      const color = this.extractHexColor(fillNode, placeholderColor);
-      return color
-        ? { type: "solid", color: this.applyColorOpacity(color, this.extractOpacity(fillNode)) }
-        : undefined;
-    }
-
-    const stopList = getDirectChild(fillNode, "gsLst");
-    const stops = (stopList ? getDirectChildren(stopList, "gs") : [])
-      .map(stop => {
-        const color = this.extractHexColor(stop, placeholderColor);
-        if (!color) return null;
-        return {
-          position: Math.max(0, Math.min(1, parseInt(stop.getAttribute("pos") || "0", 10) / 100000)),
-          color: this.applyColorOpacity(color, this.extractOpacity(stop))
-        };
-      })
-      .filter((stop): stop is GradientStop => stop !== null);
-    if (stops.length === 0) return undefined;
-    stops.sort((left, right) => left.position - right.position);
-
-    const linear = getDirectChild(fillNode, "lin");
-    const path = getDirectChild(fillNode, "path");
-    return {
-      type: "gradient",
-      kind: path ? "radial" : "linear",
-      stops,
-      angle: linear ? parseInt(linear.getAttribute("ang") || "0", 10) / 60000 : undefined,
-      rotateWithShape: fillNode.getAttribute("rotWithShape") !== "0"
-    };
+    return this.styleResolver.parseFillStyle(container, placeholderColor);
   }
 
   private parseLineStyle(
@@ -431,39 +397,7 @@ export class PptxParser {
     absoluteUnitScale: number,
     placeholderColor?: string | null
   ): EffectStyle | undefined {
-    const effectRoot = hasLocalName(container, ["effectLst", "effectDag"])
-      ? container
-      : getDirectChild(container, "effectLst", "effectDag") || container;
-    const shadow = querySelector(effectRoot, "a\\:outerShdw, outerShdw");
-    const glow = querySelector(effectRoot, "a\\:glow, glow");
-    const result: EffectStyle = {};
-
-    if (shadow) {
-      const color = this.extractHexColor(shadow, placeholderColor);
-      if (color) {
-        result.outerShadow = {
-          color,
-          opacity: this.extractOpacity(shadow),
-          blur: parseInt(shadow.getAttribute("blurRad") || "0", 10) * absoluteUnitScale,
-          distance: parseInt(shadow.getAttribute("dist") || "0", 10) * absoluteUnitScale,
-          direction: parseInt(shadow.getAttribute("dir") || "0", 10) / 60000,
-          scaleX: parseInt(shadow.getAttribute("sx") || "100000", 10) / 100000,
-          scaleY: parseInt(shadow.getAttribute("sy") || "100000", 10) / 100000,
-          alignment: shadow.getAttribute("algn") || undefined
-        };
-      }
-    }
-    if (glow) {
-      const color = this.extractHexColor(glow, placeholderColor);
-      if (color) {
-        result.glow = {
-          color,
-          opacity: this.extractOpacity(glow),
-          radius: parseInt(glow.getAttribute("rad") || "0", 10) * absoluteUnitScale
-        };
-      }
-    }
-    return result.outerShadow || result.glow ? result : undefined;
+    return this.styleResolver.parseEffectStyle(container, absoluteUnitScale, placeholderColor);
   }
 
   private registerStyleRule(rule: Omit<StyleRule, "id">): string {
@@ -836,6 +770,7 @@ export class PptxParser {
       marginBottom: 45720 * scaleY,
       verticalAnchor: "top",
       autoFit: "none",
+      wrap: "square",
       verticalOverflow: "overflow",
       horizontalOverflow: "overflow",
       fontScale: 1,
@@ -858,6 +793,11 @@ export class PptxParser {
       const textDirection = bodyPr.getAttribute("vert");
       if (textDirection) {
         result.textDirection = textDirection as NonNullable<TextBodyProperties["textDirection"]>;
+      }
+
+      const wrap = bodyPr.getAttribute("wrap");
+      if (wrap === "none" || wrap === "square") {
+        result.wrap = wrap;
       }
 
       if (querySelector(bodyPr, "a\\:spAutoFit, spAutoFit")) {
@@ -898,7 +838,7 @@ export class PptxParser {
 
       if (tagName.endsWith("sp") || tagName.endsWith("cxnSp")) {
         // Shape or connection shape
-        await this.parseShapeNode(node, transform, elements, isTemplate, placeholderContext);
+        await this.parseShapeNode(node, transform, elements, imgRelMap, isTemplate, placeholderContext);
       } else if (tagName.endsWith("pic")) {
         // Picture element
         await this.parsePicNode(node, transform, imgRelMap, elements, isTemplate);
@@ -995,6 +935,13 @@ export class PptxParser {
           || reflection.getAttribute("rotWithShape") === "true"
       } satisfies ReflectionStyle;
     }
+    const outlineNode = getDirectChild(rPr, "ln");
+    if (outlineNode) {
+      const outline = this.styleResolver.parseLineStyle(outlineNode, absoluteUnitScale, res.color);
+      if (outline?.fill.type === "solid") {
+        res.outline = { color: outline.fill.color, width: outline.width };
+      }
+    }
     // A run's fill and its effect list are siblings. Reading the first color
     // anywhere below rPr can accidentally select outerShdw's color instead of
     // the text fill.
@@ -1076,6 +1023,7 @@ export class PptxParser {
     node: Element,
     transform: TransformState,
     elements: SlideElement[],
+    imgRelMap: Record<string, string>,
     isTemplate: boolean = false,
     placeholderContext: PlaceholderContext | null = null
   ) {
@@ -1107,57 +1055,35 @@ export class PptxParser {
     const prstGeom = spPrNodes
       .map(candidate => getDirectChild(candidate, "prstGeom"))
       .find((candidate): candidate is globalThis.Element => candidate !== null) || null;
-    let shapeType: "rect" | "roundRect" | "ellipse" | "triangle" | "line" | "mathPlus" | "upArrow" = "rect";
-    if (prstGeom) {
-      const prst = prstGeom.getAttribute("prst");
-      if (prst === "ellipse" || prst === "oval") {
-        shapeType = "ellipse";
-      } else if (prst === "roundRect") {
-        shapeType = "roundRect";
-      } else if (prst === "triangle") {
-        shapeType = "triangle";
-      } else if (prst === "line") {
-        shapeType = "line";
-      } else if (prst === "mathPlus" || prst === "plus") {
-        shapeType = "mathPlus";
-      } else if (prst === "upArrow") {
-        shapeType = "upArrow";
-      }
-    }
+    const customGeometry = getDirectChild(spPr, "custGeom");
+    const parsedCustomGeometry = customGeometry ? parseCustomGeometry(customGeometry) : undefined;
+    let shapeType = prstGeom?.getAttribute("prst") || (customGeometry ? "custom" : "rect");
     const xfrm = spPrNodes
       .map(candidate => getDirectChild(candidate, "xfrm"))
       .find((candidate): candidate is globalThis.Element => candidate !== null) || null;
     const rotation = xfrm ? parseInt(xfrm.getAttribute("rot") || "0", 10) / 60000 : 0;
     const flipH = xfrm?.getAttribute("flipH") === "1" || xfrm?.getAttribute("flipH") === "true";
     const flipV = xfrm?.getAttribute("flipV") === "1" || xfrm?.getAttribute("flipV") === "true";
-    let cornerRadius: number | undefined;
-    if (shapeType === "roundRect" && prstGeom) {
+    const adjustments: Record<string, number> = {};
+    if (prstGeom) {
       const avLst = getDirectChild(prstGeom, "avLst");
-      const adjustment = avLst
-        ? getDirectChildren(avLst, "gd").find(node => node.getAttribute("name") === "adj")
-        : null;
-      const value = adjustment?.getAttribute("fmla")?.match(/val\s+(-?\d+(?:\.\d+)?)/)?.[1];
-      if (value !== undefined) {
-        cornerRadius = Math.max(0, Math.min(0.5, parseFloat(value) / 100000));
+      for (const adjustment of avLst ? getDirectChildren(avLst, "gd") : []) {
+        const name = adjustment.getAttribute("name");
+        const value = adjustment.getAttribute("fmla")?.match(/(?:val|pin)\s+(-?\d+(?:\.\d+)?)/)?.[1];
+        if (name && value !== undefined) adjustments[name] = parseFloat(value) / 100000;
       }
     }
+    const cornerRadius = shapeType === "roundRect" && adjustments.adj !== undefined
+      ? Math.max(0, Math.min(0.5, adjustments.adj))
+      : undefined;
     let arrowHeadHeight: number | undefined;
     let arrowShaftWidth: number | undefined;
-    if (shapeType === "upArrow" && prstGeom) {
-      const avLst = getDirectChild(prstGeom, "avLst");
-      const adjustments = avLst ? getDirectChildren(avLst, "gd") : [];
-      for (const adjustment of adjustments) {
-        const value = adjustment.getAttribute("fmla")?.match(/val\s+(-?\d+(?:\.\d+)?)/)?.[1];
-        if (value === undefined) continue;
-        const normalized = parseFloat(value) / 100000;
-        const name = adjustment.getAttribute("name");
-        if (name === "adj1") {
-          // upArrow's first guide is the arrowhead height.
-          arrowHeadHeight = Math.max(0.001, Math.min(0.5, normalized));
-        } else if (name === "adj2") {
-          // The second guide is the full shaft width.
-          arrowShaftWidth = Math.max(0.001, Math.min(1, normalized));
-        }
+    if (shapeType === "upArrow") {
+      if (adjustments.adj1 !== undefined) {
+        arrowHeadHeight = Math.max(0.001, Math.min(0.5, adjustments.adj1));
+      }
+      if (adjustments.adj2 !== undefined) {
+        arrowShaftWidth = Math.max(0.001, Math.min(1, adjustments.adj2));
       }
     }
 
@@ -1199,7 +1125,14 @@ export class PptxParser {
       }
 
       if (sourceSpPr) {
-        const directFill = this.styleResolver.parseFillStyle(sourceSpPr);
+        let directFill = this.styleResolver.parseFillStyle(sourceSpPr);
+        if (directFill?.type === "picture" && directFill.embed && imgRelMap[directFill.embed]) {
+          const imgZipFile = this.zip?.file(imgRelMap[directFill.embed]);
+          if (imgZipFile) {
+            const blob = await imgZipFile.async("blob");
+            directFill = { ...directFill, url: URL.createObjectURL(blob) };
+          }
+        }
         const directLineNode = getDirectChild(sourceSpPr, "ln");
         const directEffectNode = getDirectChild(sourceSpPr, "effectLst", "effectDag");
         const directEffects = this.styleResolver.parseEffectStyle(sourceSpPr, transform.absoluteUnitScale);
@@ -1251,7 +1184,15 @@ export class PptxParser {
       : undefined;
     const hasFill = computedStyle.fill.type !== "none";
     const hasBorder = !!computedStyle.line && computedStyle.line.fill.type !== "none";
-    const hasEffects = !!(computedStyle.effects?.outerShadow || computedStyle.effects?.glow);
+    const hasEffects = !!(
+      computedStyle.effects?.outerShadow
+      || computedStyle.effects?.innerShadow
+      || computedStyle.effects?.glow
+      || computedStyle.effects?.reflection
+      || computedStyle.effects?.softEdge
+      || computedStyle.effects?.blur
+      || computedStyle.effects?.fillOverlay
+    );
 
     if (hasFill || hasBorder || hasEffects) {
       elements.push({
@@ -1265,6 +1206,8 @@ export class PptxParser {
         cornerRadius,
         arrowHeadHeight,
         arrowShaftWidth,
+        adjustments,
+        customGeometry: parsedCustomGeometry,
         fill: fallbackFill,
         border,
         styleRefs,
@@ -1508,6 +1451,7 @@ export class PptxParser {
       marginBottom: 4,
       verticalAnchor: "top" as const,
       autoFit: "none" as const,
+      wrap: "square" as const,
       verticalOverflow: "overflow" as const,
       horizontalOverflow: "overflow" as const,
       fontScale: 1,
@@ -1659,6 +1603,21 @@ export class PptxParser {
         }
       }
 
+      // Title paragraphs in this deck inherit the level-1 hanging indent
+      // from lstStyle, but explicitly use text-only bullet properties
+      // (buClrTx/buSzTx/buFontTx) and have no bullet character. In that
+      // combination WPS resets the inherited hanging indent; keeping it
+      // would move the first title glyph outside the text box and clip it.
+      const explicitTextOnlyBulletProperties = pPr &&
+        !getDirectChild(pPr, "buChar") &&
+        (getDirectChild(pPr, "buNone") ||
+          getDirectChild(pPr, "buClrTx") ||
+          getDirectChild(pPr, "buSzTx") ||
+          getDirectChild(pPr, "buFontTx"));
+      if (!bulletChar && explicitTextOnlyBulletProperties) {
+        indent = 0;
+      }
+
       const computedRuns: TextRun[] = [];
       const runs = querySelectorAll(p, "a\\:r, r, a\\:fld, fld, a\\:br, br");
       for (const run of runs) {
@@ -1692,7 +1651,8 @@ export class PptxParser {
               eastAsianFontFamily: runStyle.eastAsianFontFamily || undefined,
               italic: runStyle.italic,
               letterSpacing: runStyle.letterSpacing,
-              reflection: runStyle.reflection
+              reflection: runStyle.reflection,
+              outline: runStyle.outline
             }
           });
         }
@@ -1714,7 +1674,8 @@ export class PptxParser {
             eastAsianFontFamily: emptyStyle.eastAsianFontFamily || undefined,
             italic: emptyStyle.italic,
             letterSpacing: emptyStyle.letterSpacing,
-            reflection: emptyStyle.reflection
+            reflection: emptyStyle.reflection,
+            outline: emptyStyle.outline
           }
         });
       }
@@ -1790,6 +1751,10 @@ export class PptxParser {
 
     const rect = this.parseRect(spPr, transform);
     if (!rect) return;
+    const xfrm = getDirectChild(spPr, "xfrm");
+    const rotation = xfrm ? parseInt(xfrm.getAttribute("rot") || "0", 10) / 60000 : 0;
+    const flipH = xfrm?.getAttribute("flipH") === "1" || xfrm?.getAttribute("flipH") === "true";
+    const flipV = xfrm?.getAttribute("flipV") === "1" || xfrm?.getAttribute("flipV") === "true";
 
     const blipFill = querySelector(node, "p\\:blipFill, blipFill");
     if (!blipFill) return;
@@ -1814,13 +1779,18 @@ export class PptxParser {
       right: parseInt(srcRect.getAttribute("r") || "0", 10) / 100000,
       bottom: parseInt(srcRect.getAttribute("b") || "0", 10) / 100000
     } : undefined;
+    const effects = this.styleResolver.parseEffectStyle(spPr, transform.absoluteUnitScale);
 
     elements.push({
       type: "image",
       id: `img_${id}`,
       rect,
       url: blobUrl,
-      crop
+      crop,
+      rotation,
+      flipH,
+      flipV,
+      effects
     });
   }
 

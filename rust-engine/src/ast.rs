@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Presentation {
@@ -89,6 +90,14 @@ pub struct TextStyle {
     pub letter_spacing: f32,
     #[serde(default)]
     pub reflection: Option<ReflectionStyle>,
+    #[serde(default)]
+    pub outline: Option<TextOutlineStyle>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct TextOutlineStyle {
+    pub color: String,
+    pub width: f32,
 }
 
 fn default_align() -> String {
@@ -168,6 +177,8 @@ pub struct TextBodyProperties {
     pub vertical_anchor: String,
     #[serde(rename = "autoFit")]
     pub auto_fit: String,
+    #[serde(default = "default_wrap")]
+    pub wrap: String,
     #[serde(rename = "verticalOverflow", default = "default_overflow")]
     pub vertical_overflow: String,
     #[serde(rename = "horizontalOverflow", default = "default_overflow")]
@@ -180,6 +191,10 @@ pub struct TextBodyProperties {
 
 fn default_overflow() -> String {
     "overflow".to_string()
+}
+
+fn default_wrap() -> String {
+    "square".to_string()
 }
 
 fn default_font_scale() -> f32 {
@@ -212,6 +227,31 @@ pub enum FillStyle {
         #[serde(rename = "rotateWithShape", default)]
         rotate_with_shape: Option<bool>,
     },
+    #[serde(rename = "pattern")]
+    Pattern {
+        preset: String,
+        foreground: String,
+        background: String,
+    },
+    #[serde(rename = "picture")]
+    Picture {
+        #[serde(default)]
+        embed: Option<String>,
+        #[serde(default)]
+        url: Option<String>,
+        #[serde(default)]
+        mode: Option<String>,
+        #[serde(rename = "srcRect", default)]
+        src_rect: Option<SrcRect>,
+    },
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct SrcRect {
+    pub left: f32,
+    pub top: f32,
+    pub right: f32,
+    pub bottom: f32,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -232,6 +272,20 @@ pub struct LineStyle {
     pub join: Option<String>,
     #[serde(default)]
     pub compound: Option<String>,
+    #[serde(rename = "headEnd", default)]
+    pub head_end: Option<LineEndStyle>,
+    #[serde(rename = "tailEnd", default)]
+    pub tail_end: Option<LineEndStyle>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct LineEndStyle {
+    #[serde(rename = "type")]
+    pub end_type: String,
+    #[serde(default)]
+    pub width: Option<String>,
+    #[serde(default)]
+    pub length: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -264,8 +318,28 @@ pub struct GlowStyle {
 pub struct EffectStyle {
     #[serde(rename = "outerShadow", default)]
     pub outer_shadow: Option<ShadowStyle>,
+    #[serde(rename = "innerShadow", default)]
+    pub inner_shadow: Option<ShadowStyle>,
     #[serde(default)]
     pub glow: Option<GlowStyle>,
+    #[serde(default)]
+    pub reflection: Option<ReflectionStyle>,
+    #[serde(rename = "softEdge", default)]
+    pub soft_edge: Option<SoftEdgeStyle>,
+    #[serde(default)]
+    pub blur: Option<BlurStyle>,
+    #[serde(rename = "fillOverlay", default)]
+    pub fill_overlay: Option<FillStyle>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct SoftEdgeStyle {
+    pub radius: f32,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct BlurStyle {
+    pub radius: f32,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -278,11 +352,71 @@ pub struct ComputedShapeStyle {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(tag = "type")]
+pub enum CustomGeometryCommand {
+    #[serde(rename = "moveTo")]
+    MoveTo { x: f32, y: f32 },
+    #[serde(rename = "lineTo")]
+    LineTo { x: f32, y: f32 },
+    #[serde(rename = "quadBezier")]
+    QuadBezier {
+        #[serde(rename = "controlX")]
+        control_x: f32,
+        #[serde(rename = "controlY")]
+        control_y: f32,
+        x: f32,
+        y: f32,
+    },
+    #[serde(rename = "cubicBezier")]
+    CubicBezier {
+        #[serde(rename = "control1X")]
+        control1_x: f32,
+        #[serde(rename = "control1Y")]
+        control1_y: f32,
+        #[serde(rename = "control2X")]
+        control2_x: f32,
+        #[serde(rename = "control2Y")]
+        control2_y: f32,
+        x: f32,
+        y: f32,
+    },
+    #[serde(rename = "arc")]
+    Arc {
+        #[serde(rename = "widthRadius")]
+        width_radius: f32,
+        #[serde(rename = "heightRadius")]
+        height_radius: f32,
+        #[serde(rename = "startAngle")]
+        start_angle: f32,
+        #[serde(rename = "sweepAngle")]
+        sweep_angle: f32,
+    },
+    #[serde(rename = "close")]
+    Close,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct CustomGeometryPath {
+    pub width: f32,
+    pub height: f32,
+    pub commands: Vec<CustomGeometryCommand>,
+    #[serde(default)]
+    pub fill: Option<String>,
+    #[serde(default)]
+    pub stroke: Option<bool>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct CustomGeometry {
+    pub paths: Vec<CustomGeometryPath>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ShapeElement {
     pub id: String,
     pub rect: Rect,
     #[serde(rename = "shapeType")]
-    pub shape_type: String, // "rect" | "roundRect" | "ellipse" | "triangle" | "line" | "mathPlus" | "upArrow"
+    pub shape_type: String,
     #[serde(default)]
     pub rotation: f32,
     #[serde(rename = "flipH", default)]
@@ -295,6 +429,10 @@ pub struct ShapeElement {
     pub arrow_head_height: Option<f32>,
     #[serde(rename = "arrowShaftWidth", default)]
     pub arrow_shaft_width: Option<f32>,
+    #[serde(default)]
+    pub adjustments: BTreeMap<String, f32>,
+    #[serde(rename = "customGeometry", default)]
+    pub custom_geometry: Option<CustomGeometry>,
     pub fill: String,
     #[serde(default)]
     pub border: Option<Border>,
@@ -309,6 +447,14 @@ pub struct ImageElement {
     pub url: String, // Blob URL or base64 data URI
     #[serde(default)]
     pub crop: Option<ImageCrop>,
+    #[serde(default)]
+    pub rotation: f32,
+    #[serde(rename = "flipH", default)]
+    pub flip_h: bool,
+    #[serde(rename = "flipV", default)]
+    pub flip_v: bool,
+    #[serde(default)]
+    pub effects: Option<EffectStyle>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -397,6 +543,7 @@ mod tests {
         assert!(!text.paragraphs[0].style.hanging_punctuation);
         assert_eq!(text.paragraphs[0].style.font_alignment, "auto");
         assert_eq!(text.body.as_ref().unwrap().margin_left, 8.0);
+        assert_eq!(text.body.as_ref().unwrap().wrap, "square");
     }
 
     #[test]
@@ -443,5 +590,31 @@ mod tests {
                 .opacity,
             0.4
         );
+    }
+
+    #[test]
+    fn custom_geometry_deserializes() {
+        let json = r##"{
+            "id":"slide_1",
+            "elements":[{
+                "type":"shape",
+                "id":"shape_custom",
+                "rect":{"x":0,"y":0,"w":100,"h":100},
+                "shapeType":"custom",
+                "fill":"#ff0000",
+                "customGeometry":{"paths":[{"width":100,"height":100,"commands":[
+                    {"type":"moveTo","x":0,"y":0},
+                    {"type":"quadBezier","controlX":50,"controlY":0,"x":100,"y":100},
+                    {"type":"close"}
+                ]}]}
+            }]
+        }"##;
+
+        let slide: Slide = serde_json::from_str(json).expect("custom geometry should deserialize");
+        let Element::Shape(shape) = &slide.elements[0] else {
+            panic!("expected shape element");
+        };
+        let geometry = shape.custom_geometry.as_ref().unwrap();
+        assert_eq!(geometry.paths[0].commands.len(), 3);
     }
 }

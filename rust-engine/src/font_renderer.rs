@@ -21,16 +21,24 @@ pub fn blend_pixel(target: &mut [u8], index: usize, color: Color) {
     target[index + 3] = (output_alpha * 255.0).round() as u8;
 }
 
-pub fn alpha_vertical_bounds(source: &[u8], width: u32, height: u32) -> Option<(u32, u32)> {
+pub fn alpha_vertical_bounds_in_range(
+    source: &[u8],
+    width: u32,
+    height: u32,
+    start_row: u32,
+    end_row: u32,
+) -> Option<(u32, u32)> {
     let width = width as usize;
     let height = height as usize;
     if width == 0 || height == 0 || source.len() < width * height * 4 {
         return None;
     }
 
-    let mut top = height;
+    let start_row = (start_row as usize).min(height);
+    let end_row = (end_row as usize).min(height).max(start_row);
+    let mut top = end_row;
     let mut bottom = 0_usize;
-    for y in 0..height {
+    for y in start_row..end_row {
         let row_start = y * width * 4;
         let row_has_alpha = (0..width).any(|x| source[row_start + x * 4 + 3] != 0);
         if row_has_alpha {
@@ -58,14 +66,25 @@ pub fn build_reflection_bitmap(
     let reflection_height = reflection_height as usize;
     let mut reflected = vec![0_u8; width * reflection_height * 4];
     let scale_y = scale_y.abs().max(0.01);
+    // `reflection_height` is the visible portion selected by endPos. The
+    // source glyph must still be sampled against the full reflected height;
+    // using the cropped height here mirrors only the upper part of the glyph
+    // whenever endPos is below 100%.
+    let full_reflection_height = (source_height as f32 * scale_y).ceil().max(1.0) as usize;
+    let end_position = end_position.clamp(0.0, 1.0);
 
     for target_y in 0..reflection_height {
-        let source_y = (((reflection_height - 1 - target_y) as f32 / scale_y).floor() as usize)
+        let source_y = ((full_reflection_height
+            .saturating_sub(1)
+            .saturating_sub(target_y.min(full_reflection_height.saturating_sub(1)))
+            as f32
+            / scale_y)
+            .floor() as usize)
             .min(source_height.saturating_sub(1));
-        let position = if reflection_height <= 1 {
+        let position = if full_reflection_height <= 1 {
             1.0
         } else {
-            target_y as f32 / (reflection_height - 1) as f32
+            target_y as f32 / (full_reflection_height - 1) as f32
         };
         let fade = if end_position > 0.0 {
             (position / end_position).clamp(0.0, 1.0)

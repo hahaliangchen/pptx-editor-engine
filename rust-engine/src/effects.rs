@@ -1,4 +1,5 @@
 use crate::ast::ShapeElement;
+use crate::shape_geometry;
 use wasm_bindgen::{prelude::*, Clamped};
 use web_sys::{CanvasRenderingContext2d, HtmlCanvasElement, ImageData};
 
@@ -25,6 +26,13 @@ fn shape_contains(shp: &ShapeElement, x: f32, y: f32) -> bool {
     let height = shp.rect.h;
     if local_x < 0.0 || local_y < 0.0 || local_x > width || local_y > height {
         return false;
+    }
+
+    if !matches!(
+        shp.shape_type.as_str(),
+        "rect" | "roundRect" | "ellipse" | "triangle" | "mathPlus" | "upArrow" | "line"
+    ) {
+        return shape_geometry::contains(shp, local_x, local_y);
     }
 
     match shp.shape_type.as_str() {
@@ -154,7 +162,7 @@ pub fn render_custom_shape_effect(
         return Ok(());
     };
 
-    let (color, opacity, blur, scale_x, scale_y, distance, direction) =
+    let (color, opacity, blur, scale_x, scale_y, distance, direction, inner) =
         if let Some(shadow) = &effects.outer_shadow {
             (
                 shadow.color.as_str(),
@@ -164,6 +172,18 @@ pub fn render_custom_shape_effect(
                 shadow.scale_y.max(0.01),
                 shadow.distance,
                 shadow.direction,
+                false,
+            )
+        } else if let Some(shadow) = &effects.inner_shadow {
+            (
+                shadow.color.as_str(),
+                shadow.opacity,
+                shadow.blur,
+                shadow.scale_x.max(0.01),
+                shadow.scale_y.max(0.01),
+                shadow.distance,
+                shadow.direction,
+                true,
             )
         } else if let Some(glow) = &effects.glow {
             (
@@ -174,6 +194,7 @@ pub fn render_custom_shape_effect(
                 1.0,
                 0.0,
                 0.0,
+                false,
             )
         } else {
             return Ok(());
@@ -230,7 +251,21 @@ pub fn render_custom_shape_effect(
         pixels[output_index] = red;
         pixels[output_index + 1] = green;
         pixels[output_index + 2] = blue;
-        pixels[output_index + 3] = (*alpha as f32 * opacity).round() as u8;
+        let output_alpha = if inner {
+            let x = index % bitmap_width;
+            let y = index / bitmap_width;
+            let target_x = origin_x + (x as f32 + 0.5) / device_scale;
+            let target_y = origin_y + (y as f32 + 0.5) / device_scale;
+            let inside = if shape_contains(shp, target_x, target_y) {
+                1.0
+            } else {
+                0.0
+            };
+            inside * (255.0 - *alpha as f32)
+        } else {
+            *alpha as f32
+        };
+        pixels[output_index + 3] = (output_alpha * opacity).round().clamp(0.0, 255.0) as u8;
     }
 
     let document = web_sys::window()
@@ -256,5 +291,91 @@ pub fn render_custom_shape_effect(
         logical_width as f64,
         logical_height as f64,
     )?;
+    Ok(())
+}
+
+/// Applies the soft-edge alpha mask after the source shape has been painted.
+/// Drawing the blurred mask with destination-in keeps the fill/line colors
+/// intact while fading only the shape boundary.
+pub fn apply_soft_edge(
+    ctx: &CanvasRenderingContext2d,
+    shp: &ShapeElement,
+    device_scale: f32,
+) -> Result<(), JsValue> {
+    let Some(radius) = shp
+        .computed_style
+        .as_ref()
+        .and_then(|style| style.effects.as_ref())
+        .and_then(|effects| effects.soft_edge.as_ref())
+        .map(|edge| edge.radius)
+    else {
+        return Ok(());
+    };
+    if radius <= 0.0 {
+        return Ok(());
+    }
+
+    let device_scale = device_scale.max(0.1);
+    let sigma = (radius * device_scale * 0.5).max(0.5);
+    let padding = (sigma * 3.0 / device_scale) + 2.0 / device_scale;
+    let origin_x = shp.rect.x - padding;
+    let origin_y = shp.rect.y - padding;
+    let logical_width = shp.rect.w + padding * 2.0;
+    let logical_height = shp.rect.h + padding * 2.0;
+    let bitmap_width = (logical_width * device_scale).ceil().max(1.0) as usize;
+    let bitmap_height = (logical_height * device_scale).ceil().max(1.0) as usize;
+
+    let mut mask = vec![0_u8; bitmap_width * bitmap_height];
+    for y in 0..bitmap_height {
+        for x in 0..bitmap_width {
+            let mut covered = 0_u8;
+            for sample_y in [0.25_f32, 0.75_f32] {
+                for sample_x in [0.25_f32, 0.75_f32] {
+                    let target_x = origin_x + (x as f32 + sample_x) / device_scale;
+                    let target_y = origin_y + (y as f32 + sample_y) / device_scale;
+                    if shape_contains(shp, target_x, target_y) {
+                        covered += 1;
+                    }
+                }
+            }
+            mask[y * bitmap_width + x] = (covered as u16 * 64).min(255) as u8;
+        }
+    }
+    let blurred = gaussian_blur_alpha(&mask, bitmap_width, bitmap_height, sigma);
+    let mut pixels = vec![0_u8; bitmap_width * bitmap_height * 4];
+    for (index, alpha) in blurred.iter().enumerate() {
+        let output_index = index * 4;
+        pixels[output_index] = 255;
+        pixels[output_index + 1] = 255;
+        pixels[output_index + 2] = 255;
+        pixels[output_index + 3] = *alpha;
+    }
+
+    let document = web_sys::window()
+        .and_then(|window| window.document())
+        .ok_or_else(|| JsValue::from_str("Document is unavailable for soft edge"))?;
+    let canvas: HtmlCanvasElement = document.create_element("canvas")?.dyn_into()?;
+    canvas.set_width(bitmap_width as u32);
+    canvas.set_height(bitmap_height as u32);
+    let bitmap_ctx: CanvasRenderingContext2d = canvas
+        .get_context("2d")?
+        .ok_or_else(|| JsValue::from_str("Could not create soft edge canvas"))?
+        .dyn_into()?;
+    let image_data = ImageData::new_with_u8_clamped_array_and_sh(
+        Clamped(&pixels),
+        bitmap_width as u32,
+        bitmap_height as u32,
+    )?;
+    bitmap_ctx.put_image_data(&image_data, 0.0, 0.0)?;
+    ctx.save();
+    let _ = ctx.set_global_composite_operation("destination-in");
+    ctx.draw_image_with_html_canvas_element_and_dw_and_dh(
+        &canvas,
+        origin_x as f64,
+        origin_y as f64,
+        logical_width as f64,
+        logical_height as f64,
+    )?;
+    ctx.restore();
     Ok(())
 }

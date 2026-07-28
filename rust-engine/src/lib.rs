@@ -2,6 +2,7 @@ mod ast;
 mod effects;
 mod font_renderer;
 mod image_renderer;
+mod shape_geometry;
 mod shape_renderer;
 mod text_layout;
 
@@ -100,8 +101,16 @@ impl RustPptRenderer {
                 txt.id, txt.rect.w, txt.rect.h, layout_height, render_height, body_info
             )));
         }
-        let bitmap_height = (render_height * raster_scale).ceil() as u32;
-
+        // Vertical anchoring is defined against the original text shape, not
+        // against the enlarged bitmap used when overflow is allowed. Using
+        // render_height here turns a slightly overfull centered title into a
+        // top-anchored line because max(available_height, layout_height)
+        // erases the signed remainder.
+        let anchor_height = if body.map(|value| value.auto_fit.as_str()) == Some("shape") {
+            render_height
+        } else {
+            available_height
+        };
         let vertical_offset = if vertical_text {
             // Vertical columns receive their own anchor offset in the text
             // layout because their measured heights can differ.
@@ -110,17 +119,34 @@ impl RustPptRenderer {
             match body.map(|value| value.vertical_anchor.as_str()) {
                 // OOXML vertical anchoring centers the line box even when the
                 // noAutofit shape is a little shorter than the natural metrics.
-                // Clamping this remainder to zero makes centered titles drift
-                // toward the bottom of their header bars.
-                Some("middle") => (render_height - layout_height) / 2.0,
-                Some("bottom") => render_height - layout_height,
+                // Preserve the signed remainder. With vertOverflow="overflow"
+                // the first line is allowed to start above the shape, just as
+                // the final line is allowed to extend below it.
+                Some("middle") => (anchor_height - layout_height) / 2.0,
+                Some("bottom") => anchor_height - layout_height,
                 _ => 0.0,
             }
         };
 
+        // Centered overflow may place the first line above the text shape.
+        // Keep that signed position in the bitmap instead of letting the
+        // rasterizer discard negative rows at y < 0. The outer slide painter
+        // still decides whether the text is allowed to escape the shape.
+        let content_top = if vertical_text {
+            0.0
+        } else {
+            paragraphs
+                .iter()
+                .map(|paragraph| paragraph.top + vertical_offset)
+                .fold(0.0_f32, f32::min)
+        };
+        let top_padding = (-content_top).max(0.0);
+        let bitmap_height = ((render_height + top_padding) * raster_scale).ceil() as u32;
+        let bitmap_origin_y = txt.rect.y - top_padding;
+
         let mut pixels = vec![0_u8; bitmap_width as usize * bitmap_height as usize * 4];
         for paragraph in &mut paragraphs {
-            let top = paragraph.top + vertical_offset;
+            let top = paragraph.top + vertical_offset + top_padding;
             font_renderer::rasterize_buffer(
                 font_system,
                 swash_cache,
@@ -192,64 +218,113 @@ impl RustPptRenderer {
         self.ctx.draw_image_with_html_canvas_element_and_dw_and_dh(
             &canvas,
             txt.rect.x as f64,
-            txt.rect.y as f64,
+            bitmap_origin_y as f64,
             txt.rect.w as f64,
-            render_height as f64,
+            (render_height + top_padding) as f64,
         )?;
 
         if let Some(reflection) = Self::text_reflection(txt) {
-            // Run effects apply to rendered glyphs, not to the text line box.
-            // Cropping transparent leading/margins keeps a bottom-aligned
-            // reflection attached to the actual glyph boundary.
-            let Some((source_top, source_bottom)) =
-                font_renderer::alpha_vertical_bounds(&pixels, bitmap_width, bitmap_height)
-            else {
+            // Run effects apply to each rendered line, not to the whole text
+            // element. Each line gets its own bottom-aligned reflection.
+            let visible_end = reflection.end_position.clamp(0.0, 1.0);
+            if visible_end <= 0.0 {
                 return Ok(());
-            };
-            let source_height = source_bottom - source_top;
-            let row_stride = bitmap_width as usize * 4;
-            let source_start = source_top as usize * row_stride;
-            let source_end = source_bottom as usize * row_stride;
-            let reflection_height = (source_height as f32 * reflection.scale_y.abs().max(0.01))
-                .ceil()
-                .max(1.0) as u32;
-            let reflection_pixels = font_renderer::build_reflection_bitmap(
-                &pixels[source_start..source_end],
-                bitmap_width,
-                source_height,
-                reflection_height,
-                reflection.scale_y,
-                reflection.start_alpha,
-                reflection.end_alpha,
-                reflection.end_position,
-                reflection.blur_radius * raster_scale,
-            );
-            let reflection_canvas: HtmlCanvasElement =
-                document.create_element("canvas")?.dyn_into()?;
-            reflection_canvas.set_width(bitmap_width);
-            reflection_canvas.set_height(reflection_height);
-            let reflection_ctx: CanvasRenderingContext2d = reflection_canvas
-                .get_context("2d")?
-                .ok_or_else(|| JsValue::from_str("Could not create reflection canvas context"))?
-                .dyn_into()?;
-            let reflection_image = ImageData::new_with_u8_clamped_array_and_sh(
-                Clamped(&reflection_pixels),
-                bitmap_width,
-                reflection_height,
-            )?;
-            reflection_ctx.put_image_data(&reflection_image, 0.0, 0.0)?;
+            }
             let direction = reflection.direction.to_radians();
-            let reflection_x = txt.rect.x + reflection.distance * direction.cos();
-            let reflection_y = txt.rect.y
-                + source_bottom as f32 / raster_scale
-                + reflection.distance * direction.sin();
-            self.ctx.draw_image_with_html_canvas_element_and_dw_and_dh(
-                &reflection_canvas,
-                reflection_x as f64,
-                reflection_y as f64,
+            let direction_x = direction.cos();
+            let direction_y = direction.sin();
+            let reflection_x = txt.rect.x + reflection.distance * direction_x;
+
+            // Keep the effect inside the text shape while preserving the
+            // separate paragraph overflow policy used for normal glyphs.
+            self.ctx.save();
+            self.ctx.begin_path();
+            self.ctx.rect(
+                txt.rect.x as f64,
+                txt.rect.y as f64,
                 txt.rect.w as f64,
-                reflection_height as f64 / raster_scale as f64,
-            )?;
+                txt.rect.h as f64,
+            );
+            self.ctx.clip();
+
+            for paragraph in &paragraphs {
+                let origin_y = paragraph.top + vertical_offset + top_padding;
+                for run in paragraph.buffer.layout_runs() {
+                    let line_top =
+                        ((origin_y + run.line_top) * raster_scale).floor().max(0.0) as u32;
+                    let line_bottom = ((origin_y + run.line_top + run.line_height) * raster_scale)
+                        .ceil()
+                        .max(0.0) as u32;
+                    let Some((source_top, source_bottom)) =
+                        font_renderer::alpha_vertical_bounds_in_range(
+                            &pixels,
+                            bitmap_width,
+                            bitmap_height,
+                            line_top,
+                            line_bottom,
+                        )
+                    else {
+                        continue;
+                    };
+                    let source_height = source_bottom - source_top;
+                    let row_stride = bitmap_width as usize * 4;
+                    let source_start = source_top as usize * row_stride;
+                    let source_end = source_bottom as usize * row_stride;
+                    let nominal_reflection_height =
+                        source_height as f32 * reflection.scale_y.abs().max(0.01);
+                    let reflection_height =
+                        (nominal_reflection_height * visible_end).ceil().max(1.0) as u32;
+                    let reflection_pixels = font_renderer::build_reflection_bitmap(
+                        &pixels[source_start..source_end],
+                        bitmap_width,
+                        source_height,
+                        reflection_height,
+                        reflection.scale_y,
+                        reflection.start_alpha,
+                        reflection.end_alpha,
+                        // The output is cropped at endPos, while the alpha
+                        // ramp still uses endPos as its endpoint. This keeps
+                        // the last visible row at endAlpha without drawing a
+                        // transparent tail after the XML endpoint.
+                        visible_end,
+                        reflection.blur_radius * raster_scale,
+                    );
+                    let reflection_canvas: HtmlCanvasElement =
+                        document.create_element("canvas")?.dyn_into()?;
+                    reflection_canvas.set_width(bitmap_width);
+                    reflection_canvas.set_height(reflection_height);
+                    let reflection_ctx: CanvasRenderingContext2d = reflection_canvas
+                        .get_context("2d")?
+                        .ok_or_else(|| {
+                            JsValue::from_str("Could not create reflection canvas context")
+                        })?
+                        .dyn_into()?;
+                    let reflection_image = ImageData::new_with_u8_clamped_array_and_sh(
+                        Clamped(&reflection_pixels),
+                        bitmap_width,
+                        reflection_height,
+                    )?;
+                    reflection_ctx.put_image_data(&reflection_image, 0.0, 0.0)?;
+                    // A one-raster-pixel overlap avoids a detached-looking
+                    // reflection while keeping the XML distance as the
+                    // primary placement input. Apply it along the reflection
+                    // direction so non-vertical effects behave consistently.
+                    let overlap = (1.0 / raster_scale).clamp(0.25, 1.0);
+                    let reflection_x = reflection_x - overlap * direction_x;
+                    let reflection_y = txt.rect.y - top_padding
+                        + source_bottom as f32 / raster_scale
+                        + reflection.distance * direction_y
+                        - overlap * direction_y;
+                    self.ctx.draw_image_with_html_canvas_element_and_dw_and_dh(
+                        &reflection_canvas,
+                        reflection_x as f64,
+                        reflection_y as f64,
+                        txt.rect.w as f64,
+                        reflection_height as f64 / raster_scale as f64,
+                    )?;
+                }
+            }
+            self.ctx.restore();
         }
         Ok(())
     }
@@ -282,6 +357,25 @@ mod tests {
         font_renderer::blend_pixel(&mut target, 0, cosmic_text::Color::rgba(10, 20, 30, 128));
         assert_eq!((target[0], target[1], target[2]), (10, 20, 30));
         assert!((127..=129).contains(&target[3]));
+    }
+
+    #[test]
+    fn reflection_crops_after_sampling_the_full_glyph() {
+        let mut source = vec![0_u8; 4 * 4 * 4];
+        for row in 0..4 {
+            let index = row * 4 * 4;
+            source[index] = (row + 1) as u8;
+            source[index + 3] = 255;
+        }
+
+        let reflected =
+            font_renderer::build_reflection_bitmap(&source, 4, 4, 2, 1.0, 1.0, 0.0, 0.5, 0.0);
+
+        // endPos crops the reflected output, not the source range. The
+        // nearest reflected rows therefore come from source rows 3 and 2.
+        assert_eq!(reflected[0], 4);
+        assert_eq!(reflected[4 * 4], 3);
+        assert!(reflected[3] > reflected[4 * 4 + 3]);
     }
 }
 #[wasm_bindgen]
@@ -391,7 +485,15 @@ impl RustPptRenderer {
                         .computed_style
                         .as_ref()
                         .and_then(|style| style.effects.as_ref())
-                        .map(|effects| effects.outer_shadow.is_some() || effects.glow.is_some())
+                        .map(|effects| {
+                            effects.outer_shadow.is_some()
+                                || effects.inner_shadow.is_some()
+                                || effects.glow.is_some()
+                                || effects.soft_edge.is_some()
+                                || effects.blur.is_some()
+                                || effects.fill_overlay.is_some()
+                                || effects.reflection.is_some()
+                        })
                         .unwrap_or(false);
 
                     if has_effect {
@@ -406,7 +508,15 @@ impl RustPptRenderer {
                     }
 
                     effects::clear_canvas_shadow(&self.ctx);
-                    shape_renderer::paint_shape(&self.ctx, shp);
+                    shape_renderer::paint_shape(&self.ctx, shp, images_obj);
+                    if has_effect {
+                        let transform = self.ctx.get_transform()?;
+                        let device_scale = ((transform.a() * transform.a()
+                            + transform.b() * transform.b())
+                        .sqrt() as f32)
+                            .max(0.1);
+                        effects::apply_soft_edge(&self.ctx, shp, device_scale)?;
+                    }
                     self.ctx.restore();
                 }
                 Element::Text(txt) => {

@@ -305,7 +305,8 @@ const mockPresentation: PptVirtualDocument = {
   ]
 };
 
-document.addEventListener("DOMContentLoaded", () => {
+const initializeDemo = () => {
+  console.log('wosjfisjofsijfjsiljf')
   const container = document.getElementById("canvas-wrapper");
   const welcomeView = document.getElementById("welcome-view");
   const pageIndicator = document.getElementById("page-indicator");
@@ -345,6 +346,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
     },
     onLoadComplete: async (ast) => {
+      console.log(`[Demo] onLoadComplete:start slides=${ast.slides.length}`);
       // Hide welcome view
       welcomeView.style.display = "none";
       sidebarCount.textContent = ast.slides.length.toString();
@@ -376,6 +378,7 @@ document.addEventListener("DOMContentLoaded", () => {
       // Pre-render every slide to a real bitmap thumbnail.
       try {
         const dataUrls = await viewer.renderThumbnails();
+        console.log("[Demo] thumbnails:done");
         dataUrls.forEach((url, idx) => {
           const box = thumbBoxes[idx];
           box.classList.remove("is-loading");
@@ -388,6 +391,7 @@ document.addEventListener("DOMContentLoaded", () => {
         console.error("Failed to render thumbnails:", err);
         thumbBoxes.forEach((box) => box.classList.remove("is-loading"));
       }
+      console.log("[Demo] onLoadComplete:done");
     }
   });
 
@@ -403,7 +407,65 @@ document.addEventListener("DOMContentLoaded", () => {
   if (btnWelcomeDemo) btnWelcomeDemo.onclick = loadDemo;
 
   const btnWelcomeUpload = document.getElementById("btn-welcome-upload");
-  if (btnWelcomeUpload) btnWelcomeUpload.onclick = () => fileUploader?.click();
+  console.log("[Demo] btnWelcomeUpload:", btnWelcomeUpload);
+  const openFilePicker = () => {
+    console.log("[Upload] picker:open-request");
+    if (fileUploader.disabled) return;
+    fileUploader.value = "";
+    const picker = (fileUploader as HTMLInputElement & {
+      showPicker?: () => void;
+    }).showPicker;
+    if (picker) {
+      try {
+        picker.call(fileUploader);
+        return;
+      } catch {
+        // Fall back to click() when showPicker is unavailable or restricted.
+      }
+    }
+    fileUploader.click();
+  };
+  if (btnWelcomeUpload) btnWelcomeUpload.onclick = openFilePicker;
+
+  const isPptxFile = (file: File): boolean =>
+    file.name.toLowerCase().endsWith(".pptx");
+
+  const loadPptxFile = async (file: File): Promise<void> => {
+    console.log(`[Upload] load:start name=${file.name} type=${file.type || "unknown"} bytes=${file.size}`);
+    if (!isPptxFile(file)) {
+      console.error(`[Upload] rejected extension name=${file.name}`);
+      alert("请选择 .pptx 演示文稿文件。");
+      return;
+    }
+
+    const uploadControl = fileUploader.closest("label");
+    fileUploader.disabled = true;
+    uploadControl?.setAttribute("aria-busy", "true");
+    pageIndicator.textContent = "正在打开...";
+
+    try {
+      console.log("[Upload] arrayBuffer:start");
+      const buffer = await file.arrayBuffer();
+      console.log(`[Upload] arrayBuffer:done bytes=${buffer.byteLength}`);
+      console.log("[Upload] viewer.loadPptx:start");
+      const presentation = await viewer.loadPptx(buffer);
+      console.log(`[Upload] viewer.loadPptx:done slides=${presentation.slides.length}`);
+      if (presentation.slides.length === 0) {
+        throw new Error("文件中没有解析到可显示的幻灯片。");
+      }
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error("Failed to load PPTX file:", err);
+      pageIndicator.textContent = "打开失败";
+      alert(`打开 PPTX 失败：${message}`);
+    } finally {
+      console.log("[Upload] load:finished");
+      fileUploader.disabled = false;
+      uploadControl?.removeAttribute("aria-busy");
+      // Reset the control so choosing the same file again still emits change.
+      fileUploader.value = "";
+    }
+  };
 
   // Controls
   btnPrev.onclick = () => viewer.prevSlide();
@@ -411,21 +473,11 @@ document.addEventListener("DOMContentLoaded", () => {
   debugTextBoxes.onchange = () => viewer.setDebugTextBoxes(debugTextBoxes.checked);
 
   // File Uploader
-  fileUploader.onchange = async (e) => {
+  fileUploader.onchange = (e) => {
     const file = (e.target as HTMLInputElement).files?.[0];
+    console.log(`[Upload] input:change file=${file?.name || "none"}`);
     if (!file) return;
-
-    const reader = new FileReader();
-    reader.onload = async (evt) => {
-      try {
-        if (evt.target?.result instanceof ArrayBuffer) {
-          await viewer.loadPptx(evt.target.result);
-        }
-      } catch (err: any) {
-        alert(`Error loading PPTX: ${err.message}`);
-      }
-    };
-    reader.readAsArrayBuffer(file);
+    void loadPptxFile(file);
   };
 
   // Drag & Drop
@@ -450,19 +502,13 @@ document.addEventListener("DOMContentLoaded", () => {
       dropzone.classList.remove("dragover");
 
       const file = e.dataTransfer?.files[0];
-      if (file && file.name.endsWith(".pptx")) {
-        const reader = new FileReader();
-        reader.onload = async (evt) => {
-          try {
-            if (evt.target?.result instanceof ArrayBuffer) {
-              await viewer.loadPptx(evt.target.result);
-            }
-          } catch (err: any) {
-            alert(`Error loading PPTX: ${err.message}`);
-          }
-        };
-        reader.readAsArrayBuffer(file);
-      }
+      if (file) void loadPptxFile(file);
     });
   }
-});
+};
+
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", initializeDemo, { once: true });
+} else {
+  initializeDemo();
+}
