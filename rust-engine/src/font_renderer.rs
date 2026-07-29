@@ -124,6 +124,107 @@ pub fn build_reflection_bitmap(
     blurred
 }
 
+/// Builds a small run-level shadow bitmap from the already rasterized glyph
+/// alpha. This keeps the shadow tied to the shaped glyphs instead of applying
+/// one CSS shadow to the whole text box.
+pub fn build_shadow_bitmap(
+    source: &[u8],
+    width: u32,
+    height: u32,
+    color: Color,
+    opacity: f32,
+    blur_radius: f32,
+    offset_x: f32,
+    offset_y: f32,
+) -> Vec<u8> {
+    let width = width as usize;
+    let height = height as usize;
+    let mut shadow = vec![0_u8; width * height * 4];
+    if width == 0 || height == 0 || source.len() < width * height * 4 {
+        return shadow;
+    }
+    let opacity = opacity.clamp(0.0, 1.0);
+    let red = color.r();
+    let green = color.g();
+    let blue = color.b();
+
+    // DrawingML's blurRad is a blur radius, not a square-kernel width. A
+    // separable Gaussian is a much closer match to the Office/WPS shadow
+    // profile than the old clipped box average, and retaining f32 offsets
+    // avoids moving diagonal shadows by a whole raster pixel.
+    let radius = blur_radius.ceil().clamp(0.0, 24.0) as i32;
+    let sigma = (blur_radius * 0.5).max(0.01);
+    let mut weights = Vec::with_capacity((radius * 2 + 1) as usize);
+    let mut weight_sum = 0.0_f32;
+    for delta in -radius..=radius {
+        let value = (-(delta as f32).powi(2) / (2.0 * sigma * sigma)).exp();
+        weights.push(value);
+        weight_sum += value;
+    }
+    if weight_sum > 0.0 {
+        for weight in &mut weights {
+            *weight /= weight_sum;
+        }
+    }
+
+    let mut translated = vec![0.0_f32; width * height];
+    for y in 0..height {
+        for x in 0..width {
+            let source_x = x as f32 - offset_x;
+            let source_y = y as f32 - offset_y;
+            if source_x < 0.0
+                || source_y < 0.0
+                || source_x > (width - 1) as f32
+                || source_y > (height - 1) as f32
+            {
+                continue;
+            }
+            let x0 = source_x.floor() as usize;
+            let y0 = source_y.floor() as usize;
+            let x1 = (x0 + 1).min(width - 1);
+            let y1 = (y0 + 1).min(height - 1);
+            let fx = source_x - x0 as f32;
+            let fy = source_y - y0 as f32;
+            let alpha = |sx: usize, sy: usize| source[(sy * width + sx) * 4 + 3] as f32;
+            let top = alpha(x0, y0) * (1.0 - fx) + alpha(x1, y0) * fx;
+            let bottom = alpha(x0, y1) * (1.0 - fx) + alpha(x1, y1) * fx;
+            translated[y * width + x] = (top * (1.0 - fy) + bottom * fy) * opacity;
+        }
+    }
+
+    let mut horizontal = vec![0.0_f32; width * height];
+    for y in 0..height {
+        for x in 0..width {
+            let mut value = 0.0_f32;
+            for delta in -radius..=radius {
+                let sample_x = (x as i32 + delta).clamp(0, width as i32 - 1) as usize;
+                value += translated[y * width + sample_x] * weights[(delta + radius) as usize];
+            }
+            horizontal[y * width + x] = value;
+        }
+    }
+
+    for y in 0..height {
+        for x in 0..width {
+            let mut value = 0.0_f32;
+            for delta in -radius..=radius {
+                let sample_y = (y as i32 + delta).clamp(0, height as i32 - 1) as usize;
+                value += horizontal[sample_y * width + x] * weights[(delta + radius) as usize];
+            }
+            let alpha = value.round().clamp(0.0, 255.0) as u8;
+            if alpha == 0 {
+                continue;
+            }
+            let index = (y * width + x) * 4;
+            shadow[index] = red;
+            shadow[index + 1] = green;
+            shadow[index + 2] = blue;
+            shadow[index + 3] = alpha;
+        }
+    }
+    shadow
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn rasterize_buffer(
     font_system: &mut FontSystem,

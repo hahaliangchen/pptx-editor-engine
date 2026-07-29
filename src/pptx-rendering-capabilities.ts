@@ -28,6 +28,7 @@ export enum RenderingCapabilityId {
   TextBody = "text.body",
   TextDirection = "text.direction",
   TextReflection = "text.reflection",
+  TextShadow = "text.shadow",
   TextStroke = "text.stroke",
   TextWarp = "text.warp",
 
@@ -159,6 +160,14 @@ export const STATIC_RENDERING_CAPABILITIES: readonly RenderingCapability[] = [
     xml: ["a:reflection"],
     module: "src/pptx-parser.ts + rust-engine/src/font_renderer.rs",
     note: "Per-line glyph reflection, endPos clipping, alpha gradient and text-box clipping are rendered in Rust.",
+  },
+  {
+    id: RenderingCapabilityId.TextShadow,
+    domain: "text",
+    status: "partial",
+    xml: ["a:rPr/a:effectLst/a:outerShdw"],
+    module: "src/pptx-parser.ts + rust-engine/src/font_renderer.rs",
+    note: "Run-level outer shadows are rasterized from glyph alpha with color, opacity, blur, distance and direction; multi-run stacking and exact Office blur profiles remain approximate.",
   },
   {
     id: RenderingCapabilityId.TextStroke,

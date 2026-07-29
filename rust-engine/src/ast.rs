@@ -91,6 +91,8 @@ pub struct TextStyle {
     #[serde(default)]
     pub reflection: Option<ReflectionStyle>,
     #[serde(default)]
+    pub shadow: Option<ShadowStyle>,
+    #[serde(default)]
     pub outline: Option<TextOutlineStyle>,
 }
 
@@ -288,7 +290,7 @@ pub struct LineEndStyle {
     pub length: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct ShadowStyle {
     pub color: String,
     pub opacity: f32,

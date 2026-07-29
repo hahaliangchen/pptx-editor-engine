@@ -935,6 +935,10 @@ export class PptxParser {
           || reflection.getAttribute("rotWithShape") === "true"
       } satisfies ReflectionStyle;
     }
+    const textEffects = this.styleResolver.parseEffectStyle(rPr, absoluteUnitScale);
+    if (textEffects?.outerShadow) {
+      res.shadow = textEffects.outerShadow;
+    }
     const outlineNode = getDirectChild(rPr, "ln");
     if (outlineNode) {
       const outline = this.styleResolver.parseLineStyle(outlineNode, absoluteUnitScale, res.color);
@@ -1470,7 +1474,8 @@ export class PptxParser {
         fontFamily: defaultFontFamily,
         eastAsianFontFamily: defaultEastAsianFontFamily,
         italic: false,
-        letterSpacing: 0
+        letterSpacing: 0,
+        shadow: undefined
       };
 
       const inheritedParagraphProperties: globalThis.Element[] = [];
@@ -1652,6 +1657,7 @@ export class PptxParser {
               italic: runStyle.italic,
               letterSpacing: runStyle.letterSpacing,
               reflection: runStyle.reflection,
+              shadow: runStyle.shadow,
               outline: runStyle.outline
             }
           });
@@ -1675,6 +1681,7 @@ export class PptxParser {
             italic: emptyStyle.italic,
             letterSpacing: emptyStyle.letterSpacing,
             reflection: emptyStyle.reflection,
+            shadow: emptyStyle.shadow,
             outline: emptyStyle.outline
           }
         });

@@ -6,7 +6,7 @@ mod shape_geometry;
 mod shape_renderer;
 mod text_layout;
 
-use ast::{Element, ReflectionStyle, Slide, TextElement};
+use ast::{Element, ReflectionStyle, ShadowStyle, Slide, TextElement};
 use cosmic_text::fontdb::Source;
 use cosmic_text::{FontSystem, SwashCache};
 use std::sync::Arc;
@@ -33,6 +33,14 @@ impl RustPptRenderer {
             .flat_map(|paragraph| paragraph.runs.iter())
             .find_map(|run| run.style.reflection.clone())
             .or_else(|| txt.style.reflection.clone())
+    }
+
+    fn text_shadow(txt: &TextElement) -> Option<ShadowStyle> {
+        txt.paragraphs
+            .iter()
+            .flat_map(|paragraph| paragraph.runs.iter())
+            .find_map(|run| run.style.shadow.clone())
+            .or_else(|| txt.style.shadow.clone())
     }
 
     fn render_rich_text(&mut self, txt: &TextElement) -> Result<(), JsValue> {
@@ -215,6 +223,40 @@ impl RustPptRenderer {
             bitmap_height,
         )?;
         bitmap_ctx.put_image_data(&image_data, 0.0, 0.0)?;
+
+        if let Some(shadow) = Self::text_shadow(txt) {
+            let direction = shadow.direction.to_radians();
+            let shadow_pixels = font_renderer::build_shadow_bitmap(
+                &pixels,
+                bitmap_width,
+                bitmap_height,
+                text_layout::parse_text_color(&shadow.color),
+                shadow.opacity,
+                shadow.blur * raster_scale,
+                shadow.distance * direction.cos() * raster_scale,
+                shadow.distance * direction.sin() * raster_scale,
+            );
+            let shadow_canvas: HtmlCanvasElement = document.create_element("canvas")?.dyn_into()?;
+            shadow_canvas.set_width(bitmap_width);
+            shadow_canvas.set_height(bitmap_height);
+            let shadow_ctx: CanvasRenderingContext2d = shadow_canvas
+                .get_context("2d")?
+                .ok_or_else(|| JsValue::from_str("Could not create text shadow context"))?
+                .dyn_into()?;
+            let shadow_image = ImageData::new_with_u8_clamped_array_and_sh(
+                Clamped(&shadow_pixels),
+                bitmap_width,
+                bitmap_height,
+            )?;
+            shadow_ctx.put_image_data(&shadow_image, 0.0, 0.0)?;
+            self.ctx.draw_image_with_html_canvas_element_and_dw_and_dh(
+                &shadow_canvas,
+                txt.rect.x as f64,
+                bitmap_origin_y as f64,
+                txt.rect.w as f64,
+                (render_height + top_padding) as f64,
+            )?;
+        }
         self.ctx.draw_image_with_html_canvas_element_and_dw_and_dh(
             &canvas,
             txt.rect.x as f64,
@@ -376,6 +418,29 @@ mod tests {
         assert_eq!(reflected[0], 4);
         assert_eq!(reflected[4 * 4], 3);
         assert!(reflected[3] > reflected[4 * 4 + 3]);
+    }
+
+    #[test]
+    fn text_shadow_bitmap_applies_offset_and_color() {
+        let mut source = vec![0_u8; 5 * 5 * 4];
+        let center = (2 * 5 + 2) * 4;
+        source[center + 3] = 255;
+        let shadow = font_renderer::build_shadow_bitmap(
+            &source,
+            5,
+            5,
+            cosmic_text::Color::rgb(1, 2, 3),
+            0.5,
+            0.0,
+            1.0,
+            0.0,
+        );
+        let shifted = (2 * 5 + 3) * 4;
+        assert_eq!(
+            (shadow[shifted], shadow[shifted + 1], shadow[shifted + 2]),
+            (1, 2, 3)
+        );
+        assert_eq!(shadow[shifted + 3], 128);
     }
 }
 #[wasm_bindgen]

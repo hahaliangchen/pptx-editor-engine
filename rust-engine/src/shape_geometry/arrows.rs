@@ -38,6 +38,28 @@ fn mapped_right_arrow(
     polygon(ctx, &mapped);
 }
 
+fn up_arrow(ctx: &CanvasRenderingContext2d, shp: &ShapeElement, x: f64, y: f64, w: f64, h: f64) {
+    let short_side = w.min(h);
+    let head_height =
+        (short_side * shp.arrow_head_height.unwrap_or(0.5).clamp(0.15, 0.8) as f64).min(h * 0.8);
+    let shaft_width = (w * shp.arrow_shaft_width.unwrap_or(0.5).clamp(0.1, 1.0) as f64).min(w);
+    let center = x + w / 2.0;
+    let shaft_left = center - shaft_width / 2.0;
+    let shaft_right = center + shaft_width / 2.0;
+    polygon(
+        ctx,
+        &[
+            (center, y),
+            (x + w, y + head_height),
+            (shaft_right, y + head_height),
+            (shaft_right, y + h),
+            (shaft_left, y + h),
+            (shaft_left, y + head_height),
+            (x, y + head_height),
+        ],
+    );
+}
+
 pub fn draw(
     ctx: &CanvasRenderingContext2d,
     shp: &ShapeElement,
@@ -96,6 +118,8 @@ pub fn draw(
     } else if kind == "upDownArrow" || kind == "upDownArrowCallout" {
         mapped_right_arrow(ctx, x, y, w, h / 2.0, "up", 0.45, 0.42);
         mapped_right_arrow(ctx, x, y + h / 2.0, w, h / 2.0, "down", 0.45, 0.42);
+    } else if kind == "upArrow" {
+        up_arrow(ctx, shp, x, y, w, h);
     } else {
         mapped_right_arrow(
             ctx,

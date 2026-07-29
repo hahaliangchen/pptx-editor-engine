@@ -27,6 +27,8 @@ export interface TextStyle {
   italic?: boolean;
   letterSpacing?: number;
   reflection?: ReflectionStyle;
+  /** DrawingML run-level outer shadow (a:rPr/a:effectLst/a:outerShdw). */
+  shadow?: ShadowStyle;
   /** DrawingML run outline (a:rPr/a:ln). */
   outline?: {
     color: string;
@@ -345,6 +347,7 @@ export interface ComputedRunStyle {
   italic: boolean;
   letterSpacing: number;
   reflection?: ReflectionStyle;
+  shadow?: ShadowStyle;
   outline?: {
     color: string;
     width: number;
