@@ -144,6 +144,12 @@ pub fn build_shadow_bitmap(
         return shadow;
     }
     let opacity = opacity.clamp(0.0, 1.0);
+    // WPS keeps the shifted glyph recognizable, but its visible peak is much
+    // lower than the source color alpha once blur is present. Keeping these
+    // contributions below 1 prevents the shadow from looking like a second
+    // fully rendered gray label.
+    const CORE_WEIGHT: f32 = 0.38;
+    const HALO_WEIGHT: f32 = 0.12;
     let red = color.r();
     let green = color.g();
     let blue = color.b();
@@ -152,8 +158,11 @@ pub fn build_shadow_bitmap(
     // separable Gaussian is a much closer match to the Office/WPS shadow
     // profile than the old clipped box average, and retaining f32 offsets
     // avoids moving diagonal shadows by a whole raster pixel.
-    let radius = blur_radius.ceil().clamp(0.0, 24.0) as i32;
-    let sigma = (blur_radius * 0.5).max(0.01);
+    // The Office/WPS text shadow is visually tighter than a generic CSS-like
+    // blur. Keep the XML blur radius as the outer support while using a
+    // smaller Gaussian sigma so the dark core stays close to the glyph.
+    let sigma = (blur_radius * 0.35).max(0.01);
+    let radius = (sigma * 3.0).ceil().clamp(0.0, 24.0) as i32;
     let mut weights = Vec::with_capacity((radius * 2 + 1) as usize);
     let mut weight_sum = 0.0_f32;
     for delta in -radius..=radius {
@@ -188,7 +197,7 @@ pub fn build_shadow_bitmap(
             let alpha = |sx: usize, sy: usize| source[(sy * width + sx) * 4 + 3] as f32;
             let top = alpha(x0, y0) * (1.0 - fx) + alpha(x1, y0) * fx;
             let bottom = alpha(x0, y1) * (1.0 - fx) + alpha(x1, y1) * fx;
-            translated[y * width + x] = (top * (1.0 - fy) + bottom * fy) * opacity;
+            translated[y * width + x] = top * (1.0 - fy) + bottom * fy;
         }
     }
 
@@ -204,6 +213,11 @@ pub fn build_shadow_bitmap(
         }
     }
 
+    let (core_weight, halo_weight) = if blur_radius <= f32::EPSILON {
+        (1.0, 0.0)
+    } else {
+        (CORE_WEIGHT, HALO_WEIGHT)
+    };
     for y in 0..height {
         for x in 0..width {
             let mut value = 0.0_f32;
@@ -211,7 +225,14 @@ pub fn build_shadow_bitmap(
                 let sample_y = (y as i32 + delta).clamp(0, height as i32 - 1) as usize;
                 value += horizontal[sample_y * width + x] * weights[(delta + radius) as usize];
             }
-            let alpha = value.round().clamp(0.0, 255.0) as u8;
+            // Office/WPS text shadows retain a recognizable shifted glyph
+            // core. A fully blurred mask turns small CJK strokes into a broad
+            // gray haze, so keep most of the translated glyph and use the
+            // Gaussian result only as a weak penumbra around its edge.
+            let core = translated[y * width + x];
+            let alpha = ((core * core_weight + value * halo_weight) * opacity)
+                .round()
+                .clamp(0.0, 255.0) as u8;
             if alpha == 0 {
                 continue;
             }

@@ -25,6 +25,10 @@ pub struct RustPptRenderer {
 // The mac-like profile uses grayscale, unhinted glyphs and a small oversampling
 // factor before compositing the text bitmap onto the presentation canvas.
 const MAC_TEXT_OVERSAMPLE: f32 = 2.0;
+// WPS exposes only a small part of the XML text-shadow displacement. Keep the
+// XML distance in the AST, but calibrate its final visible offset so the gray
+// glyph remains almost overlapped by the foreground text.
+const TEXT_SHADOW_OFFSET_SCALE: f32 = 0.35;
 
 impl RustPptRenderer {
     fn text_reflection(txt: &TextElement) -> Option<ReflectionStyle> {
@@ -233,8 +237,8 @@ impl RustPptRenderer {
                 text_layout::parse_text_color(&shadow.color),
                 shadow.opacity,
                 shadow.blur * raster_scale,
-                shadow.distance * direction.cos() * raster_scale,
-                shadow.distance * direction.sin() * raster_scale,
+                shadow.distance * direction.cos() * TEXT_SHADOW_OFFSET_SCALE * raster_scale,
+                shadow.distance * direction.sin() * TEXT_SHADOW_OFFSET_SCALE * raster_scale,
             );
             let shadow_canvas: HtmlCanvasElement = document.create_element("canvas")?.dyn_into()?;
             shadow_canvas.set_width(bitmap_width);
@@ -441,6 +445,29 @@ mod tests {
             (1, 2, 3)
         );
         assert_eq!(shadow[shifted + 3], 128);
+    }
+
+    #[test]
+    fn text_shadow_keeps_a_tight_core_with_a_faint_halo() {
+        let mut source = vec![0_u8; 9 * 9 * 4];
+        let center = (4 * 9 + 4) * 4;
+        source[center + 3] = 255;
+        let shadow = font_renderer::build_shadow_bitmap(
+            &source,
+            9,
+            9,
+            cosmic_text::Color::rgb(0, 0, 0),
+            1.0,
+            2.0,
+            0.0,
+            0.0,
+        );
+        let adjacent = (4 * 9 + 5) * 4 + 3;
+        let far = (4 * 9 + 7) * 4 + 3;
+        assert!((90..=130).contains(&shadow[center + 3]));
+        assert!(shadow[adjacent] > 0);
+        assert!(shadow[adjacent] < shadow[center + 3]);
+        assert!(shadow[far] < shadow[adjacent]);
     }
 }
 #[wasm_bindgen]

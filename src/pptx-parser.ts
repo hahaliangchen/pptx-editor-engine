@@ -914,12 +914,15 @@ export class PptxParser {
     if (spacingAttr) {
       res.letterSpacing = (parseInt(spacingAttr, 10) / 100) * 12700 * absoluteUnitScale;
     }
+    const language = rPr.getAttribute("lang") || rPr.getAttribute("altLang") || undefined;
     const latin = querySelector(rPr, "a\\:latin, latin");
     const typeface = latin?.getAttribute("typeface");
-    if (typeface) res.fontFamily = this.styleResolver.resolveThemeTypeface(typeface);
+    if (typeface) res.fontFamily = this.styleResolver.resolveThemeTypeface(typeface, language);
     const eastAsian = querySelector(rPr, "a\\:ea, ea");
     const eastAsianTypeface = eastAsian?.getAttribute("typeface");
-    if (eastAsianTypeface) res.eastAsianFontFamily = this.styleResolver.resolveThemeTypeface(eastAsianTypeface);
+    if (eastAsianTypeface) {
+      res.eastAsianFontFamily = this.styleResolver.resolveThemeTypeface(eastAsianTypeface, language);
+    }
     const reflection = querySelector(rPr, "a\\:reflection, reflection");
     if (reflection) {
       res.reflection = {

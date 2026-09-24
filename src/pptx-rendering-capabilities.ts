@@ -167,7 +167,7 @@ export const STATIC_RENDERING_CAPABILITIES: readonly RenderingCapability[] = [
     status: "partial",
     xml: ["a:rPr/a:effectLst/a:outerShdw"],
     module: "src/pptx-parser.ts + rust-engine/src/font_renderer.rs",
-    note: "Run-level outer shadows are rasterized from glyph alpha with color, opacity, blur, distance and direction; multi-run stacking and exact Office blur profiles remain approximate.",
+    note: "Run-level outer shadows combine a low-intensity shifted glyph-alpha core with a weaker Gaussian penumbra; XML color, opacity, distance and direction are parsed, with a calibrated 0.35 visible text-offset scale for WPS-like overlap. Multi-run stacking and exact Office blur profiles remain approximate.",
   },
   {
     id: RenderingCapabilityId.TextStroke,

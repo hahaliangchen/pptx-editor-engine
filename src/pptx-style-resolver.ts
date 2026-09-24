@@ -22,12 +22,55 @@ export interface StyleResolverContext {
 export class PptxStyleResolver {
   constructor(private readonly context: StyleResolverContext) {}
 
-  resolveThemeTypeface(typeface: string): string {
+  resolveThemeTypeface(typeface: string, language?: string): string {
     if (!typeface.startsWith("+")) return typeface;
+
+    const prefix = typeface.substring(0, 3);
+    if (typeface.endsWith("-ea")) {
+      const normalizedLanguage = (language || "").trim().toLowerCase().replace(/_/g, "-");
+      let script: "Hans" | "Hant" | "Jpan" | "Hang" | null = null;
+      if (
+        normalizedLanguage === "zh"
+        || normalizedLanguage.startsWith("zh-cn")
+        || normalizedLanguage.startsWith("zh-sg")
+        || normalizedLanguage.startsWith("zh-hans")
+      ) {
+        script = "Hans";
+      } else if (
+        normalizedLanguage.startsWith("zh-tw")
+        || normalizedLanguage.startsWith("zh-hk")
+        || normalizedLanguage.startsWith("zh-mo")
+        || normalizedLanguage.startsWith("zh-hant")
+      ) {
+        script = "Hant";
+      } else if (normalizedLanguage.startsWith("ja")) {
+        script = "Jpan";
+      } else if (normalizedLanguage.startsWith("ko")) {
+        script = "Hang";
+      }
+
+      if (script) {
+        const localized = this.context.themeFonts[`${prefix}-${script}`];
+        if (localized) return localized;
+      }
+
+      const genericEastAsian = this.context.themeFonts[typeface];
+      if (genericEastAsian) return genericEastAsian;
+
+      // Many Office themes leave <a:ea typeface=""> empty and define the
+      // actual East Asian faces in script-specific <a:font> entries.
+      for (const fallbackScript of ["Hans", "Hant", "Jpan", "Hang"]) {
+        const localized = this.context.themeFonts[`${prefix}-${fallbackScript}`];
+        if (localized) return localized;
+      }
+
+      return this.context.themeFonts[`${prefix}-lt`] || "sans-serif";
+    }
+
     const resolved = this.context.themeFonts[typeface];
     if (resolved) return resolved;
-    if (typeface.endsWith("-ea") || typeface.endsWith("-cs")) {
-      return this.context.themeFonts[`${typeface.substring(0, 3)}-lt`] || "sans-serif";
+    if (typeface.endsWith("-cs")) {
+      return this.context.themeFonts[`${prefix}-lt`] || "sans-serif";
     }
     return "sans-serif";
   }

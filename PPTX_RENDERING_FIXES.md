@@ -267,7 +267,7 @@ literal metric-plus-120% result while the XML `spcPct` value remains intact.
 - 图片 `a:xfrm` 的 `rot/flipH/flipV` 已围绕图片中心应用；形状 `blipFill` 现在会加载关系图片并在当前形状路径内裁剪绘制，默认按 stretch 模式处理。
 - 线条 `headEnd/tailEnd` 已解析，直线和直连接器支持三角、菱形、圆形和 open 端点的近似绘制；弯折连接器的路由箭头和 Office 精确尺寸仍需校准。
 - `a:rPr/a:ln` 的文字轮廓已解析到 run AST；字形级描边仍需在 glyph mask 层实现。
-- 第六页“智慧科研”“智慧策展”“智慧伴游”等 run 的 `a:rPr/a:effectLst/a:outerShdw` 已解析并在 Rust 字形位图层绘制，参数包括黑色、43.137% 透明度、约 3px 模糊、3px 距离和 45° 方向；当前按文本元素级合成，复杂多 run 阴影叠加仍是近似。
+- 第六页“智慧科研”“智慧策展”“智慧伴游”等 run 的 `a:rPr/a:effectLst/a:outerShdw` 已解析并在 Rust 字形位图层绘制，参数包括黑色、43.137% 透明度、3pt 模糊、3pt 距离和 45° 方向。阴影现在由低强度的偏移字形核心与更弱的高斯边缘共同合成，并对文字阴影的最终可见位移使用 `0.35` 校准，只让少量阴影从正文右下侧露出，避免形成第二层完整灰字或整片灰雾；当前仍按文本元素级合成，复杂多 run 阴影叠加是近似。
 - `a:custGeom` 已按独立类型解析和渲染：支持常见 guide 公式、`moveTo/lnTo/quadBezTo/cubicBezTo/arcTo/close`，并尊重路径级 `fill="none"`、`fill="lighten/lightenLess/darken/darkenLess"` 与 `stroke="0"`。多路径按 XML 顺序逐条绘制；lighten/darken 使用 Canvas `screen/multiply` 近似，DrawingML `arcTo` 的极端连接语义仍需更多样本校准。
 - `a:scene3d`、`a:sp3d`、`a:prstShdw` 和 WordArt 变形暂不处理，避免用 2D 近似破坏现有版式。
 
