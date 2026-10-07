@@ -89,6 +89,9 @@ export interface TextBodyProperties {
 export interface TextElement {
   type: "text";
   id: string;
+  /** Original DrawingML shape ID and slide part, when parsed from a slide. */
+  sourceShapeId?: string;
+  sourceSlidePart?: string;
   rect: Rect;
   content: string;
   style: TextStyle;

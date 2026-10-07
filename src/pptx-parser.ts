@@ -1298,7 +1298,9 @@ export class PptxParser {
         defaultFontFamily,
         defaultEastAsianFontFamily,
         inheritance,
-        body
+        body,
+        cNvPr?.getAttribute("id") || undefined,
+        placeholderContext?.slidePart
       );
     }
   }
@@ -1448,7 +1450,9 @@ export class PptxParser {
     defaultFontFamily: string = "sans-serif",
     defaultEastAsianFontFamily: string = "",
     inheritance: TextInheritanceContext | null = null,
-    resolvedBody: TextBodyProperties | null = null
+    resolvedBody: TextBodyProperties | null = null,
+    sourceShapeId?: string,
+    sourceSlidePart?: string
   ) {
     const paragraphs = querySelectorAll(txBody, "a\\:p, p");
     const body = resolvedBody || {
@@ -1730,6 +1734,8 @@ export class PptxParser {
     elements.push({
       type: "text",
       id: `text_${id}`,
+      sourceShapeId,
+      sourceSlidePart,
       rect: { x, y, w, h },
       content,
       style: fallbackRun.style,

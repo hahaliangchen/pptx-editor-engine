@@ -59,6 +59,17 @@ export default class PptViewer {
   private isRenderingThumbnails = false;
   private cacheWarmupEpoch = 0;
   private loadSequence = 0;
+  private selectedElementId: string | null = null;
+  private selectedSlideId: string | null = null;
+  private dragState: {
+    pointerId: number;
+    slideId: string;
+    elementId: string;
+    startX: number;
+    startY: number;
+    originX: number;
+    originY: number;
+  } | null = null;
 
   // Callbacks
   private onSlideChange?: (slideIndex: number, slide: Slide) => void;
@@ -89,6 +100,12 @@ export default class PptViewer {
 
     this.parser = new PptxParser();
     this.engineReady = this.initEngine();
+
+    this.canvas.style.touchAction = "none";
+    this.canvas.addEventListener("pointerdown", event => this.onCanvasPointerDown(event));
+    this.canvas.addEventListener("pointermove", event => this.onCanvasPointerMove(event));
+    this.canvas.addEventListener("pointerup", event => this.onCanvasPointerEnd(event));
+    this.canvas.addEventListener("pointercancel", event => this.onCanvasPointerEnd(event));
 
     // Listen to resize to keep canvas crisp
     window.addEventListener("resize", () => this.resizeAndRedraw());
@@ -300,6 +317,9 @@ export default class PptViewer {
     try {
       log("parse:start");
       this.presentation = await this.parser.parse(buffer);
+      this.selectedElementId = null;
+      this.selectedSlideId = null;
+      this.dragState = null;
       log(`parse:done slides=${this.presentation.slides.length}`);
 
       log("wasm:init:wait");
@@ -336,6 +356,9 @@ export default class PptViewer {
   // Load a pre-built PPT Virtual DOM (for demos / testing).
   public async loadVirtualDocument(document: PptVirtualDocument): Promise<void> {
     this.presentation = document;
+    this.selectedElementId = null;
+    this.selectedSlideId = null;
+    this.dragState = null;
     await this.engineReady;
     await this.ensurePresentationFonts(document);
     this.currentSlideIndex = 0;
@@ -463,6 +486,136 @@ export default class PptViewer {
       return null;
     }
     return this.presentation.slides[this.currentSlideIndex];
+  }
+
+  private getSlidePoint(event: PointerEvent): { x: number; y: number } | null {
+    if (!this.presentation) return null;
+    const bounds = this.canvas.getBoundingClientRect();
+    if (bounds.width <= 0 || bounds.height <= 0) return null;
+
+    const logicalSize = this.presentation.size;
+    const scale = Math.min(
+      this.canvas.width / logicalSize.width,
+      this.canvas.height / logicalSize.height
+    );
+    if (!Number.isFinite(scale) || scale <= 0) return null;
+
+    const canvasX = (event.clientX - bounds.left) * this.canvas.width / bounds.width;
+    const canvasY = (event.clientY - bounds.top) * this.canvas.height / bounds.height;
+    const offsetX = (this.canvas.width - logicalSize.width * scale) / 2;
+    const offsetY = (this.canvas.height - logicalSize.height * scale) / 2;
+    return {
+      x: (canvasX - offsetX) / scale,
+      y: (canvasY - offsetY) / scale
+    };
+  }
+
+  private onCanvasPointerDown(event: PointerEvent): void {
+    const slide = this.getCurrentSlideAST();
+    const point = this.getSlidePoint(event);
+    if (!slide || !point) return;
+    event.preventDefault();
+
+    const size = this.presentation!.size;
+    const withinSlide = point.x >= 0 && point.y >= 0
+      && point.x <= size.width && point.y <= size.height;
+    const element = withinSlide
+      ? [...slide.elements].reverse().find(candidate =>
+        point.x >= candidate.rect.x
+        && point.x <= candidate.rect.x + candidate.rect.w
+        && point.y >= candidate.rect.y
+        && point.y <= candidate.rect.y + candidate.rect.h
+      )
+      : undefined;
+
+    if (!element) {
+      this.selectedElementId = null;
+      this.selectedSlideId = null;
+      this.dragState = null;
+      this.resizeAndRedraw(slide);
+      return;
+    }
+
+    this.selectedElementId = element.id;
+    this.selectedSlideId = slide.id;
+    this.dragState = {
+      pointerId: event.pointerId,
+      slideId: slide.id,
+      elementId: element.id,
+      startX: point.x,
+      startY: point.y,
+      originX: element.rect.x,
+      originY: element.rect.y
+    };
+    this.canvas.setPointerCapture(event.pointerId);
+    this.resizeAndRedraw(slide);
+  }
+
+  private onCanvasPointerMove(event: PointerEvent): void {
+    const drag = this.dragState;
+    if (!drag || event.pointerId !== drag.pointerId) return;
+    const slide = this.presentation?.slides.find(candidate => candidate.id === drag.slideId);
+    const element = slide?.elements.find(candidate => candidate.id === drag.elementId);
+    const point = this.getSlidePoint(event);
+    if (!slide || !element || !point) return;
+
+    const x = drag.originX + point.x - drag.startX;
+    const y = drag.originY + point.y - drag.startY;
+    if (element.rect.x === x && element.rect.y === y) return;
+    element.rect.x = x;
+    element.rect.y = y;
+    this.slideJsonCache.delete(slide.id);
+    this.renderedSlideCache.delete(slide.id);
+    this.resizeAndRedraw(slide);
+  }
+
+  private onCanvasPointerEnd(event: PointerEvent): void {
+    if (this.dragState?.pointerId === event.pointerId) {
+      this.dragState = null;
+    }
+  }
+
+  /** Replace the plain text of a top-level text element on a slide. */
+  public async updateTextElement(slideId: string, elementId: string, content: string): Promise<void> {
+    if (!this.presentation) {
+      throw new Error("No presentation is loaded.");
+    }
+
+    const slide = this.presentation.slides.find(candidate => candidate.id === slideId);
+    if (!slide) {
+      throw new Error(`Slide with id "${slideId}" was not found.`);
+    }
+
+    const element = slide.elements.find(candidate => candidate.id === elementId);
+    if (!element) {
+      throw new Error(`Element with id "${elementId}" was not found on slide "${slideId}".`);
+    }
+    if (element.type !== "text") {
+      throw new Error(`Element "${elementId}" on slide "${slideId}" is not a text element.`);
+    }
+
+    const firstParagraph = element.paragraphs?.[0];
+    const paragraphStyle = firstParagraph?.style ?? {
+      align: element.style.align,
+      level: 0,
+      marginLeft: 0,
+      indent: 0
+    };
+    const runStyle = firstParagraph?.runs[0]?.style ?? element.style;
+
+    element.content = content;
+    element.paragraphs = [{
+      style: paragraphStyle,
+      runs: [{ content, style: runStyle }],
+      ...(firstParagraph?.bullet ? { bullet: firstParagraph.bullet } : {})
+    }];
+
+    this.slideJsonCache.delete(slide.id);
+    this.renderedSlideCache.delete(slide.id);
+
+    if (this.getCurrentSlideAST() === slide) {
+      await this.renderCurrentSlide();
+    }
   }
 
   public setDebugTextBoxes(enabled: boolean): void {
@@ -722,6 +875,7 @@ export default class PptViewer {
     if (this.debugTextBoxes) {
       this.drawDebugTextBoxes(slide);
     }
+    this.drawSelectionBox(slide);
 
     this.ctx.restore();
     this.scheduleSlideCacheWarmup();
@@ -743,6 +897,26 @@ export default class PptViewer {
         element.rect.h
       );
     }
+    this.ctx.restore();
+  }
+
+  private drawSelectionBox(slide: Slide): void {
+    if (this.selectedSlideId !== slide.id || !this.selectedElementId) return;
+    const element = slide.elements.find(candidate => candidate.id === this.selectedElementId);
+    if (!element) return;
+
+    this.ctx.save();
+    const transform = this.ctx.getTransform();
+    const scale = Math.max(Math.hypot(transform.a, transform.b), 0.1);
+    this.ctx.strokeStyle = "#1683ff";
+    this.ctx.lineWidth = 2 / scale;
+    this.ctx.setLineDash([]);
+    this.ctx.strokeRect(
+      element.rect.x,
+      element.rect.y,
+      element.rect.w,
+      element.rect.h
+    );
     this.ctx.restore();
   }
 
