@@ -1,7 +1,6 @@
 import {
   ImageElement,
   PptVirtualDocument,
-  PptxParser,
   PresentationAST,
   Slide,
   SlideElement,
@@ -11,33 +10,8 @@ import {
 } from "./pptx-parser";
 import * as wasm from "../rust-engine/pkg/ppt_engine";
 import { EditorState, SlideEditor } from "./editor/slide-editor";
-import { Command } from "./editor/history";
-import { DeckPort, DecodedImage, EditApi } from "./api/engine";
-import {
-  blankSlideXml,
-  layoutPlaceholders,
-  placeholderSlideXml,
-  prepareSlideCopy,
-  relationshipsXml
-} from "./editor/slides";
-import {
-  DirtyShapes,
-  TextEdits,
-  exportEditedPptx,
-  markDirty,
-  RelAdd,
-  StructureEdits,
-  StyleEdits,
-  emptyStructure,
-  materializeShape,
-  materializeSlide,
-  readRelationships,
-  resolveTarget,
-  popOp,
-  popTextOp,
-  pushOp,
-  pushTextOp
-} from "./pptx-exporter";
+import { EditApi } from "./api/engine";
+import { DocumentSession } from "./document-session";
 
 export interface ViewerOptions {
   container: HTMLElement;
@@ -78,9 +52,7 @@ export default class PptViewer {
   private cacheCanvas: HTMLCanvasElement | null = null;
   private cacheContext: CanvasRenderingContext2D | null = null;
   private cacheRenderer: wasm.RustPptRenderer | null = null;
-  private parser: PptxParser;
-  private presentation: PptVirtualDocument | null = null;
-  private currentSlideIndex: number = 0;
+  private session: DocumentSession;
   private imageCache: Record<string, HTMLImageElement> = {};
   private registeredFontBytes: Uint8Array[] = [];
   private slideJsonCache = new Map<string, string>();
@@ -97,7 +69,6 @@ export default class PptViewer {
   private isRenderingThumbnails = false;
   private cacheWarmupEpoch = 0;
   private loadSequence = 0;
-  private editor: SlideEditor;
   private dragRenderer: wasm.RustPptRenderer | null = null;
   private dragScratch: HTMLCanvasElement | null = null;
   private dragContext: CanvasRenderingContext2D | null = null;
@@ -110,11 +81,6 @@ export default class PptViewer {
     offsetX: number;
     offsetY: number;
   } | null = null;
-  private dirtyShapes: DirtyShapes = new Map();
-  private textEdits: TextEdits = new Map();
-  private styleEdits: StyleEdits = new Map();
-  private structureEdits: StructureEdits = emptyStructure();
-  private shapeIdCounters = new Map<string, number>();
   private hiddenElements = new Set<SlideElement>();
   private editNotifyTimer = 0;
   private onSlideEdited?: (slideIndex: number, slide: Slide) => void;
@@ -123,7 +89,22 @@ export default class PptViewer {
   /** "fit" follows the window; a number is a percentage where 100 is the slide's real size. */
   private zoomMode: "fit" | number = "fit";
   private zoomPercent = 100;
-  private slideSerial = 0;
+
+  private get presentation(): PptVirtualDocument | null {
+    return this.session.presentation;
+  }
+
+  private get currentSlideIndex(): number {
+    return this.session.currentIndex;
+  }
+
+  private set currentSlideIndex(index: number) {
+    this.session.currentIndex = index;
+  }
+
+  private get editor(): SlideEditor {
+    return this.session.editor;
+  }
 
   // Callbacks
   private onSlideChange?: (slideIndex: number, slide: Slide) => void;
@@ -155,36 +136,31 @@ export default class PptViewer {
     if (!context) throw new Error("Failed to get 2D canvas context");
     this.ctx = context;
 
-    this.parser = new PptxParser();
     this.engineReady = this.initEngine();
 
     this.container.style.touchAction = "none";
-    this.editor = new SlideEditor({
+    this.session = new DocumentSession({
       container: this.container,
-      getSlide: () => this.getCurrentSlideAST(),
-      getSlideSize: () => this.presentation?.size || null,
-      invalidate: slide => this.invalidateSlide(slide),
-      beginDrag: (slide, elements) => this.beginDragLayers(slide, elements),
-      endDrag: () => this.endDragLayers(),
-      showSlide: slide => {
-        const index = this.presentation?.slides.indexOf(slide) ?? -1;
-        if (index >= 0) this.currentSlideIndex = index;
+      view: {
+        invalidate: slide => this.invalidateSlide(slide),
+        beginDrag: (slide, elements) => this.beginDragLayers(slide, elements),
+        endDrag: () => this.endDragLayers(),
+        slideEdited: slide => this.notifySlideEdited(slide),
+        beginTextEdit: (slide, element) => this.setHiddenElements(slide, [element]),
+        endTextEdit: slide => this.setHiddenElements(slide, []),
+        slidesChanged: async () => {
+          await this.renderCurrentSlide();
+          if (this.presentation) this.onSlidesChanged?.(this.presentation, this.currentSlideIndex);
+        },
+        currentChanged: () => this.renderCurrentSlide(),
+        prepareSlide: slide => this.ensurePresentationFonts({ ...this.presentation!, slides: [slide] })
       },
-      onCommit: slide => this.notifySlideEdited(slide),
-      markDirty: source => markDirty(this.dirtyShapes, source),
-      beginTextEdit: (slide, element) => this.setHiddenElements(slide, [element]),
-      endTextEdit: slide => this.setHiddenElements(slide, []),
-      recordTextOp: (source, op) => pushTextOp(this.textEdits, source, op),
-      discardTextOp: source => popTextOp(this.textEdits, source),
-      structure: () => this.structureEdits,
-      materialize: source => this.materializeSource(source),
-      allocateShapeId: part => this.allocateShapeId(part),
-      deckFont: () => this.deckFont(),
-      allocateRelationshipId: part => this.allocateRelationshipId(part),
-      allocateMediaPath: extension => this.allocateMediaPath(extension),
-      resolveRelationships: (target, source, relationships) => this.resolveRelationships(target, source, relationships),
-      recordStyleOp: (source, op) => pushOp(this.styleEdits, source, op),
-      discardStyleOp: source => popOp(this.styleEdits, source)
+      probeImage: (_bytes, _type, url) => new Promise((resolve, reject) => {
+        const probe = new Image();
+        probe.onload = () => resolve({ width: probe.naturalWidth, height: probe.naturalHeight });
+        probe.onerror = () => reject(new Error("无法读取这张图片。"));
+        probe.src = url;
+      })
     });
     if (options.onEditStateChange) this.editor.subscribe(options.onEditStateChange);
 
@@ -414,17 +390,17 @@ export default class PptViewer {
 
     try {
       log("parse:start");
-      this.presentation = await this.parser.parse(buffer);
-      this.resetEditing();
+      const presentation = await this.session.open(buffer);
+      this.resetView();
       this.zoomMode = "fit";
-      log(`parse:done slides=${this.presentation.slides.length}`);
+      log(`parse:done slides=${presentation.slides.length}`);
 
       log("wasm:init:wait");
       await this.engineReady;
       log("wasm:init:ready");
 
       log("fonts:start");
-      await this.ensurePresentationFonts(this.presentation);
+      await this.ensurePresentationFonts(presentation);
       log("fonts:done");
 
       this.currentSlideIndex = 0;
@@ -438,12 +414,12 @@ export default class PptViewer {
 
       if (this.onLoadComplete) {
         log("onLoadComplete:start");
-        await this.onLoadComplete(this.presentation);
+        await this.onLoadComplete(presentation);
         log("onLoadComplete:done");
       }
 
       log("complete");
-      return this.presentation;
+      return presentation;
     } catch (error) {
       log("failed", error);
       throw error;
@@ -452,9 +428,8 @@ export default class PptViewer {
 
   // Load a pre-built PPT Virtual DOM (for demos / testing).
   public async loadVirtualDocument(document: PptVirtualDocument): Promise<void> {
-    this.presentation = document;
-    this.parser.discardPackage();
-    this.resetEditing();
+    this.session.openVirtual(document);
+    this.resetView();
     await this.engineReady;
     await this.ensurePresentationFonts(document);
     this.currentSlideIndex = 0;
@@ -467,7 +442,7 @@ export default class PptViewer {
     // shared canvas) with the main canvas already in its final state.
     await this.renderCurrentSlide();
     if (this.onLoadComplete) {
-      await this.onLoadComplete(this.presentation);
+      await this.onLoadComplete(document);
     }
   }
 
@@ -654,30 +629,7 @@ export default class PptViewer {
 
   /** Place a picture file on the current slide. */
   public async insertImage(file: File): Promise<void> {
-    const types: Record<string, { extension: string; contentType: string }> = {
-      "image/png": { extension: "png", contentType: "image/png" },
-      "image/jpeg": { extension: "jpeg", contentType: "image/jpeg" },
-      "image/gif": { extension: "gif", contentType: "image/gif" }
-    };
-    const kind = types[file.type];
-    if (!kind) throw new Error("仅支持 PNG、JPEG、GIF 图片。");
-    const url = URL.createObjectURL(file);
-    const size = await new Promise<{ width: number; height: number }>((resolve, reject) => {
-      const probe = new Image();
-      probe.onload = () => resolve({ width: probe.naturalWidth, height: probe.naturalHeight });
-      probe.onerror = () => reject(new Error("无法读取这张图片。"));
-      probe.src = url;
-    });
-    // Pixels become slide units at 96 dpi: 1 px = 9525 EMU.
-    const emuPerPx = this.presentation?.slides[0]?.emuPerPx || 6350;
-    await this.editor.insertImage({
-      bytes: new Uint8Array(await file.arrayBuffer()),
-      ...kind,
-      url,
-      width: (size.width * 9525) / emuPerPx,
-      height: (size.height * 9525) / emuPerPx,
-      name: file.name
-    });
+    await this.session.insertPicture(new Uint8Array(await file.arrayBuffer()), file.type, file.name);
   }
 
   public arrange(mode: Parameters<SlideEditor["arrange"]>[0]): void {
@@ -718,7 +670,7 @@ export default class PptViewer {
 
   /** True when edits can be written back to an opened .pptx package. */
   public canExport(): boolean {
-    return this.parser.getZip() !== null;
+    return this.session.canExport();
   }
 
   /** True when the deck differs from the last export (or from how it was opened). */
@@ -732,324 +684,52 @@ export default class PptViewer {
   }
 
   /** Build a new .pptx with every edit written back into the original package. */
-  public async exportPptx(): Promise<Blob> {
-    const zip = this.parser.getZip();
-    if (!zip || !this.presentation) throw new Error("请先打开一个 .pptx 文件。");
-    const blob = await exportEditedPptx(zip, this.presentation.slides, this.dirtyShapes, this.textEdits, this.styleEdits, this.structureEdits);
-    this.editor.markSaved();
-    return blob;
+  public exportPptx(): Promise<Blob> {
+    return this.session.exportPptx();
   }
 
   // ------------------------------------------------------------ slide list
 
-  private editSet() {
-    return {
-      dirty: this.dirtyShapes,
-      textEdits: this.textEdits,
-      styleEdits: this.styleEdits,
-      structure: this.structureEdits
-    };
-  }
-
-  private allocateSlidePart(): string {
-    const taken = [
-      ...Object.keys(this.parser.getZip()?.files || {}),
-      ...this.structureEdits.virtual.keys(),
-      ...(this.presentation?.slides || []).map(slide => slide.part || "")
-    ];
-    let highest = 0;
-    for (const path of taken) {
-      const match = path.match(/^ppt\/slides\/slide(\d+)\.xml$/);
-      if (match) highest = Math.max(highest, parseInt(match[1], 10));
-    }
-    return `ppt/slides/slide${highest + 1}.xml`;
-  }
-
-  private cloneElements(elements: SlideElement[], part?: string): SlideElement[] {
-    return elements.map(element => {
-      const copy: SlideElement = JSON.parse(JSON.stringify(element));
-      if (part && copy.source) copy.source.part = part;
-      return copy;
-    });
-  }
-
   /** Swap the slide list (and current page) and tell the UI; used by every slide command. */
-  public async setSlides(slides: Slide[], index: number): Promise<void> {
-    if (!this.presentation) return;
-    this.presentation.slides = slides;
-    this.currentSlideIndex = Math.max(0, Math.min(index, slides.length - 1));
-    this.editor.clearSelection();
-    await this.renderCurrentSlide();
-    this.onSlidesChanged?.(this.presentation, this.currentSlideIndex);
-  }
-
-  private recordSlideChange(label: string, before: Slide[], beforeIndex: number, after: Slide[], afterIndex: number): void {
-    const command: Command = {
-      label,
-      apply: () => { void this.setSlides([...after], afterIndex); },
-      revert: () => { void this.setSlides([...before], beforeIndex); }
-    };
-    command.apply();
-    this.editor.record(command);
-  }
-
-  private requirePackage(): void {
-    if (!this.parser.getZip() || !this.presentation) throw new Error("请先打开一个 .pptx 文件。");
+  public setSlides(slides: Slide[], index: number): Promise<void> {
+    return this.session.setSlides(slides, index);
   }
 
   /** A blank page with the same layout as `index`, right after it. */
-  public async addSlide(index = this.currentSlideIndex, layoutName?: string): Promise<void> {
-    this.requirePackage();
-    const zip = this.parser.getZip()!;
-    const slides = this.presentation!.slides;
-    const reference = slides[index];
-    if (!reference?.part) return;
-
-    const known = await readRelationships(zip, reference.part, this.structureEdits.relAdds.get(reference.part), this.structureEdits.virtual);
-    let layout = [...known.values()].find(rel => rel.type.endsWith("/slideLayout"));
-    if (!layout) throw new Error("找不到这一页使用的版式。");
-    if (layoutName) {
-      const chosen = (await this.layoutParts()).find(entry => entry.name === layoutName);
-      if (!chosen) throw new Error(`没有名为 "${layoutName}" 的版式。`);
-      layout = { ...layout, target: `../slideLayouts/${chosen.part.split("/").pop()}` };
-    }
-
-    const part = this.allocateSlidePart();
-    // The new page gets the layout's title and text placeholders, empty, like PowerPoint's "New Slide".
-    const layoutPart = resolveTarget(reference.part.slice(0, reference.part.lastIndexOf("/")), layout.target);
-    const layoutXml = await zip.file(layoutPart)?.async("string");
-    const specs = layoutXml ? layoutPlaceholders(layoutXml) : [];
-    const xml = specs.length > 0 ? placeholderSlideXml(specs) : blankSlideXml();
-    const relsXml = relationshipsXml([{ ...layout, id: "rId1" }]);
-    const relsPath = `${part.slice(0, part.lastIndexOf("/"))}/_rels/${part.slice(part.lastIndexOf("/") + 1)}.rels`;
-
-    const slide = await this.parser.parseVirtualSlide(part, xml, relsXml, `slide_${++this.slideSerial}`, this.presentation!.size);
-    await this.ensurePresentationFonts({ ...this.presentation!, slides: [slide] });
-    this.structureEdits.virtual.set(part, xml);
-    this.structureEdits.virtual.set(relsPath, relsXml);
-    const after = [...slides];
-    after.splice(index + 1, 0, slide);
-    this.recordSlideChange("新建幻灯片", [...slides], this.currentSlideIndex, after, index + 1);
-  }
-
-  /** The deck's layouts: the name shown in PowerPoint and the part that holds it. */
-  private async layoutParts(): Promise<Array<{ name: string; part: string }>> {
-    const zip = this.parser.getZip();
-    if (!zip) return [];
-    const parts = Object.keys(zip.files)
-      .filter(path => /^ppt\/slideLayouts\/slideLayout\d+\.xml$/.test(path))
-      .sort((a, b) => parseInt(a.replace(/\D/g, ""), 10) - parseInt(b.replace(/\D/g, ""), 10));
-    const found: Array<{ name: string; part: string }> = [];
-    for (const part of parts) {
-      const xml = await zip.file(part)!.async("string");
-      const name = xml.match(/<p:cSld\b[^>]*\bname="([^"]*)"/)?.[1];
-      if (name) found.push({ name, part });
-    }
-    return found;
+  public addSlide(index = this.currentSlideIndex, layoutName?: string): Promise<void> {
+    return this.session.addSlide(index, layoutName);
   }
 
   /** Layout names a new slide can use. */
-  public async listLayouts(): Promise<string[]> {
-    return [...new Set((await this.layoutParts()).map(entry => entry.name))];
-  }
-
-  /** Decode a picture given as a data: URL, in the units the editor places pictures in. */
-  private async decodeDataUrl(dataUrl: string): Promise<DecodedImage> {
-    const match = dataUrl.match(/^data:image\/(png|jpeg|gif);base64,(.*)$/s);
-    if (!match) throw new Error("需要 PNG、JPEG 或 GIF 的 data: URL。");
-    const binary = atob(match[2]);
-    const bytes = new Uint8Array(binary.length);
-    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-    const contentType = `image/${match[1]}`;
-    const url = URL.createObjectURL(new Blob([bytes], { type: contentType }));
-    const size = await new Promise<{ width: number; height: number }>((resolve, reject) => {
-      const probe = new Image();
-      probe.onload = () => resolve({ width: probe.naturalWidth, height: probe.naturalHeight });
-      probe.onerror = () => reject(new Error("无法读取这张图片。"));
-      probe.src = url;
-    });
-    const emuPerPx = this.presentation?.slides[0]?.emuPerPx || 6350;
-    return {
-      bytes, extension: match[1], contentType, url,
-      width: (size.width * 9525) / emuPerPx,
-      height: (size.height * 9525) / emuPerPx
-    };
-  }
-
-  private edit?: EditApi;
-
-  /** The JSON interface: `api.outline()` to read the deck, `api.apply(commands)` to change it. */
-  public get api(): EditApi {
-    if (!this.edit) {
-      const deck: DeckPort = {
-        document: () => this.presentation,
-        currentIndex: () => this.currentSlideIndex,
-        showSlide: async index => { if (index !== this.currentSlideIndex) await this.selectSlide(index); },
-        addSlide: (after, layout) => this.addSlide(after, layout),
-        duplicateSlide: index => this.duplicateSlide(index),
-        deleteSlide: index => this.deleteSlide(index),
-        moveSlide: (from, to) => this.moveSlide(from, to),
-        layouts: () => this.listLayouts(),
-        decodeImage: dataUrl => this.decodeDataUrl(dataUrl)
-      };
-      this.edit = new EditApi(this.editor, deck);
-    }
-    return this.edit;
+  public listLayouts(): Promise<string[]> {
+    return this.session.listLayouts();
   }
 
   /** A copy of slide `index`, with the edits made so far, right after it. */
-  public async duplicateSlide(index = this.currentSlideIndex): Promise<void> {
-    this.requirePackage();
-    const zip = this.parser.getZip()!;
-    const slides = this.presentation!.slides;
-    const source = slides[index];
-    if (!source?.part) return;
-
-    const snapshot = await materializeSlide(zip, source.part, slides, this.editSet());
-    if (!snapshot) return;
-    const copy = prepareSlideCopy(snapshot);
-    const part = this.allocateSlidePart();
-    this.structureEdits.virtual.set(part, copy.xml);
-    this.structureEdits.virtual.set(
-      `${part.slice(0, part.lastIndexOf("/"))}/_rels/${part.slice(part.lastIndexOf("/") + 1)}.rels`,
-      relationshipsXml(copy.relationships)
-    );
-    const slide: Slide = {
-      id: `slide_${++this.slideSerial}`,
-      elements: this.cloneElements(source.elements, part),
-      rawXml: copy.xml,
-      emuPerPx: source.emuPerPx,
-      part,
-      xform: source.xform
-    };
-    const after = [...slides];
-    after.splice(index + 1, 0, slide);
-    this.recordSlideChange("复制幻灯片", [...slides], this.currentSlideIndex, after, index + 1);
+  public duplicateSlide(index = this.currentSlideIndex): Promise<void> {
+    return this.session.duplicateSlide(index);
   }
 
   public deleteSlide(index = this.currentSlideIndex): void {
-    this.requirePackage();
-    const slides = this.presentation!.slides;
-    if (slides.length <= 1) throw new Error("至少需要保留一页幻灯片。");
-    const after = slides.filter((_, i) => i !== index);
-    this.recordSlideChange("删除幻灯片", [...slides], this.currentSlideIndex, after, Math.min(index, after.length - 1));
+    this.session.deleteSlide(index);
   }
 
   public moveSlide(from: number, to: number): void {
-    this.requirePackage();
-    const slides = this.presentation!.slides;
-    if (from === to || from < 0 || from >= slides.length || to < 0 || to >= slides.length) return;
-    const after = [...slides];
-    const [moved] = after.splice(from, 1);
-    after.splice(to, 0, moved);
-    this.recordSlideChange("移动幻灯片", [...slides], this.currentSlideIndex, after, to);
+    this.session.moveSlide(from, to);
   }
 
-  private materializeSource(source: { part: string; shapeId: string }) {
-    const zip = this.parser.getZip();
-    if (!zip || !this.presentation) return Promise.resolve(null);
-    return materializeShape(zip, source.part, source.shapeId, this.presentation.slides, {
-      dirty: this.dirtyShapes,
-      textEdits: this.textEdits,
-      styleEdits: this.styleEdits,
-      structure: this.structureEdits
-    });
+  /** The JSON interface: `api.outline()` to read the deck, `api.apply(commands)` to change it. */
+  public get api(): EditApi {
+    return this.session.api;
   }
 
-  /** Next free p:cNvPr id of a slide, seeded from the highest id in its XML. */
-  private allocateShapeId(part: string): string {
-    let counter = this.shapeIdCounters.get(part);
-    if (counter === undefined) {
-      const xml = this.presentation?.slides.find(slide => slide.part === part)?.rawXml || "";
-      counter = 1;
-      for (const match of xml.matchAll(/<p:cNvPr\b[^>]*?\bid="(\d+)"/g)) {
-        counter = Math.max(counter, parseInt(match[1], 10));
-      }
-    }
-    counter += 1;
-    this.shapeIdCounters.set(part, counter);
-    return String(counter);
-  }
-
-  /** Body font of the deck, taken from the first text that has one. */
-  private deckFont(): { fontFamily?: string; eastAsianFontFamily?: string } {
-    for (const slide of this.presentation?.slides || []) {
-      for (const element of slide.elements) {
-        if (element.type !== "text" || !element.content.trim()) continue;
-        const { fontFamily, eastAsianFontFamily } = element.style;
-        return {
-          ...(fontFamily && fontFamily !== "sans-serif" ? { fontFamily } : {}),
-          ...(eastAsianFontFamily ? { eastAsianFontFamily } : {})
-        };
-      }
-    }
-    return {};
-  }
-
-  private async allocateRelationshipId(part: string): Promise<string> {
-    const zip = this.parser.getZip();
-    const existing = zip ? await readRelationships(zip, part, this.structureEdits.relAdds.get(part)) : new Map();
-    let counter = 0;
-    for (const id of existing.keys()) counter = Math.max(counter, parseInt(String(id).replace(/\D/g, ""), 10) || 0);
-    return `rId${counter + 1}`;
-  }
-
-  private allocateMediaPath(extension: string): string {
-    const taken = [
-      ...Object.keys(this.parser.getZip()?.files || {}),
-      ...this.structureEdits.media.map(item => item.path)
-    ];
-    let highest = 0;
-    for (const path of taken) {
-      const match = path.match(/^ppt\/media\/image(\d+)\./i);
-      if (match) highest = Math.max(highest, parseInt(match[1], 10));
-    }
-    return `ppt/media/image${highest + 1}.${extension}`;
-  }
-
-  /** Relationship ids for pasted shapes: reuse what the target slide has, add what it lacks. */
-  private async resolveRelationships(
-    targetPart: string,
-    sourcePart: string,
-    relationships: RelAdd[]
-  ): Promise<{ ids: Map<string, string>; adds: RelAdd[] }> {
-    const ids = new Map<string, string>();
-    const adds: RelAdd[] = [];
-    const zip = this.parser.getZip();
-    if (targetPart === sourcePart || !zip || relationships.length === 0) return { ids, adds };
-
-    const existing = await readRelationships(zip, targetPart, this.structureEdits.relAdds.get(targetPart));
-    let counter = 0;
-    for (const id of existing.keys()) counter = Math.max(counter, parseInt(id.replace(/\D/g, ""), 10) || 0);
-    for (const rel of relationships) {
-      const same = [...existing.values()].find(candidate =>
-        candidate.type === rel.type && candidate.target === rel.target && candidate.targetMode === rel.targetMode);
-      if (same) {
-        ids.set(rel.id, same.id);
-        continue;
-      }
-      counter += 1;
-      const added: RelAdd = { ...rel, id: `rId${counter}` };
-      existing.set(added.id, added);
-      adds.push(added);
-      ids.set(rel.id, added.id);
-    }
-    return { ids, adds };
-  }
-
-  private resetEditing(): void {
-    this.slideSerial = this.presentation?.slides.length ?? 0;
-    this.dirtyShapes = new Map();
-    this.textEdits = new Map();
-    this.styleEdits = new Map();
-    this.structureEdits = emptyStructure();
-    this.shapeIdCounters.clear();
+  /** Drop what the view cached for the previous document. */
+  private resetView(): void {
     this.hiddenElements.clear();
     // Fonts differ per document, so the drag renderer is rebuilt on demand.
     this.dragRenderer = null;
     this.dragScratch = null;
     this.dragLayers = null;
-    this.editor.reset();
   }
 
   /** Elements drawn by the DOM text editor instead of the canvas while editing. */
