@@ -5,6 +5,7 @@ node_modules/
 dist/
 pkg/
 rust-engine/pkg/
+rust-engine/pkg-node/
 rust-engine/target/
 rust-backend/target/
 target/
