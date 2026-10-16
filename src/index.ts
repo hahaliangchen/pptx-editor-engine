@@ -4,10 +4,13 @@ import {
   PptxParser,
   PresentationAST,
   Slide,
+  SlideElement,
   ShapeElement,
   PresentationSize
 } from "./pptx-parser";
 import * as wasm from "../rust-engine/pkg/ppt_engine";
+import { EditorState, SlideEditor } from "./editor/slide-editor";
+import { DirtyShapes, exportEditedPptx, markDirty } from "./pptx-exporter";
 
 export interface ViewerOptions {
   container: HTMLElement;
@@ -17,6 +20,10 @@ export interface ViewerOptions {
   debugTextBoxes?: boolean;
   onSlideChange?: (slideIndex: number, slide: Slide) => void;
   onLoadComplete?: (document: PptVirtualDocument) => void | Promise<void>;
+  /** Fired when selection or undo/redo availability changes. */
+  onEditStateChange?: (state: EditorState) => void;
+  /** Fired (debounced) after an edit so thumbnails can be refreshed. */
+  onSlideEdited?: (slideIndex: number, slide: Slide) => void;
 }
 
 interface FontRequest {
@@ -59,17 +66,22 @@ export default class PptViewer {
   private isRenderingThumbnails = false;
   private cacheWarmupEpoch = 0;
   private loadSequence = 0;
-  private selectedElementId: string | null = null;
-  private selectedSlideId: string | null = null;
-  private dragState: {
-    pointerId: number;
-    slideId: string;
-    elementId: string;
-    startX: number;
-    startY: number;
-    originX: number;
-    originY: number;
+  private editor: SlideEditor;
+  private dragRenderer: wasm.RustPptRenderer | null = null;
+  private dragScratch: HTMLCanvasElement | null = null;
+  private dragContext: CanvasRenderingContext2D | null = null;
+  private dragLayers: {
+    slide: Slide;
+    moving: SlideElement[];
+    below: HTMLCanvasElement;
+    above: HTMLCanvasElement;
+    scale: number;
+    offsetX: number;
+    offsetY: number;
   } | null = null;
+  private dirtyShapes: DirtyShapes = new Map();
+  private editNotifyTimer = 0;
+  private onSlideEdited?: (slideIndex: number, slide: Slide) => void;
 
   // Callbacks
   private onSlideChange?: (slideIndex: number, slide: Slide) => void;
@@ -79,6 +91,7 @@ export default class PptViewer {
     this.container = options.container;
     this.onSlideChange = options.onSlideChange;
     this.onLoadComplete = options.onLoadComplete;
+    this.onSlideEdited = options.onSlideEdited;
     this.preferredWidth = options.width;
     this.preferredHeight = options.height;
     this.debugTextBoxes = options.debugTextBoxes ?? false;
@@ -101,11 +114,22 @@ export default class PptViewer {
     this.parser = new PptxParser();
     this.engineReady = this.initEngine();
 
-    this.canvas.style.touchAction = "none";
-    this.canvas.addEventListener("pointerdown", event => this.onCanvasPointerDown(event));
-    this.canvas.addEventListener("pointermove", event => this.onCanvasPointerMove(event));
-    this.canvas.addEventListener("pointerup", event => this.onCanvasPointerEnd(event));
-    this.canvas.addEventListener("pointercancel", event => this.onCanvasPointerEnd(event));
+    this.container.style.touchAction = "none";
+    this.editor = new SlideEditor({
+      container: this.container,
+      getSlide: () => this.getCurrentSlideAST(),
+      getSlideSize: () => this.presentation?.size || null,
+      invalidate: slide => this.invalidateSlide(slide),
+      beginDrag: (slide, elements) => this.beginDragLayers(slide, elements),
+      endDrag: () => this.endDragLayers(),
+      showSlide: slide => {
+        const index = this.presentation?.slides.indexOf(slide) ?? -1;
+        if (index >= 0) this.currentSlideIndex = index;
+      },
+      onCommit: slide => this.notifySlideEdited(slide),
+      markDirty: source => markDirty(this.dirtyShapes, source)
+    });
+    if (options.onEditStateChange) this.editor.subscribe(options.onEditStateChange);
 
     // Listen to resize to keep canvas crisp
     window.addEventListener("resize", () => this.resizeAndRedraw());
@@ -317,9 +341,7 @@ export default class PptViewer {
     try {
       log("parse:start");
       this.presentation = await this.parser.parse(buffer);
-      this.selectedElementId = null;
-      this.selectedSlideId = null;
-      this.dragState = null;
+      this.resetEditing();
       log(`parse:done slides=${this.presentation.slides.length}`);
 
       log("wasm:init:wait");
@@ -356,9 +378,8 @@ export default class PptViewer {
   // Load a pre-built PPT Virtual DOM (for demos / testing).
   public async loadVirtualDocument(document: PptVirtualDocument): Promise<void> {
     this.presentation = document;
-    this.selectedElementId = null;
-    this.selectedSlideId = null;
-    this.dragState = null;
+    this.parser.discardPackage();
+    this.resetEditing();
     await this.engineReady;
     await this.ensurePresentationFonts(document);
     this.currentSlideIndex = 0;
@@ -381,7 +402,7 @@ export default class PptViewer {
    * renderer is bound to a single 2D context, so this temporarily repurposes
    * the main canvas, then restores and repaints the active slide.
    */
-  public async renderThumbnails(targetCssWidth = 240): Promise<string[]> {
+  public async renderThumbnails(targetCssWidth = 240, onlyIndex?: number): Promise<string[]> {
     if (!this.presentation || !this.renderer) return [];
     await this.engineReady;
 
@@ -409,7 +430,11 @@ export default class PptViewer {
     const thumbnails: string[] = [];
 
     try {
-      for (const slide of this.presentation.slides) {
+      for (const [slideIndex, slide] of this.presentation.slides.entries()) {
+        if (onlyIndex !== undefined && slideIndex !== onlyIndex) {
+          thumbnails.push("");
+          continue;
+        }
         console.log(`[Thumbnails] render:start slide=${slide.id}`);
         // Preload images referenced by this slide so the thumbnail is complete.
         await this.preloadSlideImages(slide, "thumbnail");
@@ -488,91 +513,150 @@ export default class PptViewer {
     return this.presentation.slides[this.currentSlideIndex];
   }
 
-  private getSlidePoint(event: PointerEvent): { x: number; y: number } | null {
-    if (!this.presentation) return null;
-    const bounds = this.canvas.getBoundingClientRect();
-    if (bounds.width <= 0 || bounds.height <= 0) return null;
-
-    const logicalSize = this.presentation.size;
-    const scale = Math.min(
-      this.canvas.width / logicalSize.width,
-      this.canvas.height / logicalSize.height
-    );
-    if (!Number.isFinite(scale) || scale <= 0) return null;
-
-    const canvasX = (event.clientX - bounds.left) * this.canvas.width / bounds.width;
-    const canvasY = (event.clientY - bounds.top) * this.canvas.height / bounds.height;
-    const offsetX = (this.canvas.width - logicalSize.width * scale) / 2;
-    const offsetY = (this.canvas.height - logicalSize.height * scale) / 2;
-    return {
-      x: (canvasX - offsetX) / scale,
-      y: (canvasY - offsetY) / scale
-    };
+  public getEditorState(): EditorState {
+    return this.editor.getState();
   }
 
-  private onCanvasPointerDown(event: PointerEvent): void {
-    const slide = this.getCurrentSlideAST();
-    const point = this.getSlidePoint(event);
-    if (!slide || !point) return;
-    event.preventDefault();
-
-    const size = this.presentation!.size;
-    const withinSlide = point.x >= 0 && point.y >= 0
-      && point.x <= size.width && point.y <= size.height;
-    const element = withinSlide
-      ? [...slide.elements].reverse().find(candidate =>
-        point.x >= candidate.rect.x
-        && point.x <= candidate.rect.x + candidate.rect.w
-        && point.y >= candidate.rect.y
-        && point.y <= candidate.rect.y + candidate.rect.h
-      )
-      : undefined;
-
-    if (!element) {
-      this.selectedElementId = null;
-      this.selectedSlideId = null;
-      this.dragState = null;
-      this.resizeAndRedraw(slide);
-      return;
-    }
-
-    this.selectedElementId = element.id;
-    this.selectedSlideId = slide.id;
-    this.dragState = {
-      pointerId: event.pointerId,
-      slideId: slide.id,
-      elementId: element.id,
-      startX: point.x,
-      startY: point.y,
-      originX: element.rect.x,
-      originY: element.rect.y
-    };
-    this.canvas.setPointerCapture(event.pointerId);
-    this.resizeAndRedraw(slide);
+  public undo(): void {
+    this.editor.undo();
   }
 
-  private onCanvasPointerMove(event: PointerEvent): void {
-    const drag = this.dragState;
-    if (!drag || event.pointerId !== drag.pointerId) return;
-    const slide = this.presentation?.slides.find(candidate => candidate.id === drag.slideId);
-    const element = slide?.elements.find(candidate => candidate.id === drag.elementId);
-    const point = this.getSlidePoint(event);
-    if (!slide || !element || !point) return;
+  public redo(): void {
+    this.editor.redo();
+  }
 
-    const x = drag.originX + point.x - drag.startX;
-    const y = drag.originY + point.y - drag.startY;
-    if (element.rect.x === x && element.rect.y === y) return;
-    element.rect.x = x;
-    element.rect.y = y;
+  public deleteSelection(): void {
+    this.editor.deleteSelection();
+  }
+
+  /** True when edits can be written back to an opened .pptx package. */
+  public canExport(): boolean {
+    return this.parser.getZip() !== null;
+  }
+
+  public hasUnsavedEdits(): boolean {
+    return this.dirtyShapes.size > 0;
+  }
+
+  /** Build a new .pptx with every edit written back into the original package. */
+  public async exportPptx(): Promise<Blob> {
+    const zip = this.parser.getZip();
+    if (!zip || !this.presentation) throw new Error("请先打开一个 .pptx 文件。");
+    return exportEditedPptx(zip, this.presentation.slides, this.dirtyShapes);
+  }
+
+  private resetEditing(): void {
+    this.dirtyShapes = new Map();
+    // Fonts differ per document, so the drag renderer is rebuilt on demand.
+    this.dragRenderer = null;
+    this.dragScratch = null;
+    this.dragLayers = null;
+    this.editor.reset();
+  }
+
+  private invalidateSlide(slide: Slide): void {
     this.slideJsonCache.delete(slide.id);
     this.renderedSlideCache.delete(slide.id);
-    this.resizeAndRedraw(slide);
+    if (this.dragLayers?.slide === slide) {
+      this.drawDragFrame(this.dragLayers);
+    } else if (this.getCurrentSlideAST() === slide) {
+      this.resizeAndRedraw(slide);
+    }
   }
 
-  private onCanvasPointerEnd(event: PointerEvent): void {
-    if (this.dragState?.pointerId === event.pointerId) {
-      this.dragState = null;
-    }
+  /**
+   * While an element is dragged, everything underneath and above it is rendered
+   * once into bitmaps; each frame then re-renders only the moving elements and
+   * composites the three layers, instead of re-laying-out the whole slide.
+   */
+  private beginDragLayers(slide: Slide, moving: SlideElement[]): void {
+    if (!this.presentation || !this.renderer || this.isRenderingThumbnails) return;
+    const width = this.canvas.width;
+    const height = this.canvas.height;
+    if (width < 1 || height < 1) return;
+
+    const movingSet = new Set(moving);
+    const firstMoving = slide.elements.findIndex(element => movingSet.has(element));
+    if (firstMoving < 0) return;
+
+    this.ensureDragRenderer(width, height);
+    const scratch = this.dragScratch!;
+    const scratchContext = this.dragContext!;
+    const logical = this.presentation.size;
+    const scale = Math.min(width / logical.width, height / logical.height);
+    const offsetX = (width - logical.width * scale) / 2;
+    const offsetY = (height - logical.height * scale) / 2;
+
+    const makeLayer = (elements: SlideElement[], withBackground: boolean): HTMLCanvasElement => {
+      const layer = document.createElement("canvas");
+      layer.width = width;
+      layer.height = height;
+      scratchContext.setTransform(1, 0, 0, 1, 0, 0);
+      scratchContext.clearRect(0, 0, width, height);
+      scratchContext.setTransform(scale, 0, 0, scale, offsetX, offsetY);
+      const json = JSON.stringify({ id: slide.id, elements });
+      if (withBackground) this.dragRenderer!.render_slide(json, this.imageCache);
+      else if (elements.length > 0) this.dragRenderer!.render_slide_overlay(json, this.imageCache);
+      layer.getContext("2d")!.drawImage(scratch, 0, 0);
+      return layer;
+    };
+
+    const rest = slide.elements.filter(element => !movingSet.has(element));
+    const belowCount = slide.elements.slice(0, firstMoving).length;
+    this.dragLayers = {
+      slide,
+      moving: slide.elements.filter(element => movingSet.has(element)),
+      below: makeLayer(rest.slice(0, belowCount), true),
+      above: makeLayer(rest.slice(belowCount), false),
+      scale,
+      offsetX,
+      offsetY
+    };
+  }
+
+  private ensureDragRenderer(width: number, height: number): void {
+    if (this.dragRenderer && this.dragScratch?.width === width && this.dragScratch.height === height) return;
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const context = canvas.getContext("2d");
+    if (!context) throw new Error("Failed to create the drag layer context");
+    const renderer = new wasm.RustPptRenderer(context);
+    for (const fontBytes of this.registeredFontBytes) renderer.register_font(fontBytes);
+    this.dragScratch = canvas;
+    this.dragContext = context;
+    this.dragRenderer = renderer;
+  }
+
+  private drawDragFrame(layers: NonNullable<PptViewer["dragLayers"]>): void {
+    const scratch = this.dragScratch!;
+    const scratchContext = this.dragContext!;
+    scratchContext.setTransform(1, 0, 0, 1, 0, 0);
+    scratchContext.clearRect(0, 0, scratch.width, scratch.height);
+    scratchContext.setTransform(layers.scale, 0, 0, layers.scale, layers.offsetX, layers.offsetY);
+    this.dragRenderer!.render_slide_overlay(
+      JSON.stringify({ id: layers.slide.id, elements: layers.moving }),
+      this.imageCache
+    );
+
+    this.ctx.save();
+    this.ctx.setTransform(1, 0, 0, 1, 0, 0);
+    this.ctx.drawImage(layers.below, 0, 0);
+    this.ctx.drawImage(scratch, 0, 0);
+    this.ctx.drawImage(layers.above, 0, 0);
+    this.ctx.restore();
+  }
+
+  private endDragLayers(): void {
+    this.dragLayers = null;
+  }
+
+  private notifySlideEdited(slide: Slide): void {
+    window.clearTimeout(this.editNotifyTimer);
+    this.editNotifyTimer = window.setTimeout(() => {
+      const index = this.presentation?.slides.indexOf(slide) ?? -1;
+      if (index >= 0) this.onSlideEdited?.(index, slide);
+    }, 350);
   }
 
   /** Replace the plain text of a top-level text element on a slide. */
@@ -875,7 +959,7 @@ export default class PptViewer {
     if (this.debugTextBoxes) {
       this.drawDebugTextBoxes(slide);
     }
-    this.drawSelectionBox(slide);
+    this.editor.layout();
 
     this.ctx.restore();
     this.scheduleSlideCacheWarmup();
@@ -897,26 +981,6 @@ export default class PptViewer {
         element.rect.h
       );
     }
-    this.ctx.restore();
-  }
-
-  private drawSelectionBox(slide: Slide): void {
-    if (this.selectedSlideId !== slide.id || !this.selectedElementId) return;
-    const element = slide.elements.find(candidate => candidate.id === this.selectedElementId);
-    if (!element) return;
-
-    this.ctx.save();
-    const transform = this.ctx.getTransform();
-    const scale = Math.max(Math.hypot(transform.a, transform.b), 0.1);
-    this.ctx.strokeStyle = "#1683ff";
-    this.ctx.lineWidth = 2 / scale;
-    this.ctx.setLineDash([]);
-    this.ctx.strokeRect(
-      element.rect.x,
-      element.rect.y,
-      element.rect.w,
-      element.rect.h
-    );
     this.ctx.restore();
   }
 

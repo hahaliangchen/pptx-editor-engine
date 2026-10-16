@@ -5,6 +5,20 @@ export interface Rect {
   h: number;
 }
 
+/**
+ * Where an element came from in the OOXML package. Present only for elements
+ * that belong to the slide itself (not master/layout decoration), so the editor
+ * can select them and write edits back to the original shape node.
+ */
+export interface ElementSource {
+  /** Package part, e.g. "ppt/slides/slide3.xml". */
+  part: string;
+  /** p:cNvPr@id of the owning shape/picture. */
+  shapeId: string;
+  /** Logical px = offset + EMU * scale; used to convert edits back to EMU. */
+  xform: { scaleX: number; scaleY: number; offsetX: number; offsetY: number };
+}
+
 export interface ReflectionStyle {
   blurRadius: number;
   startAlpha: number;
@@ -92,6 +106,7 @@ export interface TextElement {
   /** Original DrawingML shape ID and slide part, when parsed from a slide. */
   sourceShapeId?: string;
   sourceSlidePart?: string;
+  source?: ElementSource;
   rect: Rect;
   content: string;
   style: TextStyle;
@@ -259,6 +274,7 @@ export interface ShapeElement {
    * complete geometry families instead of silently reducing unknown shapes to
    * rectangles. */
   shapeType: string;
+  source?: ElementSource;
   /** xfrm rotation, in canvas degrees. */
   rotation?: number;
   flipH?: boolean;
@@ -282,6 +298,7 @@ export interface ShapeElement {
 export interface ImageElement {
   type: "image";
   id: string;
+  source?: ElementSource;
   rect: Rect;
   url: string;
   crop?: ImageCrop;
@@ -304,6 +321,8 @@ export interface Slide {
   id: string;
   elements: SlideElement[];
   rawXml: string;
+  /** EMU per logical pixel, used to show real-world sizes while editing. */
+  emuPerPx?: number;
 }
 
 export interface PresentationSize {

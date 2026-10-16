@@ -5,6 +5,7 @@ import {
   ComputedRunStyle,
   ComputedShapeStyle,
   EffectStyle,
+  ElementSource,
   FillStyle,
   GradientStop,
   ImageElement,
@@ -46,6 +47,7 @@ export * from "./pptx-virtual-dom";
 
 export class PptxParser {
   private zip: JSZip | null = null;
+  private currentSlidePart = "";
   private styleRegistry: StyleRegistry = { rules: {} };
   private nextStyleRuleId = 1;
   private themeStyleMatrix: ThemeStyleMatrix = { fills: [], backgroundFills: [], lines: [], effects: [] };
@@ -92,6 +94,34 @@ export class PptxParser {
       themeStyleMatrix: this.themeStyleMatrix,
       registerStyleRule: rule => this.registerStyleRule(rule)
     });
+  }
+
+  /** The opened package, kept so edits can be written back on export. */
+  public getZip(): JSZip | null {
+    return this.zip;
+  }
+
+  /** Forget the opened package (a non-PPTX document replaced it). */
+  public discardPackage(): void {
+    this.zip = null;
+  }
+
+  private makeSource(
+    isTemplate: boolean,
+    shapeId: string | null | undefined,
+    transform: TransformState
+  ): ElementSource | undefined {
+    if (isTemplate || !shapeId || !this.currentSlidePart) return undefined;
+    return {
+      part: this.currentSlidePart,
+      shapeId,
+      xform: {
+        scaleX: transform.scaleX,
+        scaleY: transform.scaleY,
+        offsetX: transform.offsetX,
+        offsetY: transform.offsetY
+      }
+    };
   }
 
   public async parse(buffer: ArrayBuffer): Promise<PptVirtualDocument> {
@@ -538,6 +568,7 @@ export class PptxParser {
     const slideFile = this.zip?.file(slidePath);
     if (!slideFile) throw new Error(`Slide file not found: ${slidePath}`);
 
+    this.currentSlidePart = slidePath;
     const xmlText = await slideFile.async("text");
     const doc = new DOMParser().parseFromString(xmlText, "application/xml");
 
@@ -655,7 +686,7 @@ export class PptxParser {
       await this.parseElementsRecursive(spTree, initialTransform, imgRelMap, elements, false, placeholderContext);
     }
 
-    return { id: slideId, elements, rawXml: xmlText };
+    return { id: slideId, elements, rawXml: xmlText, emuPerPx: 1 / Math.min(scaleX, scaleY) };
   }
 
   private resolveRelativePath(baseDir: string, relativePath: string): string {
@@ -1034,7 +1065,7 @@ export class PptxParser {
     isTemplate: boolean = false,
     placeholderContext: PlaceholderContext | null = null
   ) {
-    const nvSpPr = querySelector(node, "p\\:nvSpPr, nvSpPr");
+    const nvSpPr = getDirectChild(node, "nvSpPr", "nvCxnSpPr");
     const nvPr = nvSpPr ? querySelector(nvSpPr, "p\\:nvPr, nvPr") : null;
     const ph = nvPr ? querySelector(nvPr, "p\\:ph, ph") : null;
 
@@ -1205,6 +1236,7 @@ export class PptxParser {
       elements.push({
         type: "shape",
         id: `shape_bg_${id}`,
+        source: this.makeSource(isTemplate, cNvPr?.getAttribute("id"), transform),
         rect: { ...rect },
         shapeType,
         rotation,
@@ -1300,7 +1332,8 @@ export class PptxParser {
         inheritance,
         body,
         cNvPr?.getAttribute("id") || undefined,
-        placeholderContext?.slidePart
+        placeholderContext?.slidePart,
+        this.makeSource(isTemplate, cNvPr?.getAttribute("id"), transform)
       );
     }
   }
@@ -1421,15 +1454,35 @@ export class PptxParser {
     }
   }
 
+  /**
+   * Symbol fonts (Wingdings, Webdings, Symbol) store bullets as private-use
+   * ASCII codes. Those fonts are not available in the renderer, so the code
+   * is translated to the equivalent Unicode glyph and drawn with the normal
+   * font fallback chain instead of showing the raw letter (e.g. "n").
+   */
+  private static readonly SYMBOL_BULLET_MAP: Record<string, Record<string, string>> = {
+    wingdings: {
+      l: "●", m: "○", n: "■", o: "□", p: "◻", q: "❑", r: "❒", s: "⬧", t: "⧫",
+      u: "◆", v: "❖", w: "⬥", x: "⌧", y: "⍓", z: "⌘",
+      "§": "▪", "¨": "◻", "©": "◈", "¡": "○", "¢": "●",
+      "Ø": "➢", "Ü": "➔", "è": "➔", "ü": "✓", "û": "✗", "þ": "☑", "ý": "☒",
+      "J": "☺", "L": "☹", "*": "✎", "&": "☎", "4": "✌", "!": "✏"
+    },
+    "wingdings 2": { l: "●", n: "■", p: "◻", "¢": "●", "£": "◻", "R": "☑", "Q": "☐" },
+    "wingdings 3": { p: "▲", q: "▼", t: "►", u: "◄", "}": "▶", "~": "◀" },
+    symbol: { "·": "•", "§": "♣", "¨": "♦", "ª": "♠", "Ø": "⇒" },
+    webdings: { "=": "•", "4": "▶", "a": "✓" }
+  };
+
   private getBulletDescriptor(
     buCharNode: Element | null,
     buFontNode: Element | null
   ): { char: string; fontFamily?: string } {
     const char = buCharNode?.getAttribute("char") || "•";
     const typeface = buFontNode?.getAttribute("typeface") || "";
+    const mapped = PptxParser.SYMBOL_BULLET_MAP[typeface.trim().toLowerCase()]?.[char];
+    if (mapped) return { char: mapped };
     return {
-      // Keep the font-private character intact. The renderer must use the
-      // XML-specified bullet font instead of guessing a Unicode replacement.
       char,
       fontFamily: typeface ? this.styleResolver.resolveThemeTypeface(typeface) : undefined
     };
@@ -1452,7 +1505,8 @@ export class PptxParser {
     inheritance: TextInheritanceContext | null = null,
     resolvedBody: TextBodyProperties | null = null,
     sourceShapeId?: string,
-    sourceSlidePart?: string
+    sourceSlidePart?: string,
+    source?: ElementSource
   ) {
     const paragraphs = querySelectorAll(txBody, "a\\:p, p");
     const body = resolvedBody || {
@@ -1736,6 +1790,7 @@ export class PptxParser {
       id: `text_${id}`,
       sourceShapeId,
       sourceSlidePart,
+      source,
       rect: { x, y, w, h },
       content,
       style: fallbackRun.style,
@@ -1800,6 +1855,7 @@ export class PptxParser {
     elements.push({
       type: "image",
       id: `img_${id}`,
+      source: this.makeSource(isTemplate, cNvPr?.getAttribute("id"), transform),
       rect,
       url: blobUrl,
       crop,

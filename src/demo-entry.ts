@@ -322,10 +322,35 @@ const initializeDemo = () => {
     return;
   }
 
+  const btnUndo = document.getElementById("btn-undo") as HTMLButtonElement;
+  const btnRedo = document.getElementById("btn-redo") as HTMLButtonElement;
+  const btnDelete = document.getElementById("btn-delete") as HTMLButtonElement;
+  const btnExport = document.getElementById("btn-export") as HTMLButtonElement;
+  const selectionHint = document.getElementById("selection-hint") as HTMLElement;
+  let openedFileName = "presentation.pptx";
+
   // Initialize Viewer
   const viewer = new PptViewer({
     container,
     debugTextBoxes: debugTextBoxes.checked,
+    onEditStateChange: (state) => {
+      btnUndo.disabled = !state.canUndo;
+      btnRedo.disabled = !state.canRedo;
+      btnDelete.disabled = state.selectionCount === 0;
+      selectionHint.textContent = state.selectionCount === 0
+        ? "点击选择元素"
+        : `已选中 ${state.selectionCount} 个元素`;
+      btnExport.disabled = !viewer.canExport();
+    },
+    onSlideEdited: async (index) => {
+      try {
+        const [url] = await viewer.renderThumbnails(240, index).then(urls => [urls[index]]);
+        const img = slideList.querySelectorAll<HTMLImageElement>(".slide-thumb img")[index];
+        if (img && url) img.src = url;
+      } catch (err) {
+        console.error("Failed to refresh thumbnail:", err);
+      }
+    },
     onSlideChange: (index) => {
       // Update page indicator
       pageIndicator.textContent = `Slide ${index + 1} / ${viewer.getSlidesCount()}`;
@@ -397,7 +422,7 @@ const initializeDemo = () => {
 
   // Load Demo triggers
   const loadDemo = () => {
-    viewer.loadVirtualDocument(mockPresentation);
+    viewer.loadVirtualDocument(mockPresentation).then(() => { btnExport.disabled = true; });
   };
 
   const btnLoadDemo = document.getElementById("btn-load-demo");
@@ -442,6 +467,7 @@ const initializeDemo = () => {
     fileUploader.disabled = true;
     uploadControl?.setAttribute("aria-busy", "true");
     pageIndicator.textContent = "正在打开...";
+    openedFileName = file.name;
 
     try {
       console.log("[Upload] arrayBuffer:start");
@@ -468,6 +494,34 @@ const initializeDemo = () => {
   };
 
   // Controls
+  btnUndo.onclick = () => viewer.undo();
+  btnRedo.onclick = () => viewer.redo();
+  btnDelete.onclick = () => viewer.deleteSelection();
+
+  const exportPptx = async () => {
+    if (!viewer.canExport()) return;
+    btnExport.disabled = true;
+    try {
+      const blob = await viewer.exportPptx();
+      const link = document.createElement("a");
+      link.href = URL.createObjectURL(blob);
+      link.download = openedFileName.replace(/\.pptx$/i, "") + "-edited.pptx";
+      link.click();
+      window.setTimeout(() => URL.revokeObjectURL(link.href), 10000);
+    } catch (err: unknown) {
+      alert(`导出失败：${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      btnExport.disabled = !viewer.canExport();
+    }
+  };
+  btnExport.onclick = () => void exportPptx();
+  document.addEventListener("keydown", (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
+      e.preventDefault();
+      void exportPptx();
+    }
+  });
+
   btnPrev.onclick = () => viewer.prevSlide();
   btnNext.onclick = () => viewer.nextSlide();
   debugTextBoxes.onchange = () => viewer.setDebugTextBoxes(debugTextBoxes.checked);

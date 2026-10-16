@@ -351,12 +351,13 @@ label {
 }
 
 .canvas-container {
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: center;
   flex: 0 0 auto;
   aspect-ratio: 16 / 9;
-  overflow: hidden;
+  overflow: visible;
   background: #ffffff;
   border-radius: 6px;
   box-shadow: 0 20px 50px rgba(0, 0, 0, 0.18), 0 3px 10px rgba(0, 0, 0, 0.08);
@@ -599,6 +600,204 @@ label {
   }
 
   .debug-toggle span {
+    display: none;
+  }
+}
+
+/* ---------- Edit toolbar ---------- */
+
+.edit-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 4px 8px 4px 5px;
+  background: rgba(245, 245, 247, 0.9);
+  border: 1px solid var(--hairline);
+  border-radius: 11px;
+}
+
+.tool-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  color: #1d1d1f;
+  background: transparent;
+  border: 0;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background-color 120ms ease;
+}
+
+.tool-button svg {
+  width: 17px;
+  height: 17px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.9;
+}
+
+.tool-button:hover:not(:disabled) {
+  background: #e3e3e8;
+}
+
+.tool-button:active:not(:disabled) {
+  background: #d8d8de;
+}
+
+.tool-button:disabled {
+  color: #c1c1c6;
+  cursor: default;
+}
+
+.tool-divider {
+  width: 1px;
+  height: 18px;
+  margin: 0 5px;
+  background: #d2d2d7;
+}
+
+.selection-hint {
+  min-width: 96px;
+  color: #6e6e73;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.button:disabled {
+  opacity: 0.45;
+  cursor: default;
+  transform: none;
+}
+
+/* ---------- Canvas editing overlay ---------- */
+
+.canvas-container {
+  --edit-accent: #0a84ff;
+  --edit-guide: #ff2d78;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.canvas-container.is-over-selection {
+  cursor: move;
+}
+
+.edit-layer,
+.edit-guides {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.edit-layer {
+  z-index: 5;
+}
+
+.edit-hover,
+.edit-selection,
+.edit-marquee,
+.edit-badge {
+  position: absolute;
+  display: none;
+  pointer-events: none;
+}
+
+.edit-hover {
+  border: 1px solid color-mix(in srgb, var(--edit-accent) 60%, transparent);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.55);
+  border-radius: 1px;
+}
+
+.edit-selection {
+  border: 1.5px solid var(--edit-accent);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.7), 0 0 0 4px color-mix(in srgb, var(--edit-accent) 14%, transparent);
+  border-radius: 1px;
+}
+
+.edit-selection.is-multi {
+  border-style: dashed;
+}
+
+.edit-handle {
+  position: absolute;
+  width: 11px;
+  height: 11px;
+  margin: -5.5px 0 0 -5.5px;
+  background: #ffffff;
+  border: 1.5px solid var(--edit-accent);
+  border-radius: 50%;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.28);
+  pointer-events: auto;
+  transition: transform 100ms ease, background-color 100ms ease;
+}
+
+.edit-handle::after {
+  content: "";
+  position: absolute;
+  inset: -7px;
+}
+
+.edit-handle:hover {
+  background: var(--edit-accent);
+  transform: scale(1.18);
+}
+
+.edit-handle-nw { left: 0; top: 0; cursor: nwse-resize; }
+.edit-handle-n  { left: 50%; top: 0; cursor: ns-resize; }
+.edit-handle-ne { left: 100%; top: 0; cursor: nesw-resize; }
+.edit-handle-e  { left: 100%; top: 50%; cursor: ew-resize; }
+.edit-handle-se { left: 100%; top: 100%; cursor: nwse-resize; }
+.edit-handle-s  { left: 50%; top: 100%; cursor: ns-resize; }
+.edit-handle-sw { left: 0; top: 100%; cursor: nesw-resize; }
+.edit-handle-w  { left: 0; top: 50%; cursor: ew-resize; }
+
+.edit-selection.no-resize .edit-handle {
+  display: none;
+}
+
+.edit-selection.is-compact .edit-handle-n,
+.edit-selection.is-compact .edit-handle-e,
+.edit-selection.is-compact .edit-handle-s,
+.edit-selection.is-compact .edit-handle-w {
+  display: none;
+}
+
+.edit-marquee {
+  background: color-mix(in srgb, var(--edit-accent) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--edit-accent) 75%, transparent);
+  border-radius: 2px;
+}
+
+.edit-guide {
+  position: absolute;
+  background: var(--edit-guide);
+  opacity: 0.9;
+}
+
+.edit-guide-x { width: 1px; margin-left: -0.5px; }
+.edit-guide-y { height: 1px; margin-top: -0.5px; }
+
+.edit-badge {
+  z-index: 6;
+  padding: 4px 9px;
+  color: #ffffff;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2;
+  white-space: nowrap;
+  background: rgba(29, 29, 31, 0.86);
+  border-radius: 7px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.22);
+  transform: translateX(-50%);
+  backdrop-filter: blur(8px);
+}
+
+@media (max-width: 900px) {
+  .selection-hint {
     display: none;
   }
 }

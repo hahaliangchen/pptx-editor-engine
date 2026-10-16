@@ -530,38 +530,33 @@ impl RustPptRenderer {
     // Render single slide from JSON AST, with images_obj mapping URLs to HTMLImageElements
     #[wasm_bindgen]
     pub fn render_slide(&mut self, slide_json: &str, images_obj: &JsValue) -> Result<(), JsValue> {
-        // Debug: Log all currently registered fonts in the WASM font database
-        if let Some(fs) = &self.font_system {
-            let count = fs.db().faces().count();
-            let mut face_names = Vec::new();
-            for face in fs.db().faces() {
-                let fams = face
-                    .families
-                    .iter()
-                    .map(|f| &f.0)
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .join(",");
-                face_names.push(format!("{} (weight: {:?})", fams, face.weight));
-            }
-            let msg = format!(
-                "[WASM Debug] render_slide called. Active font_system exists. Total faces in database: {}. Faces: {:?}",
-                count, face_names
-            );
-            let _ = web_sys::console::log_1(&JsValue::from_str(&msg));
-        } else {
-            let _ = web_sys::console::log_1(&JsValue::from_str(
-                "[WASM Debug] render_slide called. self.font_system is NONE (no fonts loaded yet).",
-            ));
-        }
+        self.render_slide_impl(slide_json, images_obj, true)
+    }
 
+    // Same as render_slide but leaves the canvas untouched underneath, so a few
+    // elements can be drawn onto a transparent layer while dragging.
+    #[wasm_bindgen]
+    pub fn render_slide_overlay(
+        &mut self,
+        slide_json: &str,
+        images_obj: &JsValue,
+    ) -> Result<(), JsValue> {
+        self.render_slide_impl(slide_json, images_obj, false)
+    }
+
+    fn render_slide_impl(
+        &mut self,
+        slide_json: &str,
+        images_obj: &JsValue,
+        fill_background: bool,
+    ) -> Result<(), JsValue> {
         let slide: Slide = serde_json::from_str(slide_json)
             .map_err(|e| JsValue::from_str(&format!("JSON Parse Error: {}", e)))?;
 
         // 1. Clear and fill background (reset transform to cover physical canvas size)
         self.ctx.save();
         let _ = self.ctx.set_transform(1.0, 0.0, 0.0, 1.0, 0.0, 0.0);
-        if let Some(canvas) = self.ctx.canvas() {
+        if let Some(canvas) = self.ctx.canvas().filter(|_| fill_background) {
             self.ctx.set_fill_style_str("#ffffff");
             self.ctx
                 .fill_rect(0.0, 0.0, canvas.width() as f64, canvas.height() as f64);

@@ -17,16 +17,35 @@
         </div>
       </div>
 
+      <div class="edit-toolbar" role="toolbar" aria-label="编辑工具">
+        <button id="btn-undo" class="tool-button" type="button" title="撤销 (Ctrl+Z)" aria-label="撤销" disabled>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/></svg>
+        </button>
+        <button id="btn-redo" class="tool-button" type="button" title="重做 (Ctrl+Shift+Z)" aria-label="重做" disabled>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 14 5-5-5-5"/><path d="M20 9H9.5a5.5 5.5 0 0 0 0 11H13"/></svg>
+        </button>
+        <span class="tool-divider" aria-hidden="true"></span>
+        <button id="btn-delete" class="tool-button" type="button" title="删除 (Delete)" aria-label="删除" disabled>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="m6 6 1 14h10l1-14"/><path d="M10 11v5M14 11v5"/></svg>
+        </button>
+        <span class="tool-divider" aria-hidden="true"></span>
+        <span id="selection-hint" class="selection-hint">点击选择元素</span>
+      </div>
+
       <div class="header-actions">
         <button id="btn-load-demo" class="button button-secondary" type="button">
           <span class="button-symbol" aria-hidden="true">◇</span>
           <span>示例文稿</span>
         </button>
-        <label class="button button-primary">
+        <label class="button button-secondary">
           <span class="button-symbol" aria-hidden="true">↑</span>
-          <span>上传 PPTX</span>
+          <span>打开</span>
           <input type="file" id="file-uploader" accept=".pptx">
         </label>
+        <button id="btn-export" class="button button-primary" type="button" title="导出为 .pptx (Ctrl+S)" disabled>
+          <span class="button-symbol" aria-hidden="true">↓</span>
+          <span>导出 PPTX</span>
+        </button>
       </div>
     </header>
 
