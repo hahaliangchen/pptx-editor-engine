@@ -49,6 +49,8 @@ export * from "./pptx-virtual-dom";
 export class PptxParser {
   private zip: JSZip | null = null;
   private currentSlidePart = "";
+  /** presentation.xml defaultTextStyle: the bottom of every placeholder's inheritance chain. */
+  private defaultTextStyle: globalThis.Element | null = null;
   private groupStack: GroupRef[] = [];
   private styleRegistry: StyleRegistry = { rules: {} };
   private nextStyleRuleId = 1;
@@ -163,6 +165,7 @@ export class PptxParser {
 
     // 2. Parse Presentation Properties (slide size)
     const size = await this.parsePresentationSize();
+    await this.parseDefaultTextStyle();
 
     // 3. Find and sort slide files
     const slidePaths = await this.getOrderedSlidePaths();
@@ -482,6 +485,14 @@ export class PptxParser {
     return `#${average("r")}${average("g")}${average("b")}`;
   }
 
+  private async parseDefaultTextStyle(): Promise<void> {
+    this.defaultTextStyle = null;
+    const file = this.zip?.file("ppt/presentation.xml");
+    if (!file) return;
+    const doc = new DOMParser().parseFromString(await file.async("text"), "application/xml");
+    this.defaultTextStyle = querySelector(doc, "p\\:defaultTextStyle, defaultTextStyle") as unknown as globalThis.Element | null;
+  }
+
   private async parsePresentationSize(): Promise<PresentationSize> {
     const defaultSize: PresentationSize = { width: 1920, height: 1080 };
     const presFile = this.zip?.file("ppt/presentation.xml");
@@ -753,20 +764,37 @@ export class PptxParser {
     };
   }
 
+  /**
+   * Placeholder kinds that share a master placeholder: a centred title uses the
+   * master's title, and subtitles and content placeholders use its body.
+   */
+  private placeholderClass(type: string): string {
+    if (type === "ctrTitle") return "title";
+    if (type === "subTitle" || type === "obj") return "body";
+    return type;
+  }
+
   private findMatchingPlaceholder(
     descriptor: PlaceholderDescriptor,
-    candidates: globalThis.Element[]
+    candidates: globalThis.Element[],
+    matchByIndex = true
   ): globalThis.Element | null {
-    if (descriptor.idx !== null) {
+    if (matchByIndex && descriptor.idx !== null) {
       const byIndex = candidates.find(candidate =>
         this.getPlaceholderDescriptor(candidate)?.idx === descriptor.idx
       );
       if (byIndex) return byIndex;
     }
 
-    return candidates.find(candidate =>
+    const exact = candidates.find(candidate =>
       this.getPlaceholderDescriptor(candidate)?.type === descriptor.type
-    ) || null;
+    );
+    if (exact) return exact;
+    const kind = this.placeholderClass(descriptor.type);
+    return candidates.find(candidate => {
+      const type = this.getPlaceholderDescriptor(candidate)?.type;
+      return type !== undefined && this.placeholderClass(type) === kind;
+    }) || null;
   }
 
   private resolvePlaceholderChain(
@@ -785,7 +813,8 @@ export class PptxParser {
     const masterDescriptor = layoutShape
       ? this.getPlaceholderDescriptor(layoutShape) || slideDescriptor
       : slideDescriptor;
-    const masterShape = this.findMatchingPlaceholder(masterDescriptor, context.masterShapes);
+    // The master is matched by kind only: its indices belong to the master itself.
+    const masterShape = this.findMatchingPlaceholder(masterDescriptor, context.masterShapes, false);
     if (masterShape) chain.push(masterShape);
 
     return chain;
@@ -1328,19 +1357,6 @@ export class PptxParser {
     let defaultFontFamily = "sans-serif";
     let defaultEastAsianFontFamily = "";
 
-    // Check placeholder type
-    if (ph) {
-      const type = ph.getAttribute("type");
-      if (type === "title" || type === "ctrTitle") {
-        defaultFontSize = 40; // 40pt
-        defaultBold = true;
-      } else if (type === "subTitle") {
-        defaultFontSize = 24; // 24pt
-      } else if (type === "body") {
-        defaultFontSize = 18; // 18pt
-      }
-    }
-
     // Check style node for fontRef
     const styleNode = querySelector(node, "p\\:style, style");
     if (styleNode) {
@@ -1374,7 +1390,8 @@ export class PptxParser {
         // unrelated master bullet or run defaults.
         masterTextStyle: placeholder
           ? this.selectMasterTextStyle(placeholderContext?.masterTextStyles || null, placeholder)
-          : null
+          : null,
+        defaultTextStyle: placeholder ? this.defaultTextStyle : null
       };
       const body = this.resolveTextBodyProperties(
         textBodies,
@@ -1556,15 +1573,13 @@ export class PptxParser {
   };
 
   private getBulletDescriptor(
-    buCharNode: Element | null,
-    buFontNode: Element | null
+    charValue: string,
+    typeface: string
   ): { char: string; fontFamily?: string } {
-    const char = buCharNode?.getAttribute("char") || "•";
-    const typeface = buFontNode?.getAttribute("typeface") || "";
-    const mapped = PptxParser.SYMBOL_BULLET_MAP[typeface.trim().toLowerCase()]?.[char];
+    const mapped = PptxParser.SYMBOL_BULLET_MAP[typeface.trim().toLowerCase()]?.[charValue];
     if (mapped) return { char: mapped };
     return {
-      char,
+      char: charValue,
       fontFamily: typeface ? this.styleResolver.resolveThemeTypeface(typeface) : undefined
     };
   }
@@ -1604,6 +1619,8 @@ export class PptxParser {
       textDirection: "horz" as const
     };
     const computedParagraphs: TextParagraph[] = [];
+    /** Running count of numbered paragraphs, per level. */
+    const numbering: Array<{ type: string; count: number } | undefined> = [];
 
     for (let i = 0; i < paragraphs.length; i++) {
       const p = paragraphs[i];
@@ -1621,6 +1638,10 @@ export class PptxParser {
       };
 
       const inheritedParagraphProperties: globalThis.Element[] = [];
+      if (inheritance?.defaultTextStyle) {
+        const base = this.getLevelParagraphProperties(inheritance.defaultTextStyle, level);
+        if (base) inheritedParagraphProperties.push(base);
+      }
       if (inheritance?.masterTextStyle) {
         const masterLevel = this.getLevelParagraphProperties(inheritance.masterTextStyle, level);
         if (masterLevel) inheritedParagraphProperties.push(masterLevel);
@@ -1708,46 +1729,76 @@ export class PptxParser {
         }
       }
 
-      // Check if bullet exists
-      let bulletChar = "";
-      let bulletColor = pDefaults.color;
-      let bulletFontFamily: string | undefined;
-      let bulletFontSize: number | undefined;
-      let hasExplicitBulletColor = false;
+      // Bullet properties inherit one by one: a layout may change only the size
+      // or colour of a bullet whose character comes from the master.
+      let bulletKind: "none" | "char" | "auto" | null = null;
+      let bulletCharValue = "";
+      let bulletTypeface = "";
+      let bulletAuto: { type: string; startAt: number } | null = null;
+      let bulletSizePct: number | null = null;
+      let bulletSizePts: number | null = null;
+      let bulletColorValue: string | null = null;
 
       for (const inheritedPPr of inheritedParagraphProperties) {
-        if (getDirectChild(inheritedPPr, "buNone")) {
-          bulletChar = "";
-          bulletFontFamily = undefined;
-          bulletFontSize = undefined;
-        }
+        if (getDirectChild(inheritedPPr, "buNone")) bulletKind = "none";
         const buChar = getDirectChild(inheritedPPr, "buChar");
         if (buChar) {
-          const buFont = getDirectChild(inheritedPPr, "buFont");
-          const descriptor = this.getBulletDescriptor(buChar, buFont);
-          bulletChar = descriptor.char;
-          if (descriptor.fontFamily) bulletFontFamily = descriptor.fontFamily;
-
-          const buSzPct = getDirectChild(inheritedPPr, "buSzPct")?.getAttribute("val");
-          const buSzPts = getDirectChild(inheritedPPr, "buSzPts")?.getAttribute("val");
-          if (buSzPct !== null && buSzPct !== undefined) {
-            bulletFontSize = pDefaults.fontSize * Math.max(0, parseInt(buSzPct, 10) / 100000);
-          } else if (buSzPts !== null && buSzPts !== undefined) {
-            bulletFontSize = (parseInt(buSzPts, 10) / 100) * 12700 * absoluteUnitScale;
-          }
-
-          const buClr = getDirectChild(inheritedPPr, "buClr");
-          if (buClr) {
-            const color = this.styleResolver.extractHexColor(buClr);
-            if (color) {
-              bulletColor = color;
-              hasExplicitBulletColor = true;
-            }
-          }
-          if (getDirectChild(inheritedPPr, "buClrTx")) {
-            hasExplicitBulletColor = false;
-          }
+          bulletKind = "char";
+          bulletCharValue = buChar.getAttribute("char") || "•";
         }
+        const buAutoNum = getDirectChild(inheritedPPr, "buAutoNum");
+        if (buAutoNum) {
+          bulletKind = "auto";
+          bulletAuto = {
+            type: buAutoNum.getAttribute("type") || "arabicPeriod",
+            startAt: parseInt(buAutoNum.getAttribute("startAt") || "1", 10)
+          };
+        }
+        const buFont = getDirectChild(inheritedPPr, "buFont");
+        if (buFont) bulletTypeface = buFont.getAttribute("typeface") || "";
+        if (getDirectChild(inheritedPPr, "buFontTx")) bulletTypeface = "";
+
+        const buSzPct = getDirectChild(inheritedPPr, "buSzPct")?.getAttribute("val");
+        const buSzPts = getDirectChild(inheritedPPr, "buSzPts")?.getAttribute("val");
+        if (buSzPct !== null && buSzPct !== undefined) {
+          bulletSizePct = Math.max(0, parseInt(buSzPct, 10) / 100000);
+          bulletSizePts = null;
+        } else if (buSzPts !== null && buSzPts !== undefined) {
+          bulletSizePts = (parseInt(buSzPts, 10) / 100) * 12700 * absoluteUnitScale;
+          bulletSizePct = null;
+        }
+        if (getDirectChild(inheritedPPr, "buSzTx")) {
+          bulletSizePct = null;
+          bulletSizePts = null;
+        }
+
+        const buClr = getDirectChild(inheritedPPr, "buClr");
+        if (buClr) bulletColorValue = this.styleResolver.extractHexColor(buClr) || bulletColorValue;
+        if (getDirectChild(inheritedPPr, "buClrTx")) bulletColorValue = null;
+      }
+
+      let bulletChar = "";
+      let bulletColor = bulletColorValue || pDefaults.color;
+      let bulletFontFamily: string | undefined;
+      let bulletFontSize: number | undefined;
+      const hasExplicitBulletColor = bulletColorValue !== null;
+      if (bulletKind === "char") {
+        const descriptor = this.getBulletDescriptor(bulletCharValue, bulletTypeface);
+        bulletChar = descriptor.char;
+        bulletFontFamily = descriptor.fontFamily;
+      } else if (bulletKind === "auto" && bulletAuto) {
+        // Consecutive numbered paragraphs count up; any other paragraph at the
+        // same level ends the run, and a shallower one restarts deeper levels.
+        for (let deeper = level + 1; deeper < numbering.length; deeper++) numbering[deeper] = undefined;
+        const previous = numbering[level];
+        const count = previous && previous.type === bulletAuto.type ? previous.count + 1 : bulletAuto.startAt;
+        numbering[level] = { type: bulletAuto.type, count };
+        bulletChar = formatAutoNumber(bulletAuto.type, count);
+        if (bulletTypeface) bulletFontFamily = this.getBulletDescriptor("", bulletTypeface).fontFamily;
+      }
+      if (bulletKind !== "auto") {
+        for (let deeper = level + 1; deeper < numbering.length; deeper++) numbering[deeper] = undefined;
+        numbering[level] = undefined;
       }
 
       // Title paragraphs in this deck inherit the level-1 hanging indent
@@ -1829,6 +1880,12 @@ export class PptxParser {
         });
       }
 
+      if (bulletChar) {
+        // A percentage is of the paragraph's first run, which may differ from the level default.
+        const firstRunSize = computedRuns[0].style.fontSize;
+        if (bulletSizePct !== null) bulletFontSize = firstRunSize * bulletSizePct;
+        else if (bulletSizePts !== null) bulletFontSize = bulletSizePts;
+      }
       if (bulletChar && !hasExplicitBulletColor) {
         bulletColor = computedRuns[0].style.color;
       }
@@ -1967,4 +2024,51 @@ export class PptxParser {
       h: cy * transform.scaleY
     };
   }
+}
+
+
+const ROMAN: Array<[number, string]> = [
+  [1000, "M"], [900, "CM"], [500, "D"], [400, "CD"], [100, "C"], [90, "XC"],
+  [50, "L"], [40, "XL"], [10, "X"], [9, "IX"], [5, "V"], [4, "IV"], [1, "I"]
+];
+
+function toRoman(value: number): string {
+  let rest = Math.max(1, Math.min(3999, value));
+  let result = "";
+  for (const [size, symbol] of ROMAN) {
+    while (rest >= size) {
+      result += symbol;
+      rest -= size;
+    }
+  }
+  return result;
+}
+
+function toLetters(value: number): string {
+  let rest = Math.max(1, value);
+  let result = "";
+  while (rest > 0) {
+    rest -= 1;
+    result = String.fromCharCode(97 + (rest % 26)) + result;
+    rest = Math.floor(rest / 26);
+  }
+  return result;
+}
+
+/** The text of an auto-number bullet, e.g. ("alphaLcParenR", 2) -> "b)". */
+export function formatAutoNumber(type: string, count: number): string {
+  const lower = type.toLowerCase();
+  let body: string;
+  if (lower.startsWith("alphalc")) body = toLetters(count);
+  else if (lower.startsWith("alphauc")) body = toLetters(count).toUpperCase();
+  else if (lower.startsWith("romanlc")) body = toRoman(count).toLowerCase();
+  else if (lower.startsWith("romanuc")) body = toRoman(count);
+  else if (lower.startsWith("circlenum")) body = String.fromCodePoint(count >= 1 && count <= 20 ? 0x2460 + count - 1 : 0x2460);
+  else body = String(count);
+
+  if (lower.endsWith("parenboth")) return `(${body})`;
+  if (lower.endsWith("parenr")) return `${body})`;
+  if (lower.endsWith("period")) return `${body}.`;
+  if (lower.endsWith("plain")) return body;
+  return `${body}.`;
 }

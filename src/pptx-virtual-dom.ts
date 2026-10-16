@@ -380,6 +380,8 @@ export interface PlaceholderContext {
 export interface TextInheritanceContext {
   textBodies: globalThis.Element[];
   masterTextStyle: globalThis.Element | null;
+  /** presentation.xml defaultTextStyle, for placeholders. */
+  defaultTextStyle?: globalThis.Element | null;
 }
 
 export interface ComputedRunStyle {
