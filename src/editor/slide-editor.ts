@@ -482,7 +482,12 @@ export class SlideEditor {
   private describeProperties(): SelectionProperties | null {
     const slide = this.host.getSlide();
     if (!slide || this.selection.size === 0) return null;
-    return describeSelection(this.selectedShapes(slide), this.selectedTexts(slide), this.emuPerPx(slide));
+    const objects = this.selectedObjects(slide);
+    const single = objects.length === 1 && !objects[0].isGroup ? objects[0] : null;
+    return describeSelection(this.selectedShapes(slide), this.selectedTexts(slide), this.emuPerPx(slide), {
+      rect: objects.length ? union(objects.map(object => object.rect)) : null,
+      rotation: single ? single.rotation : null
+    });
   }
 
   /** Shapes whose fill and border the panel may change (table cells excluded). */
@@ -547,6 +552,73 @@ export class SlideEditor {
     this.host.onCommit(slide);
     this.paintOverlay();
     this.emit();
+  }
+
+  /**
+   * Position and size typed into the panel, in centimetres. The selection is
+   * moved and scaled as one box, exactly as dragging its handles would.
+   */
+  public setBounds(change: Partial<{ x: number; y: number; w: number; h: number }>, keepRatio = false): void {
+    const slide = this.host.getSlide();
+    if (!slide) return;
+    if (this.textSession) this.endTextEdit();
+    const objects = this.selectedObjects(slide);
+    if (objects.length === 0) return;
+
+    const emu = this.emuPerPx(slide);
+    const px = (cm: number) => cm * 360000 / emu;
+    const box = union(objects.map(object => object.rect));
+    let w = change.w !== undefined ? Math.max(1, px(change.w)) : box.w;
+    let h = change.h !== undefined ? Math.max(1, px(change.h)) : box.h;
+    if (keepRatio && box.w > 0 && box.h > 0) {
+      if (change.w !== undefined && change.h === undefined) h = w * box.h / box.w;
+      else if (change.h !== undefined && change.w === undefined) w = h * box.w / box.h;
+    }
+    const next: Rect = {
+      x: change.x !== undefined ? px(change.x) : box.x,
+      y: change.y !== undefined ? px(change.y) : box.y,
+      w,
+      h
+    };
+    // A line has no width or height to scale from; give each member the new size outright.
+    const sx = box.w > 0.5 ? next.w / box.w : null;
+    const sy = box.h > 0.5 ? next.h / box.h : null;
+
+    const items = objects.flatMap(object => object.elements.map(element => {
+      const r = element.rect;
+      return {
+        element,
+        before: cloneRect(r),
+        after: {
+          x: next.x + (r.x - box.x) * (sx ?? 1),
+          y: next.y + (r.y - box.y) * (sy ?? 1),
+          w: sx === null ? next.w : r.w * sx,
+          h: sy === null ? next.h : r.h * sy
+        },
+        owner: object.source
+      };
+    })).filter(item => ["x", "y", "w", "h"].some(key =>
+      Math.abs((item.after as Record<string, number>)[key] - (item.before as unknown as Record<string, number>)[key]) > 0.01));
+    if (items.length === 0) return;
+    const command = new RectsCommand("设置位置与大小", slide, items, this);
+    command.apply();
+    this.history.record(command);
+  }
+
+  /** Rotation typed into the panel, in degrees. */
+  public setRotationDegrees(degrees: number): void {
+    const slide = this.host.getSlide();
+    if (!slide || !Number.isFinite(degrees)) return;
+    const objects = this.selectedObjects(slide);
+    if (objects.length !== 1 || objects[0].isGroup) return;
+    const target = Math.round((((degrees % 360) + 360) % 360) * 10) / 10;
+    const items = objects[0].elements
+      .filter(element => rotationOf(element) !== target)
+      .map(element => ({ element, before: rotationOf(element), after: target, owner: objects[0].source }));
+    if (items.length === 0) return;
+    const command = new RotateCommand(slide, items, this);
+    command.apply();
+    this.history.record(command);
   }
 
   /** Fill / border changes from the properties panel. */

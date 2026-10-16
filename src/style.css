@@ -348,10 +348,12 @@ label {
   width: 100%;
   min-height: 0;
   padding: 64px 28px 28px;
+  overflow: auto;
 }
 
 .canvas-container {
   position: relative;
+  margin: auto;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1432,4 +1434,100 @@ label {
 .edit-menu.is-fixed {
   position: fixed;
   z-index: 1000;
+}
+
+/* ---------- Zoom ---------- */
+
+.zoom-level {
+  min-width: 52px;
+  height: 28px;
+  padding: 0 8px;
+  color: #1d1d1f;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  background: transparent;
+  border: 0;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background-color 120ms ease;
+}
+
+.zoom-level:hover {
+  background: #e8e8ed;
+}
+
+.zoom-level.is-fit {
+  color: #6e6e73;
+}
+
+/* ---------- Position and size fields ---------- */
+
+.inspector-fields {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.inspector-field {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 0 8px;
+  background: #f0f0f3;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  transition: border-color 120ms ease, background-color 120ms ease;
+}
+
+.inspector-field:focus-within {
+  background: #ffffff;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+.inspector-field span {
+  flex: 0 0 auto;
+  color: #6e6e73;
+  font-size: 11px;
+}
+
+.inspector-field em {
+  flex: 0 0 auto;
+  color: #8e8e93;
+  font-size: 10px;
+  font-style: normal;
+}
+
+.inspector-number {
+  flex: 1;
+  width: 100%;
+  min-width: 0;
+  height: 28px;
+  padding: 0;
+  color: #1d1d1f;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  background: transparent;
+  border: 0;
+  outline: none;
+  -moz-appearance: textfield;
+}
+
+.inspector-number::-webkit-outer-spin-button,
+.inspector-number::-webkit-inner-spin-button {
+  margin: 0;
+  -webkit-appearance: none;
+}
+
+.inspector-number:disabled {
+  color: #b8b8bd;
+}
+
+.inspector-lock {
+  justify-self: end;
+  width: 30px;
+  height: 30px;
+  background: #f0f0f3;
 }

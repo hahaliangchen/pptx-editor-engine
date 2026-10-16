@@ -43,6 +43,8 @@ export interface ViewerOptions {
   onEditStateChange?: (state: EditorState) => void;
   /** Fired when slides were added, removed or reordered (also by undo/redo). */
   onSlidesChanged?: (document: PptVirtualDocument, currentIndex: number) => void;
+  /** Fired when the zoom changes; `fit` is true while the slide follows the window size. */
+  onZoomChange?: (percent: number, fit: boolean) => void;
   /** Fired (debounced) after an edit so thumbnails can be refreshed. */
   onSlideEdited?: (slideIndex: number, slide: Slide) => void;
 }
@@ -109,6 +111,10 @@ export default class PptViewer {
   private editNotifyTimer = 0;
   private onSlideEdited?: (slideIndex: number, slide: Slide) => void;
   private onSlidesChanged?: (document: PptVirtualDocument, currentIndex: number) => void;
+  private onZoomChange?: (percent: number, fit: boolean) => void;
+  /** "fit" follows the window; a number is a percentage where 100 is the slide's real size. */
+  private zoomMode: "fit" | number = "fit";
+  private zoomPercent = 100;
   private slideSerial = 0;
   private originalSlideParts: Array<string | undefined> = [];
 
@@ -122,6 +128,7 @@ export default class PptViewer {
     this.onLoadComplete = options.onLoadComplete;
     this.onSlideEdited = options.onSlideEdited;
     this.onSlidesChanged = options.onSlidesChanged;
+    this.onZoomChange = options.onZoomChange;
     this.preferredWidth = options.width;
     this.preferredHeight = options.height;
     this.debugTextBoxes = options.debugTextBoxes ?? false;
@@ -176,6 +183,13 @@ export default class PptViewer {
 
     // Listen to resize to keep canvas crisp
     window.addEventListener("resize", () => this.resizeAndRedraw());
+
+    // Ctrl + wheel (and trackpad pinch) zooms around the pointer; plain wheel scrolls the stage.
+    (this.container.parentElement ?? this.container).addEventListener("wheel", event => {
+      if (!(event.ctrlKey || event.metaKey) || !this.presentation) return;
+      event.preventDefault();
+      this.setZoom(this.zoomPercent * Math.exp(-event.deltaY * 0.0015), { x: event.clientX, y: event.clientY });
+    }, { passive: false });
   }
 
   private async initEngine() {
@@ -395,6 +409,7 @@ export default class PptViewer {
       log("parse:start");
       this.presentation = await this.parser.parse(buffer);
       this.resetEditing();
+      this.zoomMode = "fit";
       log(`parse:done slides=${this.presentation.slides.length}`);
 
       log("wasm:init:wait");
@@ -587,6 +602,45 @@ export default class PptViewer {
     this.editor.applyShapeStyle(op);
   }
 
+  public getZoom(): { percent: number; fit: boolean } {
+    return { percent: this.zoomPercent, fit: this.zoomMode === "fit" };
+  }
+
+  /**
+   * Zoom to a percentage (100 = real size) or back to "fit". With an anchor
+   * (client coordinates) the point under it stays put while the slide grows.
+   */
+  public setZoom(mode: "fit" | number, anchor?: { x: number; y: number }): void {
+    if (!this.presentation) return;
+    const next = mode === "fit" ? "fit" : Math.min(400, Math.max(10, mode));
+    const stage = this.container.parentElement;
+    const before = this.container.getBoundingClientRect();
+    const fraction = anchor && before.width > 0
+      ? { x: (anchor.x - before.left) / before.width, y: (anchor.y - before.top) / before.height }
+      : null;
+
+    this.zoomMode = next;
+    this.renderedSlideCache.clear();
+    this.resizeAndRedraw();
+
+    if (stage && anchor && fraction) {
+      const after = this.container.getBoundingClientRect();
+      stage.scrollLeft += after.left + fraction.x * after.width - anchor.x;
+      stage.scrollTop += after.top + fraction.y * after.height - anchor.y;
+      this.editor.layout();
+    }
+  }
+
+  /** One notch up or down the usual zoom ladder. */
+  public zoomStep(direction: 1 | -1): void {
+    const ladder = [25, 50, 66, 75, 100, 125, 150, 200, 300, 400];
+    const current = this.zoomPercent;
+    const target = direction > 0
+      ? ladder.find(step => step > current + 0.5)
+      : [...ladder].reverse().find(step => step < current - 0.5);
+    if (target !== undefined) this.setZoom(target);
+  }
+
   public setTool(tool: Parameters<SlideEditor["setTool"]>[0]): void {
     this.editor.setTool(tool);
   }
@@ -637,6 +691,14 @@ export default class PptViewer {
 
   public duplicate(): Promise<void> {
     return this.editor.duplicate();
+  }
+
+  public setBounds(change: Parameters<SlideEditor["setBounds"]>[0], keepRatio = false): void {
+    this.editor.setBounds(change, keepRatio);
+  }
+
+  public setRotation(degrees: number): void {
+    this.editor.setRotationDegrees(degrees);
   }
 
   public alignParagraphs(align: "left" | "center" | "right"): void {
@@ -1181,6 +1243,8 @@ export default class PptViewer {
 
   private scheduleSlideCacheWarmup(): void {
     if (!this.presentation || !this.renderer || this.isRenderingThumbnails) return;
+    // Pre-rendering neighbours at a large zoom would only burn memory.
+    if (this.canvas.width > 2600) return;
 
     const epoch = ++this.cacheWarmupEpoch;
     window.setTimeout(() => {
@@ -1281,15 +1345,24 @@ export default class PptViewer {
         this.preferredHeight || Number.POSITIVE_INFINITY
       )
     );
-    const cssWidth = Math.min(availableWidth, availableHeight * slideRatio);
+    const fitWidth = Math.min(availableWidth, availableHeight * slideRatio);
+    // 100% is the slide at its real size: 96 css px per inch, 9525 EMU per px.
+    const realWidth = Math.max(1, logicalSize.width * (slide.emuPerPx || 6350) / 9525);
+    const cssWidth = this.zoomMode === "fit" ? fitWidth : realWidth * this.zoomMode / 100;
     const cssHeight = cssWidth / slideRatio;
+    const percent = cssWidth / realWidth * 100;
+    if (Math.abs(percent - this.zoomPercent) > 0.01) {
+      this.zoomPercent = percent;
+      this.onZoomChange?.(percent, this.zoomMode === "fit");
+    }
 
     this.container.style.width = `${cssWidth}px`;
     this.container.style.height = `${cssHeight}px`;
     this.container.style.aspectRatio = `${logicalSize.width} / ${logicalSize.height}`;
 
     // Device Pixel Ratio scaling for Retina screens (sharp rendering)
-    const dpr = window.devicePixelRatio || 1;
+    // Past ~4k wide a bitmap costs more than it shows; the browser scales it up.
+    const dpr = Math.min(window.devicePixelRatio || 1, 4096 / cssWidth);
     const pixelWidth = Math.max(1, Math.round(cssWidth * dpr));
     const pixelHeight = Math.max(1, Math.round(cssHeight * dpr));
     if (this.canvas.width !== pixelWidth || this.canvas.height !== pixelHeight) {

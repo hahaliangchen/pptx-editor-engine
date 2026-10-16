@@ -7,6 +7,9 @@ export interface InspectorActions {
   onAlignSlide(edge: "left" | "hcenter" | "right" | "top" | "vcenter" | "bottom"): void;
   onArrange(mode: "front" | "forward" | "backward" | "back"): void;
   onDuplicate(): void;
+  /** Centimetres; `keepRatio` when the lock is on. */
+  onBounds(change: Partial<{ x: number; y: number; w: number; h: number }>, keepRatio: boolean): void;
+  onRotate(degrees: number): void;
 }
 
 const PALETTE = [
@@ -36,6 +39,8 @@ const ICONS = {
   backward: svg('<rect x="9" y="4" width="10" height="10" rx="1.5"/><rect x="3" y="9" width="10" height="10" rx="1.5" fill="currentColor" fill-opacity=".18"/>'),
   back: svg('<rect x="10" y="10" width="11" height="11" rx="1.5" fill-opacity=".18"/><rect x="3" y="3" width="11" height="11" rx="1.5" fill="currentColor"/>'),
   duplicate: svg('<rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/>'),
+  lock: svg('<rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/>'),
+  unlock: svg('<rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 7.5-2"/>'),
   solid: svg('<path d="M4 12h16"/>'),
   dash: svg('<path d="M3 12h4M10 12h4M17 12h4"/>'),
   dot: svg('<path d="M4 12h.01M9 12h.01M14 12h.01M19 12h.01" stroke-width="3"/>'),
@@ -67,6 +72,8 @@ export class InspectorPanel {
   private alignButtons = new Map<string, HTMLButtonElement>();
   private anchorButtons = new Map<string, HTMLButtonElement>();
   private subtitle: HTMLElement;
+  private fields = new Map<"x" | "y" | "w" | "h" | "rotation", HTMLInputElement>();
+  private ratioLock!: HTMLButtonElement;
   private props: SelectionProperties | null = null;
 
   constructor(private root: HTMLElement, private actions: InspectorActions) {
@@ -82,6 +89,7 @@ export class InspectorPanel {
     header.append(title, this.subtitle);
     root.appendChild(header);
 
+    this.buildGeometry();
     this.buildFill();
     this.buildLine();
     this.buildText();
@@ -94,12 +102,14 @@ export class InspectorPanel {
     this.props = props;
     this.subtitle.textContent = props ? `已选中 ${selectionCount} 个对象` : "未选择对象";
     const has = (name: string, enabled: boolean) => this.sections.get(name)?.classList.toggle("is-disabled", !enabled);
+    has("geometry", !!props && !!props.bounds);
     has("fill", !!props && props.shapeCount > 0);
     has("line", !!props && props.shapeCount > 0);
     has("text", !!props && props.textCount > 0);
     has("arrange", !!props);
     has("layers", !!props);
 
+    this.paintGeometry(props);
     this.paintPalette(this.fillChips, this.fillNone, this.fillCustom, props?.fill ?? { kind: "mixed" });
     this.paintPalette(this.lineChips, this.lineNone, this.lineCustom, props?.lineColor ?? { kind: "mixed" });
     this.widthLabel.textContent = props?.lineWidthPt != null ? `${props.lineWidthPt} 磅` : "—";
@@ -119,6 +129,82 @@ export class InspectorPanel {
     this.root.appendChild(card);
     this.sections.set(name, card);
     return card;
+  }
+
+  private buildGeometry(): void {
+    const card = this.section("geometry", "位置与大小");
+    const grid = document.createElement("div");
+    grid.className = "inspector-fields";
+    const field = (key: "x" | "y" | "w" | "h" | "rotation", label: string, unit: string) => {
+      const wrap = document.createElement("label");
+      wrap.className = "inspector-field";
+      const name = document.createElement("span");
+      name.textContent = label;
+      const input = document.createElement("input");
+      input.type = "number";
+      input.step = key === "rotation" ? "1" : "0.1";
+      input.inputMode = "decimal";
+      input.className = "inspector-number";
+      input.addEventListener("change", () => this.commitField(key, input));
+      input.addEventListener("keydown", event => {
+        if (event.key === "Enter") input.blur();
+        if (event.key === "Escape") {
+          input.value = input.dataset.committed || "";
+          input.blur();
+        }
+      });
+      const suffix = document.createElement("em");
+      suffix.textContent = unit;
+      wrap.append(name, input, suffix);
+      this.fields.set(key, input);
+      return wrap;
+    };
+    this.ratioLock = this.iconButton(ICONS.unlock, "锁定宽高比", () => {
+      const locked = this.ratioLock.classList.toggle("is-active");
+      this.ratioLock.innerHTML = locked ? ICONS.lock : ICONS.unlock;
+    });
+    this.ratioLock.classList.add("inspector-lock");
+    grid.append(
+      field("x", "X", "cm"), field("y", "Y", "cm"),
+      field("w", "宽", "cm"), field("h", "高", "cm"),
+      field("rotation", "旋转", "°"), this.ratioLock
+    );
+    card.appendChild(grid);
+
+    // A number typed in a box must land on the selection it was typed for, so
+    // leave the box (committing it) before a click can change the selection.
+    document.addEventListener("pointerdown", () => {
+      const active = document.activeElement;
+      if (active instanceof HTMLInputElement && this.root.contains(active) && active.type === "number") active.blur();
+    }, true);
+  }
+
+  private commitField(key: "x" | "y" | "w" | "h" | "rotation", input: HTMLInputElement): void {
+    const value = parseFloat(input.value);
+    if (!Number.isFinite(value)) {
+      input.value = input.dataset.committed || "";
+      return;
+    }
+    if (key === "rotation") this.actions.onRotate(value);
+    else this.actions.onBounds({ [key]: value }, this.ratioLock.classList.contains("is-active"));
+  }
+
+  private paintGeometry(props: SelectionProperties | null): void {
+    const values: Record<string, number | null> = {
+      x: props?.bounds?.x ?? null,
+      y: props?.bounds?.y ?? null,
+      w: props?.bounds?.w ?? null,
+      h: props?.bounds?.h ?? null,
+      rotation: props?.rotation ?? null
+    };
+    for (const [key, input] of this.fields) {
+      const value = values[key];
+      input.disabled = value === null;
+      const text = value === null ? "" : String(key === "rotation" ? Math.round(value * 10) / 10 : Math.round(value * 100) / 100);
+      input.dataset.committed = text;
+      // Never rewrite a box the user is typing in.
+      if (document.activeElement !== input) input.value = text;
+    }
   }
 
   private buildFill(): void {

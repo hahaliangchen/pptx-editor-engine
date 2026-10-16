@@ -50,6 +50,16 @@ describe("shape style on the virtual DOM", () => {
   });
 });
 
+describe("describeSelection bounds", () => {
+  it("reports the selection's box in centimetres and its rotation", () => {
+    // 6350 EMU per px: 360000 / 6350 = 56.69 px per cm.
+    const props = describeSelection([], [], 6350, { rect: { x: 56.69, y: 113.39, w: 283.46, h: 170.08 }, rotation: 30 });
+    expect(props.bounds).toEqual({ x: 1, y: 2, w: 5, h: 3 });
+    expect(props.rotation).toBe(30);
+    expect(describeSelection([], [], 6350).bounds).toBeNull();
+  });
+});
+
 describe("describeSelection", () => {
   it("reports shared values and mixed ones", () => {
     const a = shape();

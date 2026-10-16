@@ -8,7 +8,19 @@ export type Paint =
   /** Gradient, picture or pattern: shown as such, replaced when a colour is picked. */
   | { kind: "other" };
 
+export interface SelectionBounds {
+  /** Centimetres from the slide's top-left corner. */
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
 export interface SelectionProperties {
+  /** Box around the whole selection. */
+  bounds: SelectionBounds | null;
+  /** Degrees; null unless exactly one rotatable object is selected. */
+  rotation: number | null;
   /** Shapes whose fill/border can change. */
   shapeCount: number;
   textCount: number;
@@ -57,8 +69,10 @@ function same<T>(values: T[]): T | null {
 export function describeSelection(
   shapes: ShapeElement[],
   texts: TextElement[],
-  emuPerPx: number
+  emuPerPx: number,
+  frame: { rect: { x: number; y: number; w: number; h: number } | null; rotation: number | null } = { rect: null, rotation: null }
 ): SelectionProperties {
+  const cm = (px: number) => Math.round((px * emuPerPx) / 360000 * 1000) / 1000;
   const widths = shapes
     .filter(shape => paintOfLine(shape).kind !== "none")
     .map(shape => Math.round((shape.computedStyle?.line?.width ?? shape.border?.width ?? 0) * emuPerPx / PT_EMU * 100) / 100);
@@ -68,6 +82,8 @@ export function describeSelection(
   const aligns = texts.flatMap(text => (text.paragraphs || []).map(paragraph => paragraph.style.align));
 
   return {
+    bounds: frame.rect ? { x: cm(frame.rect.x), y: cm(frame.rect.y), w: cm(frame.rect.w), h: cm(frame.rect.h) } : null,
+    rotation: frame.rotation,
     shapeCount: shapes.length,
     textCount: texts.length,
     fill: mergePaints(shapes.map(paintOfFill)),

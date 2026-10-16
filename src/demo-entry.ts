@@ -330,6 +330,7 @@ const initializeDemo = () => {
   const btnDelete = document.getElementById("btn-delete") as HTMLButtonElement;
   const btnExport = document.getElementById("btn-export") as HTMLButtonElement;
   const selectionHint = document.getElementById("selection-hint") as HTMLElement;
+  const zoomLevel = document.getElementById("zoom-level") as HTMLButtonElement;
   let openedFileName = "presentation.pptx";
   const imageUploader = document.getElementById("image-uploader") as HTMLInputElement | null;
   const insertRoot = document.getElementById("insert-bar");
@@ -359,7 +360,9 @@ const initializeDemo = () => {
       onAlignText: align => viewer.alignParagraphs(align),
       onAlignSlide: edge => viewer.alignToSlide(edge),
       onArrange: mode => viewer.arrange(mode),
-      onDuplicate: () => void viewer.duplicate()
+      onDuplicate: () => void viewer.duplicate(),
+      onBounds: (change, keepRatio) => viewer.setBounds(change, keepRatio),
+      onRotate: degrees => viewer.setRotation(degrees)
     })
     : null;
 
@@ -381,11 +384,21 @@ const initializeDemo = () => {
     onSlideEdited: async (index) => {
       await filmstrip.refresh(index);
     },
+    onSlideChange: (index) => {
+      pageIndicator.textContent = `Slide ${index + 1} / ${viewer.getSlidesCount()}`;
+      btnPrev.disabled = index === 0;
+      btnNext.disabled = index === viewer.getSlidesCount() - 1;
+      filmstrip.setActive(index);
+    },
     onLoadComplete: async (ast) => {
       console.log(`[Demo] onLoadComplete:start slides=${ast.slides.length}`);
       welcomeView.style.display = "none";
       await filmstrip.rebuild(ast.slides, viewer.getCurrentSlideIndex());
       console.log("[Demo] onLoadComplete:done");
+    },
+    onZoomChange: (percent, fit) => {
+      zoomLevel.textContent = `${Math.round(percent)}%`;
+      zoomLevel.classList.toggle("is-fit", fit);
     },
     onSlidesChanged: async (doc, index) => {
       await filmstrip.rebuild(doc.slides, index);
@@ -403,6 +416,24 @@ const initializeDemo = () => {
     remove: (index) => { try { viewer.deleteSlide(index); } catch (err) { report(err); } },
     move: (from, to) => { try { viewer.moveSlide(from, to); } catch (err) { report(err); } },
     renderThumbnails: (indices) => viewer.renderThumbnails(240, indices)
+  });
+  document.getElementById("btn-zoom-in")!.onclick = () => viewer.zoomStep(1);
+  document.getElementById("btn-zoom-out")!.onclick = () => viewer.zoomStep(-1);
+  zoomLevel.onclick = () => viewer.setZoom("fit");
+  document.addEventListener("keydown", (e) => {
+    if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
+    const target = e.target as HTMLElement | null;
+    if (target?.closest("input, textarea, [contenteditable='true']")) return;
+    if (e.key === "=" || e.key === "+") {
+      e.preventDefault();
+      viewer.zoomStep(1);
+    } else if (e.key === "-") {
+      e.preventDefault();
+      viewer.zoomStep(-1);
+    } else if (e.key === "0") {
+      e.preventDefault();
+      viewer.setZoom("fit");
+    }
   });
   const btnAddSlide = document.getElementById("btn-add-slide");
   if (btnAddSlide) {
