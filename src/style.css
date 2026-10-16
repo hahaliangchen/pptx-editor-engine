@@ -1531,3 +1531,25 @@ label {
   height: 30px;
   background: #f0f0f3;
 }
+
+/* ---------- Placeholder prompts ---------- */
+
+.edit-hints {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.edit-placeholder {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  color: rgba(120, 120, 128, 0.7);
+  text-align: center;
+  border: 1px dashed rgba(120, 120, 128, 0.5);
+  border-radius: 2px;
+  box-sizing: border-box;
+  pointer-events: none;
+}

@@ -103,6 +103,30 @@ export class PptxParser {
     return this.zip;
   }
 
+  /**
+   * Parse a slide that exists only in the editing session. Its files are put
+   * into the package just long enough to be read like any other slide.
+   */
+  public async parseVirtualSlide(
+    part: string,
+    xml: string,
+    relsXml: string,
+    slideId: string,
+    size: PresentationSize
+  ): Promise<Slide> {
+    if (!this.zip) throw new Error("No package is open.");
+    const slash = part.lastIndexOf("/");
+    const relsPath = `${part.slice(0, slash)}/_rels/${part.slice(slash + 1)}.rels`;
+    this.zip.file(part, xml);
+    this.zip.file(relsPath, relsXml);
+    try {
+      return await this.parseSlide(part, slideId, size);
+    } finally {
+      this.zip.remove(part);
+      this.zip.remove(relsPath);
+    }
+  }
+
   /** Forget the opened package (a non-PPTX document replaced it). */
   public discardPackage(): void {
     this.zip = null;
@@ -1378,10 +1402,10 @@ export class PptxParser {
         placeholderContext?.slidePart,
         this.makeSource(isTemplate, cNvPr?.getAttribute("id"), transform)
       );
-      if (rotation) {
-        for (const element of elements.slice(firstTextElement)) {
-          if (element.type === "text") element.rotation = rotation;
-        }
+      for (const element of elements.slice(firstTextElement)) {
+        if (element.type !== "text") continue;
+        if (rotation) element.rotation = rotation;
+        if (ph && !isTemplate) element.placeholder = { type: ph.getAttribute("type") || "body" };
       }
     }
   }

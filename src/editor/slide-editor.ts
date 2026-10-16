@@ -13,6 +13,7 @@ import {
 } from "./new-shapes";
 import { FormatState, FormatToolbar } from "./format-toolbar";
 import { SelectionProperties, describeSelection } from "./properties";
+import { placeholderPrompt } from "./slides";
 import {
   ShapeSnapshot,
   ShapeStyleOp,
@@ -412,6 +413,7 @@ export class SlideEditor {
   /** Groups double-clicked into, outermost first; their children are selectable. */
   private entered: string[] = [];
   private groupFrame: HTMLDivElement;
+  private hintLayer: HTMLDivElement;
   private tool: NewShapeKind | null = null;
   private drawBox: HTMLDivElement;
   private clipboard: ClipboardEntry[] = [];
@@ -432,6 +434,7 @@ export class SlideEditor {
     this.hoverBox = this.div("edit-hover");
     this.groupFrame = this.div("edit-group-frame");
     this.drawBox = this.div("edit-draw-box");
+    this.hintLayer = this.div("edit-hints");
     this.selectBox = this.div("edit-selection");
     this.marqueeBox = this.div("edit-marquee");
     this.badge = this.div("edit-badge");
@@ -445,7 +448,7 @@ export class SlideEditor {
     rotate.dataset.handle = "rotate";
     rotate.title = "旋转 (Shift 吸附 15°)";
     this.selectBox.appendChild(rotate);
-    this.layer.append(this.guideLayer, this.groupFrame, this.drawBox, this.hoverBox, this.selectBox, this.marqueeBox, this.badge);
+    this.layer.append(this.hintLayer, this.guideLayer, this.groupFrame, this.drawBox, this.hoverBox, this.selectBox, this.marqueeBox, this.badge);
     container.appendChild(this.layer);
     this.toolbar = new FormatToolbar(this.layer, format => this.applyFormat(format));
 
@@ -2222,6 +2225,7 @@ export class SlideEditor {
     const objects = this.objects(slide);
     const selected = objects.filter(object => this.selection.has(object.key));
     this.paintGroupFrame(slide);
+    this.paintPlaceholderHints(slide);
 
     const hovered = this.hoverKey && !this.selection.has(this.hoverKey)
       ? objects.find(object => object.key === this.hoverKey) : undefined;
@@ -2246,6 +2250,30 @@ export class SlideEditor {
 
     this.paintGuides();
     this.updateToolbar();
+  }
+
+  /** Empty placeholders show their prompt, as in PowerPoint's editing view (never exported). */
+  private paintPlaceholderHints(slide: Slide): void {
+    const k = this.scale() || 1;
+    const editing = this.textSession?.element;
+    const hints = slide.elements
+      .filter((element): element is TextElement =>
+        element.type === "text" && !!element.placeholder && !!element.source && element !== editing
+        && element.content.trim() === "" && element.rect.w > 0 && element.rect.h > 0)
+      .map(element => {
+        const hint = this.div("edit-placeholder");
+        hint.textContent = placeholderPrompt(element.placeholder!.type);
+        Object.assign(hint.style, {
+          left: `${element.rect.x * k}px`,
+          top: `${element.rect.y * k}px`,
+          width: `${element.rect.w * k}px`,
+          height: `${element.rect.h * k}px`,
+          fontSize: `${Math.min(24, Math.max(11, element.rect.h * k * 0.3))}px`,
+          transform: element.rotation ? `rotate(${element.rotation}deg)` : ""
+        });
+        return hint;
+      });
+    this.hintLayer.replaceChildren(...hints);
   }
 
   /** Faint outline around the group the user has stepped into. */

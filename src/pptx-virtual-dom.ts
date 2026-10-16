@@ -123,6 +123,8 @@ export interface TextElement {
   source?: ElementSource;
   /** Rotation of the owning shape in degrees; text turns with its shape. */
   rotation?: number;
+  /** Set when the shape is a layout placeholder (title, body ...). */
+  placeholder?: { type: string };
   rect: Rect;
   content: string;
   style: TextStyle;

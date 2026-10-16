@@ -12,7 +12,13 @@ import {
 import * as wasm from "../rust-engine/pkg/ppt_engine";
 import { EditorState, SlideEditor } from "./editor/slide-editor";
 import { Command } from "./editor/history";
-import { blankSlideXml, prepareSlideCopy, relationshipsXml } from "./editor/slides";
+import {
+  blankSlideXml,
+  layoutPlaceholders,
+  placeholderSlideXml,
+  prepareSlideCopy,
+  relationshipsXml
+} from "./editor/slides";
 import {
   DirtyShapes,
   TextEdits,
@@ -25,6 +31,7 @@ import {
   materializeShape,
   materializeSlide,
   readRelationships,
+  resolveTarget,
   popOp,
   popTextOp,
   pushOp,
@@ -799,21 +806,18 @@ export default class PptViewer {
     if (!layout) throw new Error("找不到这一页使用的版式。");
 
     const part = this.allocateSlidePart();
-    const xml = blankSlideXml();
+    // The new page gets the layout's title and text placeholders, empty, like PowerPoint's "New Slide".
+    const layoutPart = resolveTarget(reference.part.slice(0, reference.part.lastIndexOf("/")), layout.target);
+    const layoutXml = await zip.file(layoutPart)?.async("string");
+    const specs = layoutXml ? layoutPlaceholders(layoutXml) : [];
+    const xml = specs.length > 0 ? placeholderSlideXml(specs) : blankSlideXml();
+    const relsXml = relationshipsXml([{ ...layout, id: "rId1" }]);
+    const relsPath = `${part.slice(0, part.lastIndexOf("/"))}/_rels/${part.slice(part.lastIndexOf("/") + 1)}.rels`;
+
+    const slide = await this.parser.parseVirtualSlide(part, xml, relsXml, `slide_${++this.slideSerial}`, this.presentation!.size);
+    await this.ensurePresentationFonts({ ...this.presentation!, slides: [slide] });
     this.structureEdits.virtual.set(part, xml);
-    this.structureEdits.virtual.set(
-      `${part.slice(0, part.lastIndexOf("/"))}/_rels/${part.slice(part.lastIndexOf("/") + 1)}.rels`,
-      relationshipsXml([{ ...layout, id: "rId1" }])
-    );
-    const slide: Slide = {
-      id: `slide_${++this.slideSerial}`,
-      // Decoration from the master and layout comes along; shapes do not.
-      elements: this.cloneElements(reference.elements.filter(element => !element.source)),
-      rawXml: xml,
-      emuPerPx: reference.emuPerPx,
-      part,
-      xform: reference.xform
-    };
+    this.structureEdits.virtual.set(relsPath, relsXml);
     const after = [...slides];
     after.splice(index + 1, 0, slide);
     this.recordSlideChange("新建幻灯片", [...slides], this.currentSlideIndex, after, index + 1);
