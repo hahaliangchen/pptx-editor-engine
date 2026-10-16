@@ -2,6 +2,7 @@ import PptViewer from "./index";
 import { InspectorPanel } from "./editor/inspector-panel";
 import { InsertBar } from "./editor/insert-bar";
 import { Filmstrip } from "./filmstrip";
+import { HistoryPanel } from "./editor/history-panel";
 import { PptVirtualDocument } from "./pptx-parser";
 import "./style.css";
 
@@ -331,6 +332,28 @@ const initializeDemo = () => {
   const btnExport = document.getElementById("btn-export") as HTMLButtonElement;
   const selectionHint = document.getElementById("selection-hint") as HTMLElement;
   const zoomLevel = document.getElementById("zoom-level") as HTMLButtonElement;
+  const docTitle = document.getElementById("doc-title") as HTMLElement;
+  const docSubtitle = document.getElementById("doc-subtitle") as HTMLElement;
+  const defaultSubtitle = docSubtitle.textContent || "";
+  const historyPanel = new HistoryPanel(
+    document.getElementById("btn-history") as HTMLButtonElement,
+    (position) => viewer.jumpToHistory(position)
+  );
+
+  /** Header text and tab title say whether there is anything not yet exported. */
+  const showSaveStatus = (dirty: boolean) => {
+    const editable = viewer.canExport();
+    docSubtitle.textContent = !editable ? defaultSubtitle : dirty ? "有未导出的修改" : "没有未导出的修改";
+    docSubtitle.classList.toggle("is-dirty", editable && dirty);
+    document.title = `${editable && dirty ? "● " : ""}${editable ? openedFileName : "PPTX Editor Engine"}`;
+  };
+  window.addEventListener("beforeunload", (event) => {
+    if (!viewer.hasUnsavedEdits()) return;
+    event.preventDefault();
+    event.returnValue = "";
+  });
+  const confirmDiscard = (): boolean =>
+    !viewer.hasUnsavedEdits() || confirm("当前文稿有尚未导出的修改，确定放弃这些修改并打开新的文稿吗？");
   let openedFileName = "presentation.pptx";
   const imageUploader = document.getElementById("image-uploader") as HTMLInputElement | null;
   const insertRoot = document.getElementById("insert-bar");
@@ -379,6 +402,8 @@ const initializeDemo = () => {
         : `已选中 ${state.selectionCount} 个元素`;
       btnExport.disabled = !viewer.canExport();
       inspector?.update(state.properties, state.selectionCount);
+      historyPanel.update(state.history.entries, state.history.position);
+      showSaveStatus(state.dirty);
       insertBar?.update(state.tool, viewer.canExport());
     },
     onSlideEdited: async (index) => {
@@ -442,7 +467,12 @@ const initializeDemo = () => {
 
   // Load Demo triggers
   const loadDemo = () => {
-    viewer.loadVirtualDocument(mockPresentation).then(() => { btnExport.disabled = true; });
+    if (!confirmDiscard()) return;
+    viewer.loadVirtualDocument(mockPresentation).then(() => {
+      btnExport.disabled = true;
+      docTitle.textContent = "PPTX Editor Engine";
+      showSaveStatus(false);
+    });
   };
 
   const btnLoadDemo = document.getElementById("btn-load-demo");
@@ -483,6 +513,11 @@ const initializeDemo = () => {
       return;
     }
 
+    if (!confirmDiscard()) {
+      fileUploader.value = "";
+      return;
+    }
+
     const uploadControl = fileUploader.closest("label");
     fileUploader.disabled = true;
     uploadControl?.setAttribute("aria-busy", "true");
@@ -499,6 +534,8 @@ const initializeDemo = () => {
       if (presentation.slides.length === 0) {
         throw new Error("文件中没有解析到可显示的幻灯片。");
       }
+      docTitle.textContent = file.name;
+      showSaveStatus(false);
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
       console.error("Failed to load PPTX file:", err);

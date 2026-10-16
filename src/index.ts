@@ -123,7 +123,6 @@ export default class PptViewer {
   private zoomMode: "fit" | number = "fit";
   private zoomPercent = 100;
   private slideSerial = 0;
-  private originalSlideParts: Array<string | undefined> = [];
 
   // Callbacks
   private onSlideChange?: (slideIndex: number, slide: Slide) => void;
@@ -721,19 +720,23 @@ export default class PptViewer {
     return this.parser.getZip() !== null;
   }
 
+  /** True when the deck differs from the last export (or from how it was opened). */
   public hasUnsavedEdits(): boolean {
-    return this.dirtyShapes.size > 0 || this.textEdits.size > 0 || this.styleEdits.size > 0
-      || this.structureEdits.orders.size > 0 || this.structureEdits.inserts.size > 0
-      || this.structureEdits.media.length > 0
-      || (this.presentation?.slides || []).some((slide, index) => slide.part !== this.originalSlideParts[index])
-      || (this.presentation?.slides.length ?? 0) !== this.originalSlideParts.length;
+    return this.editor.isDirty();
+  }
+
+  /** Step back or forward through the edit history to the state after `position` steps. */
+  public jumpToHistory(position: number): void {
+    this.editor.jumpTo(position);
   }
 
   /** Build a new .pptx with every edit written back into the original package. */
   public async exportPptx(): Promise<Blob> {
     const zip = this.parser.getZip();
     if (!zip || !this.presentation) throw new Error("请先打开一个 .pptx 文件。");
-    return exportEditedPptx(zip, this.presentation.slides, this.dirtyShapes, this.textEdits, this.styleEdits, this.structureEdits);
+    const blob = await exportEditedPptx(zip, this.presentation.slides, this.dirtyShapes, this.textEdits, this.styleEdits, this.structureEdits);
+    this.editor.markSaved();
+    return blob;
   }
 
   // ------------------------------------------------------------ slide list
@@ -964,7 +967,6 @@ export default class PptViewer {
   }
 
   private resetEditing(): void {
-    this.originalSlideParts = (this.presentation?.slides || []).map(slide => slide.part);
     this.slideSerial = this.presentation?.slides.length ?? 0;
     this.dirtyShapes = new Map();
     this.textEdits = new Map();

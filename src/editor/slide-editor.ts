@@ -1,5 +1,5 @@
 import { ElementSource, GroupRef, Rect, ShapeElement, Slide, SlideElement, TextElement, TextParagraph } from "../pptx-virtual-dom";
-import { Command, History } from "./history";
+import { Command, History, HistoryEntry } from "./history";
 import { LINE_BREAK, TextFormat, TextOp, applyTextOp, diffText } from "./text-ops";
 import { reorderSiblings } from "./arrange";
 import { remapShapeXml, shapeIdsIn } from "./clone";
@@ -71,6 +71,10 @@ export interface EditorState {
   tool: NewShapeKind | null;
   /** Look of the selection, for the properties panel; null when nothing is selected. */
   properties: SelectionProperties | null;
+  /** True when the deck differs from what was last exported. */
+  dirty: boolean;
+  /** Every step made so far, and how many of them are currently applied. */
+  history: { entries: HistoryEntry[]; position: number };
 }
 
 interface SceneObject {
@@ -219,7 +223,14 @@ class DeleteCommand implements Command {
 }
 
 class ShapeStyleCommand implements Command {
-  public readonly label = "设置形状样式";
+  get label(): string {
+    if (this.op.kind === "fill") return "填充颜色";
+    if (this.op.kind === "line") {
+      if (this.op.color !== undefined) return "边框颜色";
+      return this.op.widthPt !== undefined ? "边框粗细" : "边框线型";
+    }
+    return "形状样式";
+  }
 
   constructor(
     private slide: Slide,
@@ -359,7 +370,11 @@ const cloneParagraphs = (paragraphs: TextParagraph[]): TextParagraph[] =>
   JSON.parse(JSON.stringify(paragraphs));
 
 class TextCommand implements Command {
-  public readonly label = "编辑文字";
+  get label(): string {
+    if (this.ops.some(op => op.format)) return "文字格式";
+    if (this.ops.some(op => op.paragraph)) return "段落对齐";
+    return "编辑文字";
+  }
 
   constructor(
     private slide: Slide,
@@ -478,6 +493,8 @@ export class SlideEditor {
       canRedo: this.history.canRedo,
       selectionCount: this.selection.size,
       tool: this.tool,
+      dirty: this.history.isDirty,
+      history: { entries: this.history.entries(), position: this.history.position },
       properties: this.describeProperties()
     };
   }
@@ -526,6 +543,22 @@ export class SlideEditor {
     this.history.clear();
     this.paintOverlay();
     this.emit();
+  }
+
+  /** The deck was exported: undoing back to here counts as "no unsaved changes". */
+  public markSaved(): void {
+    if (this.textSession) this.endTextEdit();
+    this.history.markSaved();
+  }
+
+  public isDirty(): boolean {
+    return this.history.isDirty;
+  }
+
+  /** Go back or forward through the history until `position` steps are applied. */
+  public jumpTo(position: number): void {
+    if (this.textSession) this.endTextEdit();
+    this.history.goTo(position);
   }
 
   public undo(): void {
@@ -797,10 +830,10 @@ export class SlideEditor {
     if (!slide) return;
     if (this.textSession) this.endTextEdit();
     const entries = await this.collect(slide);
-    if (entries.length > 0) await this.insert(slide, entries, 24);
+    if (entries.length > 0) await this.insert(slide, entries, 24, "创建副本");
   }
 
-  private async insert(slide: Slide, entries: ClipboardEntry[], offset: number): Promise<void> {
+  private async insert(slide: Slide, entries: ClipboardEntry[], offset: number, label = "粘贴"): Promise<void> {
     const part = slide.part;
     if (!part) return;
     const base = slide.xform || { scaleX: 1 / this.emuPerPx(slide), scaleY: 1 / this.emuPerPx(slide) };
@@ -868,7 +901,7 @@ export class SlideEditor {
     if (pasted.length === 0) return;
 
     this.entered = [];
-    const command = new PasteCommand(slide, part, pasted, this, this.host);
+    const command = new PasteCommand(slide, part, pasted, this, this.host, label);
     command.apply();
     this.history.record(command);
     this.selection = new Set(pasted.map(item => `${part}|${item.inserted.id}`));
