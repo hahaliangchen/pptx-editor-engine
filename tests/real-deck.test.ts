@@ -34,7 +34,11 @@ describe.skipIf(!hasDeck)("real deck roundtrip", () => {
     const target = slide.elements.find(element => element.source && element.type === "text")!;
     const moved = { x: target.rect.x + 100, y: target.rect.y + 50 };
     const original = { x: target.rect.x, y: target.rect.y };
-    target.rect = { ...target.rect, ...moved };
+    // An object is every element of the same shape (fill + text); the editor moves them together.
+    for (const member of slide.elements.filter(element =>
+      element.source?.part === target.source!.part && element.source.shapeId === target.source!.shapeId)) {
+      member.rect = { ...member.rect, x: member.rect.x + 100, y: member.rect.y + 50 };
+    }
 
     const dirty = new Map();
     markDirty(dirty, target.source);
