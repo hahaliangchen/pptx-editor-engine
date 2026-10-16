@@ -156,6 +156,9 @@ export default class PptViewer {
       structure: () => this.structureEdits,
       materialize: source => this.materializeSource(source),
       allocateShapeId: part => this.allocateShapeId(part),
+      deckFont: () => this.deckFont(),
+      allocateRelationshipId: part => this.allocateRelationshipId(part),
+      allocateMediaPath: extension => this.allocateMediaPath(extension),
       resolveRelationships: (target, source, relationships) => this.resolveRelationships(target, source, relationships),
       recordStyleOp: (source, op) => pushOp(this.styleEdits, source, op),
       discardStyleOp: source => popOp(this.styleEdits, source)
@@ -574,6 +577,38 @@ export default class PptViewer {
     this.editor.applyShapeStyle(op);
   }
 
+  public setTool(tool: Parameters<SlideEditor["setTool"]>[0]): void {
+    this.editor.setTool(tool);
+  }
+
+  /** Place a picture file on the current slide. */
+  public async insertImage(file: File): Promise<void> {
+    const types: Record<string, { extension: string; contentType: string }> = {
+      "image/png": { extension: "png", contentType: "image/png" },
+      "image/jpeg": { extension: "jpeg", contentType: "image/jpeg" },
+      "image/gif": { extension: "gif", contentType: "image/gif" }
+    };
+    const kind = types[file.type];
+    if (!kind) throw new Error("仅支持 PNG、JPEG、GIF 图片。");
+    const url = URL.createObjectURL(file);
+    const size = await new Promise<{ width: number; height: number }>((resolve, reject) => {
+      const probe = new Image();
+      probe.onload = () => resolve({ width: probe.naturalWidth, height: probe.naturalHeight });
+      probe.onerror = () => reject(new Error("无法读取这张图片。"));
+      probe.src = url;
+    });
+    // Pixels become slide units at 96 dpi: 1 px = 9525 EMU.
+    const emuPerPx = this.presentation?.slides[0]?.emuPerPx || 6350;
+    await this.editor.insertImage({
+      bytes: new Uint8Array(await file.arrayBuffer()),
+      ...kind,
+      url,
+      width: (size.width * 9525) / emuPerPx,
+      height: (size.height * 9525) / emuPerPx,
+      name: file.name
+    });
+  }
+
   public arrange(mode: Parameters<SlideEditor["arrange"]>[0]): void {
     this.editor.arrange(mode);
   }
@@ -609,7 +644,8 @@ export default class PptViewer {
 
   public hasUnsavedEdits(): boolean {
     return this.dirtyShapes.size > 0 || this.textEdits.size > 0 || this.styleEdits.size > 0
-      || this.structureEdits.orders.size > 0 || this.structureEdits.inserts.size > 0;
+      || this.structureEdits.orders.size > 0 || this.structureEdits.inserts.size > 0
+      || this.structureEdits.media.length > 0;
   }
 
   /** Build a new .pptx with every edit written back into the original package. */
@@ -643,6 +679,42 @@ export default class PptViewer {
     counter += 1;
     this.shapeIdCounters.set(part, counter);
     return String(counter);
+  }
+
+  /** Body font of the deck, taken from the first text that has one. */
+  private deckFont(): { fontFamily?: string; eastAsianFontFamily?: string } {
+    for (const slide of this.presentation?.slides || []) {
+      for (const element of slide.elements) {
+        if (element.type !== "text" || !element.content.trim()) continue;
+        const { fontFamily, eastAsianFontFamily } = element.style;
+        return {
+          ...(fontFamily && fontFamily !== "sans-serif" ? { fontFamily } : {}),
+          ...(eastAsianFontFamily ? { eastAsianFontFamily } : {})
+        };
+      }
+    }
+    return {};
+  }
+
+  private async allocateRelationshipId(part: string): Promise<string> {
+    const zip = this.parser.getZip();
+    const existing = zip ? await readRelationships(zip, part, this.structureEdits.relAdds.get(part)) : new Map();
+    let counter = 0;
+    for (const id of existing.keys()) counter = Math.max(counter, parseInt(String(id).replace(/\D/g, ""), 10) || 0);
+    return `rId${counter + 1}`;
+  }
+
+  private allocateMediaPath(extension: string): string {
+    const taken = [
+      ...Object.keys(this.parser.getZip()?.files || {}),
+      ...this.structureEdits.media.map(item => item.path)
+    ];
+    let highest = 0;
+    for (const path of taken) {
+      const match = path.match(/^ppt\/media\/image(\d+)\./i);
+      if (match) highest = Math.max(highest, parseInt(match[1], 10));
+    }
+    return `ppt/media/image${highest + 1}.${extension}`;
   }
 
   /** Relationship ids for pasted shapes: reuse what the target slide has, add what it lacks. */

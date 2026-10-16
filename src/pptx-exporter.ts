@@ -173,17 +173,27 @@ export interface RelAdd {
   targetMode?: string;
 }
 
+/** A picture file added to the package. */
+export interface MediaAdd {
+  path: string;
+  bytes: Uint8Array;
+  extension: string;
+  contentType: string;
+}
+
 /** Changes to the shape tree itself, kept as per-slide lists in the order they happened. */
 export interface StructureEdits {
   orders: Map<string, Array<{ shapeId: string; op: OrderOp }>>;
   inserts: Map<string, InsertedShape[]>;
   relAdds: Map<string, RelAdd[]>;
+  media: MediaAdd[];
 }
 
 export const emptyStructure = (): StructureEdits => ({
   orders: new Map(),
   inserts: new Map(),
-  relAdds: new Map()
+  relAdds: new Map(),
+  media: []
 });
 
 export function pushItem<T>(log: Map<string, T[]>, part: string, item: T): void {
@@ -372,6 +382,42 @@ export async function materializeShape(
   return { xml: new XMLSerializer().serializeToString(node), relationships };
 }
 
+const CONTENT_TYPES = "[Content_Types].xml";
+const CT_NS = "http://schemas.openxmlformats.org/package/2006/content-types";
+
+/** Add picture files and make sure the package declares their file types. */
+async function writeMedia(
+  zip: JSZip,
+  media: MediaAdd[],
+  originals: Map<string, string>,
+  addedFiles: string[]
+): Promise<void> {
+  for (const item of media) {
+    zip.file(item.path, item.bytes);
+    addedFiles.push(item.path);
+  }
+  const loaded = await readDocument(zip, CONTENT_TYPES);
+  if (!loaded) return;
+  const root = loaded.doc.documentElement;
+  const declared = new Set(
+    Array.from(root.getElementsByTagNameNS(CT_NS, "Default")).map(node => (node.getAttribute("Extension") || "").toLowerCase())
+  );
+  let changed = false;
+  for (const item of media) {
+    if (declared.has(item.extension.toLowerCase())) continue;
+    const node = loaded.doc.createElementNS(CT_NS, "Default");
+    node.setAttribute("Extension", item.extension);
+    node.setAttribute("ContentType", item.contentType);
+    root.insertBefore(node, root.firstChild);
+    declared.add(item.extension.toLowerCase());
+    changed = true;
+  }
+  if (changed) {
+    originals.set(CONTENT_TYPES, loaded.xml);
+    zip.file(CONTENT_TYPES, new XMLSerializer().serializeToString(loaded.doc));
+  }
+}
+
 async function writeRelationships(zip: JSZip, part: string, adds: RelAdd[], originals: Map<string, string>): Promise<void> {
   const path = relsPathOf(part);
   const loaded = await readDocument(zip, path);
@@ -408,6 +454,7 @@ export async function exportEditedPptx(
   // Edited parts are put back once the archive is built, so a later export
   // (after an undo, say) starts again from the original package.
   const originals = new Map<string, string>();
+  const addedFiles: string[] = [];
 
   try {
     const parts = new Set([
@@ -430,6 +477,8 @@ export async function exportEditedPptx(
       if (adds && adds.length > 0) await writeRelationships(zip, part, adds, originals);
     }
 
+    if (structure.media.length > 0) await writeMedia(zip, structure.media, originals, addedFiles);
+
     return await zip.generateAsync({
       type: "blob",
       mimeType: PPTX_MIME,
@@ -437,5 +486,6 @@ export async function exportEditedPptx(
     });
   } finally {
     for (const [path, xml] of originals) zip.file(path, xml);
+    for (const path of addedFiles) zip.remove(path);
   }
 }

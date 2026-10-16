@@ -347,7 +347,7 @@ label {
   flex: 1;
   width: 100%;
   min-height: 0;
-  padding: 28px;
+  padding: 64px 28px 28px;
 }
 
 .canvas-container {
@@ -1302,4 +1302,84 @@ label {
   height: 1px;
   margin: 5px 8px;
   background: rgba(60, 60, 67, 0.12);
+}
+
+/* ---------- Insert bar ---------- */
+
+.insert-bar {
+  position: absolute;
+  top: 14px;
+  left: 50%;
+  z-index: 8;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 4px;
+  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid var(--hairline);
+  border-radius: 12px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.1);
+  backdrop-filter: blur(18px);
+  transform: translateX(-50%);
+  transition: opacity 140ms ease;
+}
+
+.insert-bar.is-disabled {
+  opacity: 0.45;
+  pointer-events: none;
+}
+
+.insert-tool {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 30px;
+  padding: 0;
+  color: #1d1d1f;
+  background: transparent;
+  border: 0;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background-color 100ms ease, color 100ms ease;
+}
+
+.insert-tool svg {
+  width: 18px;
+  height: 18px;
+}
+
+.insert-tool:hover {
+  background: rgba(0, 0, 0, 0.07);
+}
+
+.insert-tool.is-active {
+  color: #ffffff;
+  background: var(--accent);
+}
+
+.insert-divider {
+  width: 1px;
+  height: 18px;
+  margin: 0 4px;
+  background: #d2d2d7;
+}
+
+.canvas-container.is-drawing,
+.canvas-container.is-drawing * {
+  cursor: crosshair;
+}
+
+.edit-draw-box {
+  position: absolute;
+  display: none;
+  pointer-events: none;
+  background: color-mix(in srgb, var(--edit-accent) 12%, transparent);
+  border: 1.5px solid var(--edit-accent);
+}
+
+@media (max-width: 900px) {
+  .insert-bar {
+    display: none;
+  }
 }

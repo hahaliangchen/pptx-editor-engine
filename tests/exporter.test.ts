@@ -229,6 +229,26 @@ describe("exportEditedPptx", () => {
   });
 });
 
+describe("pictures added to the package", () => {
+  it("writes the file, declares its type once, and removes both again afterwards", async () => {
+    const zip = await makeZip();
+    zip.file("[Content_Types].xml", `<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/></Types>`);
+    const structure = emptyStructure();
+    structure.media.push({ path: "ppt/media/image9.png", bytes: new Uint8Array([9, 9, 9]), extension: "png", contentType: "image/png" });
+    structure.media.push({ path: "ppt/media/image10.png", bytes: new Uint8Array([8]), extension: "png", contentType: "image/png" });
+    const blob = await exportEditedPptx(zip, [], new Map(), new Map(), new Map(), structure);
+    const out = await JSZip.loadAsync(await toBuffer(blob));
+    expect(Array.from(await out.file("ppt/media/image9.png")!.async("uint8array"))).toEqual([9, 9, 9]);
+    expect(Array.from(await out.file("ppt/media/image10.png")!.async("uint8array"))).toEqual([8]);
+    const types = await out.file("[Content_Types].xml")!.async("string");
+    expect(types.match(/Extension="png"/g)).toHaveLength(1);
+    expect(types).toContain('ContentType="image/png"');
+    // the live package is untouched
+    expect(zip.file("ppt/media/image9.png")).toBeNull();
+    expect(await zip.file("[Content_Types].xml")!.async("string")).not.toContain("png");
+  });
+});
+
 function pushTextOpTo(edits: { textEdits: Map<string, Map<string, unknown[]>> }, shapeId: string) {
   pushTextOp(edits.textEdits as never, { part: PART, shapeId, xform }, { start: 5, end: 5, insert: "!" });
 }

@@ -1,5 +1,6 @@
 import PptViewer from "./index";
 import { InspectorPanel } from "./editor/inspector-panel";
+import { InsertBar } from "./editor/insert-bar";
 import { PptVirtualDocument } from "./pptx-parser";
 import "./style.css";
 
@@ -329,6 +330,27 @@ const initializeDemo = () => {
   const btnExport = document.getElementById("btn-export") as HTMLButtonElement;
   const selectionHint = document.getElementById("selection-hint") as HTMLElement;
   let openedFileName = "presentation.pptx";
+  const imageUploader = document.getElementById("image-uploader") as HTMLInputElement | null;
+  const insertRoot = document.getElementById("insert-bar");
+  const insertBar = insertRoot
+    ? new InsertBar(insertRoot, {
+      onTool: kind => viewer.setTool(kind),
+      onImage: () => imageUploader?.click()
+    })
+    : null;
+  if (imageUploader) {
+    imageUploader.addEventListener("change", async () => {
+      const file = imageUploader.files?.[0];
+      imageUploader.value = "";
+      if (!file) return;
+      try {
+        await viewer.insertImage(file);
+      } catch (err: unknown) {
+        alert(err instanceof Error ? err.message : String(err));
+      }
+    });
+  }
+  insertBar?.update(null, false);
   const inspectorRoot = document.getElementById("inspector");
   const inspector = inspectorRoot
     ? new InspectorPanel(inspectorRoot, {
@@ -353,6 +375,7 @@ const initializeDemo = () => {
         : `已选中 ${state.selectionCount} 个元素`;
       btnExport.disabled = !viewer.canExport();
       inspector?.update(state.properties, state.selectionCount);
+      insertBar?.update(state.tool, viewer.canExport());
     },
     onSlideEdited: async (index) => {
       try {

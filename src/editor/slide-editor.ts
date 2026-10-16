@@ -3,7 +3,14 @@ import { Command, History } from "./history";
 import { LINE_BREAK, TextFormat, TextOp, applyTextOp, diffText } from "./text-ops";
 import { reorderSiblings } from "./arrange";
 import { remapShapeXml, shapeIdsIn } from "./clone";
-import { InsertedShape, OrderOp, RelAdd, StructureEdits, popItem, pushItem } from "../pptx-exporter";
+import { InsertedShape, MediaAdd, OrderOp, RelAdd, StructureEdits, popItem, pushItem } from "../pptx-exporter";
+import {
+  NewShapeKind,
+  buildPictureXml,
+  buildShapeElements,
+  buildShapeXml,
+  isLine
+} from "./new-shapes";
 import { FormatState, FormatToolbar } from "./format-toolbar";
 import { SelectionProperties, describeSelection } from "./properties";
 import {
@@ -43,6 +50,10 @@ export interface EditorHost {
   /** The XML a shape has right now (edits applied), for copying. */
   materialize(source: ElementSource): Promise<{ xml: string; relationships: RelAdd[] } | null>;
   allocateShapeId(part: string): string;
+  /** Font the deck uses for body text, so new text looks like the rest. */
+  deckFont(): { fontFamily?: string; eastAsianFontFamily?: string };
+  allocateRelationshipId(part: string): Promise<string>;
+  allocateMediaPath(extension: string): string;
   /** Relationship ids to use in `targetPart` for relationships that belong to `sourcePart`. */
   resolveRelationships(
     targetPart: string,
@@ -55,6 +66,8 @@ export interface EditorState {
   canUndo: boolean;
   canRedo: boolean;
   selectionCount: number;
+  /** Shape being drawn with the pointer, if a tool is armed. */
+  tool: NewShapeKind | null;
   /** Look of the selection, for the properties panel; null when nothing is selected. */
   properties: SelectionProperties | null;
 }
@@ -87,7 +100,8 @@ type Drag =
   | { kind: "move"; slide: Slide; start: Point; items: DragItem[]; bbox: Rect; keys: Set<string>; active: boolean; collapseTo: string | null }
   | { kind: "resize"; slide: Slide; start: Point; items: DragItem[]; bbox: Rect; handle: HandleId; lockRatio: boolean; rotation: number }
   | { kind: "rotate"; slide: Slide; items: Array<{ element: SlideElement; before: number; owner: ElementSource }>; center: Point; startAngle: number; base: number }
-  | { kind: "marquee"; slide: Slide; start: Point; base: Set<string> };
+  | { kind: "marquee"; slide: Slide; start: Point; base: Set<string> }
+  | { kind: "draw"; slide: Slide; start: Point; shape: NewShapeKind; end: Point; constrain: boolean };
 
 interface Point {
   x: number;
@@ -290,17 +304,17 @@ interface PastedObject {
   inserted: InsertedShape;
   adds: RelAdd[];
   owner: ElementSource;
+  media?: MediaAdd;
 }
 
 class PasteCommand implements Command {
-  public readonly label = "粘贴";
-
   constructor(
     private slide: Slide,
     private part: string,
     private pasted: PastedObject[],
     private editor: SlideEditor,
-    private host: EditorHost
+    private host: EditorHost,
+    public readonly label = "粘贴"
   ) {}
 
   apply(): void {
@@ -308,6 +322,7 @@ class PasteCommand implements Command {
     for (const item of this.pasted) {
       this.slide.elements.push(...item.elements);
       for (const add of item.adds) pushItem(structure.relAdds, this.part, add);
+      if (item.media) structure.media.push(item.media);
       pushItem(structure.inserts, this.part, item.inserted);
     }
     this.editor.afterCommand(this.slide, this.pasted.map(item => item.owner));
@@ -319,6 +334,7 @@ class PasteCommand implements Command {
     this.slide.elements = this.slide.elements.filter(element => !gone.has(element));
     for (const item of [...this.pasted].reverse()) {
       popItem(structure.inserts, this.part);
+      if (item.media) structure.media.pop();
       for (const _ of item.adds) popItem(structure.relAdds, this.part);
     }
     this.editor.afterCommand(this.slide, [], false);
@@ -396,6 +412,8 @@ export class SlideEditor {
   /** Groups double-clicked into, outermost first; their children are selectable. */
   private entered: string[] = [];
   private groupFrame: HTMLDivElement;
+  private tool: NewShapeKind | null = null;
+  private drawBox: HTMLDivElement;
   private clipboard: ClipboardEntry[] = [];
   private pasteCount = 0;
   private menu: HTMLDivElement | null = null;
@@ -413,6 +431,7 @@ export class SlideEditor {
     this.guideLayer = this.div("edit-guides");
     this.hoverBox = this.div("edit-hover");
     this.groupFrame = this.div("edit-group-frame");
+    this.drawBox = this.div("edit-draw-box");
     this.selectBox = this.div("edit-selection");
     this.marqueeBox = this.div("edit-marquee");
     this.badge = this.div("edit-badge");
@@ -426,7 +445,7 @@ export class SlideEditor {
     rotate.dataset.handle = "rotate";
     rotate.title = "旋转 (Shift 吸附 15°)";
     this.selectBox.appendChild(rotate);
-    this.layer.append(this.guideLayer, this.groupFrame, this.hoverBox, this.selectBox, this.marqueeBox, this.badge);
+    this.layer.append(this.guideLayer, this.groupFrame, this.drawBox, this.hoverBox, this.selectBox, this.marqueeBox, this.badge);
     container.appendChild(this.layer);
     this.toolbar = new FormatToolbar(this.layer, format => this.applyFormat(format));
 
@@ -455,6 +474,7 @@ export class SlideEditor {
       canUndo: this.history.canUndo,
       canRedo: this.history.canRedo,
       selectionCount: this.selection.size,
+      tool: this.tool,
       properties: this.describeProperties()
     };
   }
@@ -776,6 +796,176 @@ export class SlideEditor {
     this.emit();
   }
 
+  // ------------------------------------------------------------ inserting
+
+  /** Arm (or disarm) a drawing tool; the next drag on the slide creates the shape. */
+  public setTool(tool: NewShapeKind | null): void {
+    if (this.tool === tool) return;
+    this.tool = tool;
+    if (tool && this.textSession) this.endTextEdit();
+    this.host.container.classList.toggle("is-drawing", tool !== null);
+    this.setHover(null);
+    this.emit();
+  }
+
+  private applyDraw(drag: Extract<Drag, { kind: "draw" }>, point: Point, event: PointerEvent): void {
+    drag.end = point;
+    drag.constrain = event.shiftKey;
+    const rect = this.drawRect(drag);
+    const k = this.scale() || 1;
+    Object.assign(this.drawBox.style, {
+      display: "block",
+      left: `${rect.x * k}px`,
+      top: `${rect.y * k}px`,
+      width: `${rect.w * k}px`,
+      height: `${rect.h * k}px`
+    });
+    this.showBadge(drag.slide, rect, `${this.cm(drag.slide, rect.w)} × ${this.cm(drag.slide, rect.h)} cm`);
+  }
+
+  private drawRect(drag: Extract<Drag, { kind: "draw" }>): Rect {
+    const size = this.host.getSlideSize();
+    let dx = drag.end.x - drag.start.x;
+    let dy = drag.end.y - drag.start.y;
+    if (drag.constrain) {
+      if (isLine(drag.shape)) {
+        // Lines snap to 45 degree steps.
+        const length = Math.hypot(dx, dy);
+        const angle = Math.round(Math.atan2(dy, dx) / (Math.PI / 4)) * (Math.PI / 4);
+        dx = Math.cos(angle) * length;
+        dy = Math.sin(angle) * length;
+      } else {
+        const side = Math.max(Math.abs(dx), Math.abs(dy));
+        dx = Math.sign(dx || 1) * side;
+        dy = Math.sign(dy || 1) * side;
+      }
+    }
+    let x2 = drag.start.x + dx;
+    let y2 = drag.start.y + dy;
+    if (size) {
+      x2 = Math.min(Math.max(x2, 0), size.width);
+      y2 = Math.min(Math.max(y2, 0), size.height);
+    }
+    return {
+      x: Math.min(drag.start.x, x2),
+      y: Math.min(drag.start.y, y2),
+      w: Math.abs(x2 - drag.start.x),
+      h: Math.abs(y2 - drag.start.y)
+    };
+  }
+
+  private finishDraw(drag: Extract<Drag, { kind: "draw" }>): void {
+    const size = this.host.getSlideSize();
+    let rect = this.drawRect(drag);
+    let flipH = drag.end.x < drag.start.x;
+    let flipV = drag.end.y < drag.start.y;
+    if (drag.constrain && isLine(drag.shape)) {
+      flipH = drag.end.x < drag.start.x;
+      flipV = drag.end.y < drag.start.y;
+    }
+
+    // A plain click drops a default-sized shape centred on the pointer.
+    const dragged = Math.hypot(drag.end.x - drag.start.x, drag.end.y - drag.start.y) * (this.scale() || 1) >= 6;
+    if (!dragged) {
+      const defaults = drag.shape === "textbox" ? { w: 320, h: 64 } : isLine(drag.shape) ? { w: 300, h: 0 } : { w: 240, h: 160 };
+      rect = { x: drag.start.x - defaults.w / 2, y: drag.start.y - defaults.h / 2, ...defaults };
+      flipH = false;
+      flipV = false;
+    }
+    if (size) {
+      rect.x = Math.min(Math.max(rect.x, 0), Math.max(0, size.width - rect.w));
+      rect.y = Math.min(Math.max(rect.y, 0), Math.max(0, size.height - rect.h));
+    }
+    this.insertShape(drag.slide, drag.shape, rect, { flipH, flipV });
+  }
+
+  private insertShape(slide: Slide, kind: NewShapeKind, rect: Rect, flip: { flipH: boolean; flipV: boolean }): void {
+    const part = slide.part;
+    this.setTool(null);
+    if (!part) return;
+    const id = this.host.allocateShapeId(part);
+    const base = this.slideTransform(slide);
+    const source: ElementSource = { part, shapeId: id, xform: base };
+    const font = this.host.deckFont();
+    const elements = buildShapeElements(kind, source, rect, { emuPerPx: this.emuPerPx(slide), ...font }, flip);
+    const xml = buildShapeXml(kind, id, {
+      x: Math.round(rect.x / base.scaleX),
+      y: Math.round(rect.y / base.scaleY),
+      cx: Math.round(rect.w / base.scaleX),
+      cy: Math.round(rect.h / base.scaleY),
+      ...flip
+    });
+    this.commitInserted(slide, part, [{ elements, inserted: { id, xml }, adds: [], owner: source }], "插入形状");
+
+    // A new text box is for typing: go straight into it.
+    const text = elements.find((element): element is TextElement => element.type === "text");
+    if (kind === "textbox" && text) this.startTextEdit(slide, text);
+  }
+
+  /** Add a picture file to the deck and place it on the slide. */
+  public async insertImage(image: {
+    bytes: Uint8Array;
+    extension: string;
+    contentType: string;
+    url: string;
+    width: number;
+    height: number;
+    name: string;
+  }): Promise<void> {
+    const slide = this.host.getSlide();
+    const size = this.host.getSlideSize();
+    const part = slide?.part;
+    if (!slide || !size || !part) return;
+    if (this.textSession) this.endTextEdit();
+    this.setTool(null);
+
+    const id = this.host.allocateShapeId(part);
+    const relId = await this.host.allocateRelationshipId(part);
+    const path = this.host.allocateMediaPath(image.extension);
+    const base = this.slideTransform(slide);
+
+    // Fit inside 60% of the slide, keep the picture's proportions, centre it.
+    const fit = Math.min(1, (size.width * 0.6) / image.width, (size.height * 0.6) / image.height);
+    const w = image.width * fit;
+    const h = image.height * fit;
+    const rect = { x: (size.width - w) / 2, y: (size.height - h) / 2, w, h };
+
+    const source: ElementSource = { part, shapeId: id, xform: base };
+    const element: SlideElement = { type: "image", id: `img_${id}`, source, rect, url: image.url };
+    const xml = buildPictureXml(id, image.name, relId, {
+      x: Math.round(rect.x / base.scaleX),
+      y: Math.round(rect.y / base.scaleY),
+      cx: Math.round(rect.w / base.scaleX),
+      cy: Math.round(rect.h / base.scaleY)
+    });
+    this.commitInserted(slide, part, [{
+      elements: [element],
+      inserted: { id, xml },
+      adds: [{
+        id: relId,
+        type: "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image",
+        target: `../media/${path.split("/").pop()}`
+      }],
+      owner: source,
+      media: { path, bytes: image.bytes, extension: image.extension, contentType: image.contentType }
+    }], "插入图片");
+  }
+
+  private slideTransform(slide: Slide): ElementSource["xform"] {
+    const scale = 1 / this.emuPerPx(slide);
+    return { scaleX: slide.xform?.scaleX ?? scale, scaleY: slide.xform?.scaleY ?? scale, offsetX: 0, offsetY: 0 };
+  }
+
+  private commitInserted(slide: Slide, part: string, pasted: PastedObject[], label: string): void {
+    this.entered = [];
+    const command = new PasteCommand(slide, part, pasted, this, this.host, label);
+    command.apply();
+    this.history.record(command);
+    this.selection = new Set(pasted.map(item => `${part}|${item.inserted.id}`));
+    this.paintOverlay();
+    this.emit();
+  }
+
   // ------------------------------------------------------------ context menu
 
   private openMenu(event: MouseEvent): void {
@@ -1039,6 +1229,12 @@ export class SlideEditor {
     if (!slide) return;
     event.preventDefault();
     const point = this.point(event);
+
+    if (this.tool) {
+      this.drag = { kind: "draw", slide, start: point, end: point, shape: this.tool, constrain: event.shiftKey };
+      this.host.container.setPointerCapture(event.pointerId);
+      return;
+    }
     const handle = (event.target as HTMLElement).closest<HTMLElement>("[data-handle]")?.dataset.handle as HandleId | "rotate" | undefined;
     const selected = this.selectedObjects(slide);
 
@@ -1127,6 +1323,7 @@ export class SlideEditor {
     if (drag.kind === "move") this.applyMove(drag, point, event);
     else if (drag.kind === "resize") this.applyResize(drag, point, event);
     else if (drag.kind === "rotate") this.applyRotate(drag, point, event);
+    else if (drag.kind === "draw") this.applyDraw(drag, point, event);
     else this.applyMarquee(drag, point);
   }
 
@@ -1140,6 +1337,12 @@ export class SlideEditor {
       this.host.container.releasePointerCapture(event.pointerId);
     }
 
+    if (drag.kind === "draw") {
+      this.drawBox.style.display = "none";
+      this.badge.style.display = "none";
+      this.finishDraw(drag);
+      return;
+    }
     if (drag.kind === "marquee") {
       this.marqueeBox.style.display = "none";
     } else if (drag.kind === "rotate") {
@@ -1212,7 +1415,8 @@ export class SlideEditor {
       event.preventDefault();
       this.toggleStyle(key === "b" ? "bold" : "italic");
     } else if (key === "escape") {
-      this.clearSelection();
+      if (this.tool) this.setTool(null);
+      else this.clearSelection();
     } else if (key.startsWith("arrow") && this.selection.size > 0 && !mod) {
       event.preventDefault();
       const step = event.shiftKey ? 10 : 1;
