@@ -15,8 +15,24 @@
 | 步骤 | 内容 | 状态 |
 |---|---|---|
 | A1 | 无头渲染：`HeadlessRenderer.renderSlide(doc, index, {width})` → PNG。同一份 Rust 渲染代码，Skia canvas 代替浏览器 canvas | **完成** |
-| A2 | 抽出不依赖 DOM 的文档核心：解析、改动记录、页面管理（新建/复制/删除/移动、版式）、插图、导出、`EditApi`，现在这些写在 `PptViewer` 里，与画布和 DOM 绑定。抽出后浏览器视图和 Node 共用同一份逻辑 | 下一步 |
-| A3 | `HeadlessSession`：`open(buffer)` → `outline()` / `apply()` → `render(page)` → `export()`；附命令行，便于调试和回归 | A2 之后 |
+| A2 | 抽出 `DocumentSession`（`src/document-session.ts`）：解析、改动记录、页面管理（新建/复制/删除/移动、版式）、插图、导出、`EditApi`。显示相关的事通过 `SessionView` 回调交给视图，浏览器的 `PptViewer` 与 Node 共用同一份逻辑。`SlideEditor` 仍带 DOM 覆盖层，Node 里运行在 jsdom 上 | **完成** |
+| A3 | `HeadlessSession`（`src/headless/session.ts`）：`open(buffer)` → `outline()` / `apply()` → `render(page)` → `export()`；命令行 `npm run headless` | **完成** |
+
+A3 的使用方式（需要先 `npm run build:wasm:node`）：
+
+```ts
+const session = await HeadlessSession.open(readFileSync("deck.pptx"));
+await session.apply([{ op: "addSlide", after: 1, layout: "空白" }, ...]);
+writeFileSync("page2.png", await session.render(2));
+writeFileSync("out.pptx", await session.export());
+session.dispose();
+```
+
+```sh
+npm run headless -- outline deck.pptx [页码]
+npm run headless -- render  deck.pptx 2 page2.png [宽度]
+npm run headless -- apply   deck.pptx commands.json out.pptx --render 输出目录
+```
 
 A1 的使用方式：
 
@@ -56,4 +72,4 @@ const png = await renderer.renderSlide(doc, 0, { width: 1280 });
 - **字体度量差异**：服务器上多半没有微软雅黑、Aptos，回退到 Noto / Liberation 后字宽不同，Agent 在渲染图里看不到的
   溢出，可能出现在用户的 PowerPoint 里。对策：服务器装度量兼容的字体，排版留余量，并在工具说明里提示。
 - **渲染与 PowerPoint 的像素差异**始终存在，靠 Open XML 校验保证文件合法，靠渲染保证大体正确，不承诺逐像素一致。
-- A2 的重构动到现有编辑器的核心，必须靠现有测试和浏览器回归兜底，分小步提交。
+- 每个 `HeadlessSession` 在 jsdom 全局上挂一个编辑器，用完要 `dispose()`；jsdom 的启动和内存开销在服务端需要留意，高并发时应复用进程内的会话而不是每次请求新开。

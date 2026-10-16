@@ -117,6 +117,11 @@ export class DocumentSession {
     });
   }
 
+  /** Release the editor's hold on the page. The session is unusable afterwards. */
+  public dispose(): void {
+    this.editor.dispose();
+  }
+
   // ------------------------------------------------------------------ open
 
   public get presentation(): PptVirtualDocument | null {

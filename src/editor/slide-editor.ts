@@ -484,11 +484,23 @@ export class SlideEditor {
     container.addEventListener("pointerleave", () => this.setHover(null));
     container.addEventListener("dblclick", e => this.onDoubleClick(e));
     container.addEventListener("contextmenu", e => this.openMenu(e));
-    document.addEventListener("keydown", e => this.onKeyDown(e));
-    document.addEventListener("selectionchange", () => {
-      if (this.textSession) this.updateToolbar();
-    });
+    document.addEventListener("keydown", this.onDocumentKeyDown);
+    document.addEventListener("selectionchange", this.onDocumentSelectionChange);
     this.history.subscribe(() => this.emit());
+  }
+
+  private onDocumentKeyDown = (e: KeyboardEvent) => this.onKeyDown(e);
+
+  private onDocumentSelectionChange = () => {
+    if (this.textSession) this.updateToolbar();
+  };
+
+  /** Detach from the page: remove the overlay and the document-level listeners. */
+  public dispose(): void {
+    document.removeEventListener("keydown", this.onDocumentKeyDown);
+    document.removeEventListener("selectionchange", this.onDocumentSelectionChange);
+    this.layer.remove();
+    this.listeners.clear();
   }
 
   // ---------------------------------------------------------------- public
