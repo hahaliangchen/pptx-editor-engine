@@ -18,6 +18,7 @@
     "validate:pptx": "tools/validate-pptx/check.sh"
   },
   "dependencies": {
+    "ajv": "^8.20.0",
     "jszip": "^3.10.1"
   },
   "devDependencies": {

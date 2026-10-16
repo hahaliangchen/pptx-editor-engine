@@ -14,6 +14,8 @@ export interface Rect {
 export interface GroupRef {
   /** p:cNvPr@id of the p:grpSp. */
   shapeId: string;
+  /** p:cNvPr@name of the group, as shown in PowerPoint's selection pane. */
+  name?: string;
   /** Transform of the space the group itself is placed in (its parent's). */
   xform: { scaleX: number; scaleY: number; offsetX: number; offsetY: number };
   /** Bounding box of the members when the deck was opened, in logical px. */
@@ -25,6 +27,8 @@ export interface ElementSource {
   part: string;
   /** p:cNvPr@id of the owning shape/picture. */
   shapeId: string;
+  /** p:cNvPr@name, as shown in PowerPoint's selection pane. */
+  name?: string;
   /** Logical px = offset + EMU * scale; used to convert edits back to EMU. */
   xform: { scaleX: number; scaleY: number; offsetX: number; offsetY: number };
   /** Table cells share the table's source; their text is not editable yet. */
@@ -343,6 +347,8 @@ export interface Slide {
   emuPerPx?: number;
   /** Package part this slide was read from. */
   part?: string;
+  /** Name of the layout the slide uses (p:cSld@name of the layout). */
+  layout?: string;
   /** Slide-level EMU to logical-px scale, for shapes placed directly on the slide. */
   xform?: { scaleX: number; scaleY: number };
 }

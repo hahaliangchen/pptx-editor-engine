@@ -49,6 +49,19 @@ describe("applyTextOp on the virtual DOM", () => {
     expect(paragraphs[0].runs.map(r => [r.content, r.style.bold])).toEqual([["HelXYlo ", true], ["world", false]]);
   });
 
+  it("replacing text keeps the formatting of the text it replaces", () => {
+    const paragraphs = [para(["Hello ", { bold: true, color: "#ff0000" }], ["world"])];
+    applyTextOp(vdomTextModel(paragraphs, 6350), { start: 0, end: 5, insert: "Howdy" });
+    expect(paragraphs[0].runs.map(r => [r.content, r.style.bold, r.style.color])).toEqual([
+      ["Howdy ", true, "#ff0000"], ["world", false, "#000000"]
+    ]);
+    // replacing everything: the new text takes the first run's look
+    const whole = [para(["Old title", { bold: true, fontSize: 40 }]), para(["second"])];
+    applyTextOp(vdomTextModel(whole, 6350), { start: 0, end: 16, insert: "New" });
+    expect(whole).toHaveLength(1);
+    expect(whole[0].runs.map(r => [r.content, r.style.bold, r.style.fontSize])).toEqual([["New", true, 40]]);
+  });
+
   it("splits a paragraph on Enter and keeps the formatting after the caret", () => {
     const paragraphs = [para(["Hello ", { bold: true }], ["world"])];
     applyTextOp(vdomTextModel(paragraphs, 6350), { start: 8, end: 8, insert: "\n" });

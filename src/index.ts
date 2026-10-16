@@ -12,6 +12,7 @@ import {
 import * as wasm from "../rust-engine/pkg/ppt_engine";
 import { EditorState, SlideEditor } from "./editor/slide-editor";
 import { Command } from "./editor/history";
+import { DeckPort, DecodedImage, EditApi } from "./api/engine";
 import {
   blankSlideXml,
   layoutPlaceholders,
@@ -797,7 +798,7 @@ export default class PptViewer {
   }
 
   /** A blank page with the same layout as `index`, right after it. */
-  public async addSlide(index = this.currentSlideIndex): Promise<void> {
+  public async addSlide(index = this.currentSlideIndex, layoutName?: string): Promise<void> {
     this.requirePackage();
     const zip = this.parser.getZip()!;
     const slides = this.presentation!.slides;
@@ -805,8 +806,13 @@ export default class PptViewer {
     if (!reference?.part) return;
 
     const known = await readRelationships(zip, reference.part, this.structureEdits.relAdds.get(reference.part), this.structureEdits.virtual);
-    const layout = [...known.values()].find(rel => rel.type.endsWith("/slideLayout"));
+    let layout = [...known.values()].find(rel => rel.type.endsWith("/slideLayout"));
     if (!layout) throw new Error("找不到这一页使用的版式。");
+    if (layoutName) {
+      const chosen = (await this.layoutParts()).find(entry => entry.name === layoutName);
+      if (!chosen) throw new Error(`没有名为 "${layoutName}" 的版式。`);
+      layout = { ...layout, target: `../slideLayouts/${chosen.part.split("/").pop()}` };
+    }
 
     const part = this.allocateSlidePart();
     // The new page gets the layout's title and text placeholders, empty, like PowerPoint's "New Slide".
@@ -824,6 +830,71 @@ export default class PptViewer {
     const after = [...slides];
     after.splice(index + 1, 0, slide);
     this.recordSlideChange("新建幻灯片", [...slides], this.currentSlideIndex, after, index + 1);
+  }
+
+  /** The deck's layouts: the name shown in PowerPoint and the part that holds it. */
+  private async layoutParts(): Promise<Array<{ name: string; part: string }>> {
+    const zip = this.parser.getZip();
+    if (!zip) return [];
+    const parts = Object.keys(zip.files)
+      .filter(path => /^ppt\/slideLayouts\/slideLayout\d+\.xml$/.test(path))
+      .sort((a, b) => parseInt(a.replace(/\D/g, ""), 10) - parseInt(b.replace(/\D/g, ""), 10));
+    const found: Array<{ name: string; part: string }> = [];
+    for (const part of parts) {
+      const xml = await zip.file(part)!.async("string");
+      const name = xml.match(/<p:cSld\b[^>]*\bname="([^"]*)"/)?.[1];
+      if (name) found.push({ name, part });
+    }
+    return found;
+  }
+
+  /** Layout names a new slide can use. */
+  public async listLayouts(): Promise<string[]> {
+    return [...new Set((await this.layoutParts()).map(entry => entry.name))];
+  }
+
+  /** Decode a picture given as a data: URL, in the units the editor places pictures in. */
+  private async decodeDataUrl(dataUrl: string): Promise<DecodedImage> {
+    const match = dataUrl.match(/^data:image\/(png|jpeg|gif);base64,(.*)$/s);
+    if (!match) throw new Error("需要 PNG、JPEG 或 GIF 的 data: URL。");
+    const binary = atob(match[2]);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    const contentType = `image/${match[1]}`;
+    const url = URL.createObjectURL(new Blob([bytes], { type: contentType }));
+    const size = await new Promise<{ width: number; height: number }>((resolve, reject) => {
+      const probe = new Image();
+      probe.onload = () => resolve({ width: probe.naturalWidth, height: probe.naturalHeight });
+      probe.onerror = () => reject(new Error("无法读取这张图片。"));
+      probe.src = url;
+    });
+    const emuPerPx = this.presentation?.slides[0]?.emuPerPx || 6350;
+    return {
+      bytes, extension: match[1], contentType, url,
+      width: (size.width * 9525) / emuPerPx,
+      height: (size.height * 9525) / emuPerPx
+    };
+  }
+
+  private edit?: EditApi;
+
+  /** The JSON interface: `api.outline()` to read the deck, `api.apply(commands)` to change it. */
+  public get api(): EditApi {
+    if (!this.edit) {
+      const deck: DeckPort = {
+        document: () => this.presentation,
+        currentIndex: () => this.currentSlideIndex,
+        showSlide: async index => { if (index !== this.currentSlideIndex) await this.selectSlide(index); },
+        addSlide: (after, layout) => this.addSlide(after, layout),
+        duplicateSlide: index => this.duplicateSlide(index),
+        deleteSlide: index => this.deleteSlide(index),
+        moveSlide: (from, to) => this.moveSlide(from, to),
+        layouts: () => this.listLayouts(),
+        decodeImage: dataUrl => this.decodeDataUrl(dataUrl)
+      };
+      this.edit = new EditApi(this.editor, deck);
+    }
+    return this.edit;
   }
 
   /** A copy of slide `index`, with the edits made so far, right after it. */

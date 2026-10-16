@@ -172,6 +172,13 @@ export function applyTextOp<P, R>(model: TextModel<P, R>, op: TextOp): void {
     return;
   }
   const insert = op.insert.split(LINE_BREAK).join("");
+  if (insert && op.end > op.start) {
+    // Replacing: put the new text in first, next to the text it replaces, so it
+    // takes that text's formatting; deleting first would leave no run to copy.
+    insertText(model, op.start, insert);
+    deleteRange(model, op.start + insert.length, op.end + insert.length);
+    return;
+  }
   if (op.end > op.start) deleteRange(model, op.start, op.end);
   if (insert) insertText(model, op.start, insert);
 }

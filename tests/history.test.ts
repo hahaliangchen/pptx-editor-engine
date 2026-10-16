@@ -85,6 +85,44 @@ describe("History", () => {
   });
 });
 
+describe("History batches", () => {
+  it("collects commands into one undo step, in order, and reverts them newest first", () => {
+    const log: string[] = [];
+    const history = new History();
+    history.begin("batch");
+    history.record(command("a", log));
+    history.record(command("b", log));
+    expect(history.entries()).toHaveLength(0);
+    expect(history.inBatch).toBe(true);
+    expect(history.commit()).toBe(2);
+    expect(history.entries().map(e => e.label)).toEqual(["batch"]);
+    history.undo();
+    expect(log).toEqual(["-b", "-a"]);
+    history.redo();
+    expect(log).toEqual(["-b", "-a", "+a", "+b"]);
+  });
+
+  it("rolls back what was recorded and leaves no step behind", () => {
+    const log: string[] = [];
+    const history = new History();
+    history.record(command("before", log));
+    history.begin("batch");
+    history.record(command("a", log));
+    history.record(command("b", log));
+    history.rollback();
+    expect(log).toEqual(["-b", "-a"]);
+    expect(history.entries().map(e => e.label)).toEqual(["before"]);
+    expect(history.inBatch).toBe(false);
+  });
+
+  it("an empty batch records nothing", () => {
+    const history = new History();
+    history.begin("empty");
+    expect(history.commit()).toBe(0);
+    expect(history.entries()).toHaveLength(0);
+  });
+});
+
 describe("relativeTime", () => {
   it("speaks in the coarsest unit that fits", async () => {
     const { relativeTime } = await import("../src/editor/history-panel");

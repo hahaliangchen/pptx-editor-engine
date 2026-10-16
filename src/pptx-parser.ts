@@ -137,12 +137,14 @@ export class PptxParser {
   private makeSource(
     isTemplate: boolean,
     shapeId: string | null | undefined,
-    transform: TransformState
+    transform: TransformState,
+    name?: string | null
   ): ElementSource | undefined {
     if (isTemplate || !shapeId || !this.currentSlidePart) return undefined;
     return {
       part: this.currentSlidePart,
       shapeId,
+      ...(name ? { name } : {}),
       xform: {
         scaleX: transform.scaleX,
         scaleY: transform.scaleY,
@@ -730,6 +732,9 @@ export class PptxParser {
       rawXml: xmlText,
       emuPerPx: 1 / Math.min(scaleX, scaleY),
       part: slidePath,
+      layout: layoutDoc
+        ? querySelector(layoutDoc, "p\\:cSld, cSld")?.getAttribute("name") || undefined
+        : undefined,
       xform: { scaleX, scaleY }
     };
   }
@@ -973,10 +978,12 @@ export class PptxParser {
             }
           }
         }
-        const groupId = querySelector(node, "p\\:cNvPr, cNvPr")?.getAttribute("id");
+        const groupNode = querySelector(node, "p\\:cNvPr, cNvPr");
+        const groupId = groupNode?.getAttribute("id");
         const group: GroupRef | null = !isTemplate && groupId
           ? {
               shapeId: groupId,
+              ...(groupNode?.getAttribute("name") ? { name: groupNode.getAttribute("name")! } : {}),
               xform: {
                 scaleX: transform.scaleX,
                 scaleY: transform.scaleY,
@@ -1331,7 +1338,7 @@ export class PptxParser {
       elements.push({
         type: "shape",
         id: `shape_bg_${id}`,
-        source: this.makeSource(isTemplate, cNvPr?.getAttribute("id"), transform),
+        source: this.makeSource(isTemplate, cNvPr?.getAttribute("id"), transform, cNvPr?.getAttribute("name")),
         rect: { ...rect },
         shapeType,
         rotation,
@@ -1417,7 +1424,7 @@ export class PptxParser {
         body,
         cNvPr?.getAttribute("id") || undefined,
         placeholderContext?.slidePart,
-        this.makeSource(isTemplate, cNvPr?.getAttribute("id"), transform)
+        this.makeSource(isTemplate, cNvPr?.getAttribute("id"), transform, cNvPr?.getAttribute("name"))
       );
       for (const element of elements.slice(firstTextElement)) {
         if (element.type !== "text") continue;
@@ -1545,7 +1552,7 @@ export class PptxParser {
     }
 
     // Every cell belongs to one selectable object: the table frame.
-    const tableSource = this.makeSource(isTemplate, frameId, transform);
+    const tableSource = this.makeSource(isTemplate, frameId, transform, querySelector(node, "p\\:cNvPr, cNvPr")?.getAttribute("name"));
     if (tableSource) {
       tableSource.readOnlyText = true;
       for (const element of elements.slice(firstCellElement)) element.source = tableSource;
@@ -1993,7 +2000,7 @@ export class PptxParser {
     elements.push({
       type: "image",
       id: `img_${id}`,
-      source: this.makeSource(isTemplate, cNvPr?.getAttribute("id"), transform),
+      source: this.makeSource(isTemplate, cNvPr?.getAttribute("id"), transform, cNvPr?.getAttribute("name")),
       rect,
       url: blobUrl,
       crop,

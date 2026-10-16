@@ -25,7 +25,16 @@ interface Step {
   token: number;
 }
 
+/** Several commands that undo and redo as one step. */
+class Batch implements Command {
+  constructor(public readonly label: string, private commands: Command[]) {}
+  apply(): void { this.commands.forEach(command => command.apply()); }
+  revert(): void { [...this.commands].reverse().forEach(command => command.revert()); }
+}
+
 export class History {
+  /** Commands recorded since `begin`, held back until `commit`. */
+  private pending: { label: string; commands: Command[] } | null = null;
   private undoStack: Step[] = [];
   private redoStack: Step[] = [];
   private lastPushAt = 0;
@@ -34,8 +43,39 @@ export class History {
   private savedToken = 0;
   private listeners = new Set<() => void>();
 
+  /** Start collecting commands so that they become one history step (or none). */
+  public begin(label: string): void {
+    this.pending = { label, commands: [] };
+  }
+
+  /** Keep what was recorded since `begin` as a single step. Returns how many commands it holds. */
+  public commit(): number {
+    const pending = this.pending;
+    this.pending = null;
+    if (!pending || pending.commands.length === 0) return 0;
+    this.record(new Batch(pending.label, pending.commands));
+    return pending.commands.length;
+  }
+
+  /** Take back everything recorded since `begin`, newest first, and forget it. */
+  public rollback(): void {
+    const pending = this.pending;
+    this.pending = null;
+    if (!pending) return;
+    [...pending.commands].reverse().forEach(command => command.revert());
+    this.emit();
+  }
+
+  public get inBatch(): boolean {
+    return this.pending !== null;
+  }
+
   /** Record a command whose effect has already been applied. */
   public record(command: Command): void {
+    if (this.pending) {
+      this.pending.commands.push(command);
+      return;
+    }
     const top = this.undoStack[this.undoStack.length - 1];
     const now = performance.now();
     if (

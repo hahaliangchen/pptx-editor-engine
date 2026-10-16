@@ -3,6 +3,7 @@ import { InspectorPanel } from "./editor/inspector-panel";
 import { InsertBar } from "./editor/insert-bar";
 import { Filmstrip } from "./filmstrip";
 import { HistoryPanel } from "./editor/history-panel";
+import { ApiPlayground } from "./api/playground";
 import { PptVirtualDocument } from "./pptx-parser";
 import "./style.css";
 
@@ -464,6 +465,11 @@ const initializeDemo = () => {
   if (btnAddSlide) {
     btnAddSlide.onclick = () => void viewer.addSlide().catch(report);
   }
+
+  // The JSON interface, for trying by hand (drawer) or from the console / a test driver.
+  const aiButton = document.getElementById("btn-ai");
+  if (aiButton) new ApiPlayground(viewer.api, aiButton, () => viewer.getCurrentSlideIndex() + 1);
+  (window as unknown as Record<string, unknown>).pptEngine = viewer.api;
 
   // Load Demo triggers
   const loadDemo = () => {

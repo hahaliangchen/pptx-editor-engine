@@ -1698,3 +1698,145 @@ label {
   background: var(--accent);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
 }
+
+/* ---------- AI interface playground ---------- */
+
+.ai-panel {
+  position: fixed;
+  /* Sits over the format panel, so the slide stays in view while testing. */
+  top: 76px;
+  right: 16px;
+  bottom: 16px;
+  z-index: 800;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 420px;
+  max-width: calc(100vw - 32px);
+  padding: 14px;
+  background: rgba(255, 255, 255, 0.97);
+  border: 1px solid rgba(60, 60, 67, 0.16);
+  border-radius: 14px;
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.22), 0 2px 8px rgba(0, 0, 0, 0.08);
+  backdrop-filter: blur(22px);
+}
+
+.ai-panel[hidden] {
+  display: none;
+}
+
+.ai-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 14px;
+}
+
+.ai-close {
+  width: 26px;
+  height: 26px;
+  color: #6e6e73;
+  font-size: 18px;
+  line-height: 1;
+  background: transparent;
+  border: 0;
+  border-radius: 7px;
+  cursor: pointer;
+}
+
+.ai-close:hover {
+  background: #e8e8ed;
+}
+
+.ai-select {
+  height: 30px;
+  padding: 0 8px;
+  color: #1d1d1f;
+  font-size: 12px;
+  background: #f0f0f3;
+  border: 0;
+  border-radius: 8px;
+}
+
+.ai-input {
+  flex: 0 0 auto;
+  height: 190px;
+  padding: 10px;
+  color: #1d1d1f;
+  font: 12px/1.5 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  background: #fafafc;
+  border: 1px solid rgba(60, 60, 67, 0.18);
+  border-radius: 10px;
+  outline: none;
+  resize: vertical;
+}
+
+.ai-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent);
+}
+
+.ai-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.ai-button {
+  height: 28px;
+  padding: 0 11px;
+  color: #1d1d1f;
+  font-size: 12px;
+  background: #f0f0f3;
+  border: 0;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background-color 100ms ease;
+}
+
+.ai-button:hover {
+  background: #e3e3e8;
+}
+
+.ai-button.is-primary {
+  color: #ffffff;
+  background: var(--accent);
+}
+
+.ai-button.is-primary:hover {
+  background: #0062c4;
+}
+
+.ai-button.is-quiet {
+  align-self: flex-start;
+  color: #6e6e73;
+  background: transparent;
+}
+
+.ai-summary {
+  min-height: 18px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.ai-summary.is-ok {
+  color: #1a8f3c;
+}
+
+.ai-summary.is-error {
+  color: #d70015;
+}
+
+.ai-output {
+  flex: 1;
+  min-height: 80px;
+  margin: 0;
+  padding: 10px;
+  overflow: auto;
+  color: #1d1d1f;
+  font: 11.5px/1.5 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: #f5f5f7;
+  border-radius: 10px;
+}

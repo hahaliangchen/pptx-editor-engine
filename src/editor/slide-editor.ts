@@ -9,6 +9,7 @@ import {
   buildPictureXml,
   buildShapeElements,
   buildShapeXml,
+  displayName,
   isLine
 } from "./new-shapes";
 import { FormatState, FormatToolbar } from "./format-toolbar";
@@ -364,6 +365,15 @@ class CompositeCommand implements Command {
   constructor(public readonly label: string, private commands: Command[]) {}
   apply(): void { this.commands.forEach(command => command.apply()); }
   revert(): void { [...this.commands].reverse().forEach(command => command.revert()); }
+}
+
+/** What a program gets back after adding a shape or picture. */
+export interface CreatedShape {
+  id: string;
+  name: string;
+  part: string;
+  /** The text element of a new text-carrying shape. */
+  text?: TextElement;
 }
 
 const cloneParagraphs = (paragraphs: TextParagraph[]): TextParagraph[] =>
@@ -909,6 +919,60 @@ export class SlideEditor {
     this.emit();
   }
 
+  // ------------------------------------------------- driving the editor from code
+
+  /** Make exactly these shapes (leaf or group, by file id) the selection. False if one is missing. */
+  public selectShapes(refs: Array<{ part: string; id: string }>): boolean {
+    const slide = this.host.getSlide();
+    if (!slide || refs.length === 0) return false;
+    if (this.textSession) this.endTextEdit();
+    const keys: string[] = [];
+    let entered: string[] | null = null;
+    for (const ref of refs) {
+      const hit = slide.elements.find(element =>
+        element.source?.part === ref.part
+        && (element.source.shapeId === ref.id || element.source.groups?.some(group => group.shapeId === ref.id)));
+      if (!hit) return false;
+      const groups = hit.source!.groups || [];
+      const own = groups.findIndex(group => group.shapeId === ref.id);
+      // Members of a group are picked from inside it, so step into the groups above the target.
+      if (entered === null) entered = (own >= 0 ? groups.slice(0, own) : groups).map(group => group.shapeId);
+      keys.push(`${ref.part}|${ref.id}`);
+    }
+    this.entered = entered ?? [];
+    this.selection = new Set(keys);
+    this.selectionSlideId = slide.id;
+    this.paintOverlay();
+    this.emit();
+    return true;
+  }
+
+  public selectionRefs(): Array<{ part: string; id: string }> {
+    return [...this.selection].map(key => {
+      const at = key.indexOf("|");
+      return { part: key.slice(0, at), id: key.slice(at + 1) };
+    });
+  }
+
+  /**
+   * Apply text operations (replace, restyle, paragraph format) to one text
+   * element as a single undoable step. Operations must be in descending order
+   * of position when there are several.
+   */
+  public applyTextOps(element: TextElement, ops: TextOp[]): void {
+    const slide = this.host.getSlide();
+    if (!slide || !element.source || ops.length === 0) return;
+    if (this.textSession) this.endTextEdit();
+    const before = cloneParagraphs(element.paragraphs || []);
+    const after = cloneParagraphs(before);
+    const model = vdomTextModel(after, this.emuPerPx(slide));
+    for (const op of ops) applyTextOp(model, op);
+    normalizeParagraphs(after, element.style);
+    const command = new TextCommand(slide, element, before, after, ops, this, this.host);
+    command.apply();
+    this.history.record(command);
+  }
+
   // ------------------------------------------------------------ inserting
 
   /** Arm (or disarm) a drawing tool; the next drag on the slide creates the shape. */
@@ -992,13 +1056,20 @@ export class SlideEditor {
     this.insertShape(drag.slide, drag.shape, rect, { flipH, flipV });
   }
 
-  private insertShape(slide: Slide, kind: NewShapeKind, rect: Rect, flip: { flipH: boolean; flipV: boolean }): void {
+  private insertShape(
+    slide: Slide,
+    kind: NewShapeKind,
+    rect: Rect,
+    flip: { flipH: boolean; flipV: boolean },
+    edit = true
+  ): CreatedShape | null {
     const part = slide.part;
     this.setTool(null);
-    if (!part) return;
+    if (!part) return null;
     const id = this.host.allocateShapeId(part);
+    const name = displayName(kind, id);
     const base = this.slideTransform(slide);
-    const source: ElementSource = { part, shapeId: id, xform: base };
+    const source: ElementSource = { part, shapeId: id, name, xform: base };
     const font = this.host.deckFont();
     const elements = buildShapeElements(kind, source, rect, { emuPerPx: this.emuPerPx(slide), ...font }, flip);
     const xml = buildShapeXml(kind, id, {
@@ -1010,9 +1081,20 @@ export class SlideEditor {
     });
     this.commitInserted(slide, part, [{ elements, inserted: { id, xml }, adds: [], owner: source }], "插入形状");
 
-    // A new text box is for typing: go straight into it.
+    // A new text box drawn by hand is for typing: go straight into it.
     const text = elements.find((element): element is TextElement => element.type === "text");
-    if (kind === "textbox" && text) this.startTextEdit(slide, text);
+    if (edit && kind === "textbox" && text) this.startTextEdit(slide, text);
+    return { id, name, part, text };
+  }
+
+  /** A shape made by a program: same result as drawing it, without entering text editing. */
+  public createShape(
+    kind: NewShapeKind,
+    rect: Rect,
+    flip: { flipH: boolean; flipV: boolean } = { flipH: false, flipV: false }
+  ): CreatedShape | null {
+    const slide = this.host.getSlide();
+    return slide ? this.insertShape(slide, kind, rect, flip, false) : null;
   }
 
   /** Add a picture file to the deck and place it on the slide. */
@@ -1024,11 +1106,11 @@ export class SlideEditor {
     width: number;
     height: number;
     name: string;
-  }): Promise<void> {
+  }): Promise<CreatedShape | null> {
     const slide = this.host.getSlide();
     const size = this.host.getSlideSize();
     const part = slide?.part;
-    if (!slide || !size || !part) return;
+    if (!slide || !size || !part) return null;
     if (this.textSession) this.endTextEdit();
     this.setTool(null);
 
@@ -1043,7 +1125,7 @@ export class SlideEditor {
     const h = image.height * fit;
     const rect = { x: (size.width - w) / 2, y: (size.height - h) / 2, w, h };
 
-    const source: ElementSource = { part, shapeId: id, xform: base };
+    const source: ElementSource = { part, shapeId: id, name: image.name, xform: base };
     const element: SlideElement = { type: "image", id: `img_${id}`, source, rect, url: image.url };
     const xml = buildPictureXml(id, image.name, relId, {
       x: Math.round(rect.x / base.scaleX),
@@ -1062,6 +1144,7 @@ export class SlideEditor {
       owner: source,
       media: { path, bytes: image.bytes, extension: image.extension, contentType: image.contentType }
     }], "插入图片");
+    return { id, name: image.name, part };
   }
 
   private slideTransform(slide: Slide): ElementSource["xform"] {
