@@ -1,5 +1,5 @@
 import JSZip from "jszip";
-import { ElementSource, Rect, Slide } from "./pptx-virtual-dom";
+import { ElementSource, GroupRef, Rect, Slide } from "./pptx-virtual-dom";
 import { getDirectChild } from "./pptx-xml";
 import { TextOp } from "./editor/text-ops";
 import { writeTextOps } from "./pptx-text-writer";
@@ -47,6 +47,32 @@ function toEmu(rect: Rect, source: ElementSource) {
   };
 }
 
+/**
+ * Moving or resizing a group only touches the group's own off/ext: its
+ * children live in the group's child space and follow automatically. The new
+ * box is derived from how the members' bounding box changed since opening.
+ */
+function writeGroupXfrm(shape: Element, ref: GroupRef, now: Rect): void {
+  const grpSpPr = getDirectChild(shape, "grpSpPr");
+  const xfrm = grpSpPr ? getDirectChild(grpSpPr, "xfrm") : null;
+  const off = xfrm ? getDirectChild(xfrm, "off") : null;
+  const ext = xfrm ? getDirectChild(xfrm, "ext") : null;
+  if (!off || !ext) return;
+
+  const { scaleX, scaleY } = ref.xform;
+  const before = ref.origRect;
+  const sx = before.w > 0 ? now.w / before.w : 1;
+  const sy = before.h > 0 ? now.h / before.h : 1;
+  const x = parseInt(off.getAttribute("x") || "0", 10);
+  const y = parseInt(off.getAttribute("y") || "0", 10);
+  const cx = parseInt(ext.getAttribute("cx") || "0", 10);
+  const cy = parseInt(ext.getAttribute("cy") || "0", 10);
+  off.setAttribute("x", String(Math.round(x + (now.x - before.x) / scaleX)));
+  off.setAttribute("y", String(Math.round(y + (now.y - before.y) / scaleY)));
+  ext.setAttribute("cx", String(Math.max(0, Math.round(cx * sx))));
+  ext.setAttribute("cy", String(Math.max(0, Math.round(cy * sy))));
+}
+
 function findShapeNode(doc: Document, shapeId: string): Element | null {
   for (const node of Array.from(doc.getElementsByTagName("*"))) {
     if ((node.localName || "") !== "cNvPr" || node.getAttribute("id") !== shapeId) continue;
@@ -56,7 +82,24 @@ function findShapeNode(doc: Document, shapeId: string): Element | null {
   return null;
 }
 
-function writeXfrm(doc: Document, shape: Element, emu: ReturnType<typeof toEmu>): void {
+/** Tables size themselves from gridCol/tr, not from the frame, so scale those too. */
+function scaleTableGrid(shape: Element, oldCx: number, oldCy: number, emu: ReturnType<typeof toEmu>): void {
+  const scaleAll = (tag: string, attribute: string, factor: number) => {
+    for (const node of Array.from(shape.getElementsByTagNameNS("*", tag))) {
+      const value = parseInt(node.getAttribute(attribute) || "", 10);
+      if (Number.isFinite(value)) node.setAttribute(attribute, String(Math.max(1, Math.round(value * factor))));
+    }
+  };
+  if (oldCx > 0 && emu.cx !== oldCx) scaleAll("gridCol", "w", emu.cx / oldCx);
+  if (oldCy > 0 && emu.cy !== oldCy) scaleAll("tr", "h", emu.cy / oldCy);
+}
+
+function writeXfrm(
+  doc: Document,
+  shape: Element,
+  emu: ReturnType<typeof toEmu>,
+  rotation?: number
+): void {
   // graphicFrame keeps its transform in p:xfrm; every other shape uses spPr/a:xfrm.
   let xfrm: Element | null;
   if (shape.localName === "graphicFrame" || shape.localName === "grpSp") {
@@ -76,6 +119,12 @@ function writeXfrm(doc: Document, shape: Element, emu: ReturnType<typeof toEmu>)
     }
   }
 
+  if (rotation !== undefined && shape.localName !== "graphicFrame") {
+    const turns = Math.round((((rotation % 360) + 360) % 360) * 60000);
+    if (turns === 0) xfrm.removeAttribute("rot");
+    else xfrm.setAttribute("rot", String(turns));
+  }
+
   const ensure = (name: "off" | "ext"): Element => {
     let node = getDirectChild(xfrm!, name);
     if (!node) {
@@ -88,6 +137,14 @@ function writeXfrm(doc: Document, shape: Element, emu: ReturnType<typeof toEmu>)
   off.setAttribute("x", String(emu.x));
   off.setAttribute("y", String(emu.y));
   const ext = ensure("ext");
+  if (shape.localName === "graphicFrame") {
+    scaleTableGrid(
+      shape,
+      parseInt(ext.getAttribute("cx") || "0", 10),
+      parseInt(ext.getAttribute("cy") || "0", 10),
+      emu
+    );
+  }
   ext.setAttribute("cx", String(emu.cx));
   ext.setAttribute("cy", String(emu.cy));
 }
@@ -126,14 +183,33 @@ export async function exportEditedPptx(
         const shape = findShapeNode(doc, shapeId);
         if (!shape) continue;
 
-        // A shape is represented by 1-2 elements (fill + text); either carries the same box.
-        const element = slides
+        // A shape is 1-2 elements (fill + text) and a table is one per cell;
+        // the box of the object is the union of them.
+        const inGroup = shape.localName === "grpSp";
+        const members = slides
           .flatMap(slide => slide.elements)
-          .find(candidate => candidate.source?.part === part && candidate.source.shapeId === shapeId);
-        if (!element || !element.source) {
+          .filter(candidate => candidate.source?.part === part && (inGroup
+            ? candidate.source.groups?.some(group => group.shapeId === shapeId)
+            : candidate.source.shapeId === shapeId));
+        if (members.length === 0) {
           shape.parentNode?.removeChild(shape);
         } else {
-          writeXfrm(doc, shape, toEmu(element.rect, element.source));
+          const left = Math.min(...members.map(m => m.rect.x));
+          const top = Math.min(...members.map(m => m.rect.y));
+          const right = Math.max(...members.map(m => m.rect.x + m.rect.w));
+          const bottom = Math.max(...members.map(m => m.rect.y + m.rect.h));
+          const box = { x: left, y: top, w: right - left, h: bottom - top };
+          if (inGroup) {
+            const ref = members[0].source!.groups!.find(group => group.shapeId === shapeId)!;
+            writeGroupXfrm(shape, ref, box);
+          } else {
+            writeXfrm(
+              doc,
+              shape,
+              toEmu(box, members[0].source!),
+              members.map(m => m.rotation).find((r): r is number => typeof r === "number")
+            );
+          }
         }
       }
 

@@ -10,6 +10,16 @@ export interface Rect {
  * that belong to the slide itself (not master/layout decoration), so the editor
  * can select them and write edits back to the original shape node.
  */
+/** A group shape an element sits in; shared by all of the group's members. */
+export interface GroupRef {
+  /** p:cNvPr@id of the p:grpSp. */
+  shapeId: string;
+  /** Transform of the space the group itself is placed in (its parent's). */
+  xform: { scaleX: number; scaleY: number; offsetX: number; offsetY: number };
+  /** Bounding box of the members when the deck was opened, in logical px. */
+  origRect: Rect;
+}
+
 export interface ElementSource {
   /** Package part, e.g. "ppt/slides/slide3.xml". */
   part: string;
@@ -17,6 +27,10 @@ export interface ElementSource {
   shapeId: string;
   /** Logical px = offset + EMU * scale; used to convert edits back to EMU. */
   xform: { scaleX: number; scaleY: number; offsetX: number; offsetY: number };
+  /** Table cells share the table's source; their text is not editable yet. */
+  readOnlyText?: boolean;
+  /** Enclosing groups, outermost first. */
+  groups?: GroupRef[];
 }
 
 export interface ReflectionStyle {
@@ -107,6 +121,8 @@ export interface TextElement {
   sourceShapeId?: string;
   sourceSlidePart?: string;
   source?: ElementSource;
+  /** Rotation of the owning shape in degrees; text turns with its shape. */
+  rotation?: number;
   rect: Rect;
   content: string;
   style: TextStyle;

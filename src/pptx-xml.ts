@@ -11,7 +11,7 @@ export function querySelector(parent: Element | Document, selectors: string): El
 
   for (const part of parts) {
     const cleanTag = part.replace(/^.*\\:/, "").replace(/^.*:/, "");
-    const elements = parent.getElementsByTagName(cleanTag);
+    const elements = parent.getElementsByTagNameNS("*", cleanTag);
     if (elements.length > 0) return elements[0] as Element;
   }
   return null;
@@ -30,7 +30,7 @@ export function querySelectorAll(parent: Element | Document, selectors: string):
 
   for (const part of parts) {
     const cleanTag = part.replace(/^.*\\:/, "").replace(/^.*:/, "");
-    const elements = parent.getElementsByTagName(cleanTag);
+    const elements = parent.getElementsByTagNameNS("*", cleanTag);
     if (elements.length > 0) return Array.from(elements) as Element[];
   }
   return [];

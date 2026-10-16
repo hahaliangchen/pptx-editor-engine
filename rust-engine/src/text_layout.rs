@@ -226,6 +226,7 @@ pub fn normalize_text_element(txt: &TextElement) -> TextElement {
     TextElement {
         id: txt.id.clone(),
         rect: txt.rect.clone(),
+        rotation: txt.rotation,
         content: txt.content.clone(),
         style: txt.style.clone(),
         paragraphs,

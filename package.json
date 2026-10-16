@@ -13,7 +13,8 @@
     "dev:frontend": "npm run build:wasm && rspack dev",
     "dev": "concurrently \"npm run start:backend\" \"npm run dev:frontend\"",
     "build": "npm run build:wasm && rspack build",
-    "start:backend": "cargo run --manifest-path rust-backend/Cargo.toml"
+    "start:backend": "cargo run --manifest-path rust-backend/Cargo.toml",
+    "test": "vitest run"
   },
   "dependencies": {
     "jszip": "^3.10.1"
@@ -23,7 +24,9 @@
     "@rspack/core": "^0.5.0",
     "concurrently": "^10.0.3",
     "css-loader": "^6.8.1",
+    "jsdom": "^25.0.1",
     "style-loader": "^3.3.3",
-    "typescript": "^5.0.0"
+    "typescript": "^5.0.0",
+    "vitest": "^2.1.9"
   }
 }

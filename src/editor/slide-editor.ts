@@ -34,6 +34,9 @@ export interface EditorState {
 
 interface SceneObject {
   key: string;
+  /** What gets written back on export: the shape itself, or the group. */
+  source: ElementSource;
+  isGroup: boolean;
   elements: SlideElement[];
   rect: Rect;
   rotation: number;
@@ -46,11 +49,13 @@ const HANDLES: HandleId[] = ["nw", "n", "ne", "e", "se", "s", "sw", "w"];
 interface DragItem {
   element: SlideElement;
   before: Rect;
+  owner: ElementSource;
 }
 
 type Drag =
   | { kind: "move"; slide: Slide; start: Point; items: DragItem[]; bbox: Rect; keys: Set<string>; active: boolean; collapseTo: string | null }
-  | { kind: "resize"; slide: Slide; start: Point; items: DragItem[]; bbox: Rect; handle: HandleId; lockRatio: boolean }
+  | { kind: "resize"; slide: Slide; start: Point; items: DragItem[]; bbox: Rect; handle: HandleId; lockRatio: boolean; rotation: number }
+  | { kind: "rotate"; slide: Slide; items: Array<{ element: SlideElement; before: number; owner: ElementSource }>; center: Point; startAngle: number; base: number }
   | { kind: "marquee"; slide: Slide; start: Point; base: Set<string> };
 
 interface Point {
@@ -69,11 +74,7 @@ const MIN_SIZE = 8;
 const SNAP_PX = 6;
 const DRAG_THRESHOLD_PX = 3;
 
-const elementKey = (element: SlideElement): string | null =>
-  element.source ? `${element.source.part}|${element.source.shapeId}` : null;
-
-const rotationOf = (element: SlideElement): number =>
-  element.type === "text" ? 0 : element.rotation || 0;
+const rotationOf = (element: SlideElement): number => element.rotation || 0;
 
 const union = (rects: Rect[]): Rect => {
   const left = Math.min(...rects.map(r => r.x));
@@ -92,7 +93,7 @@ class RectsCommand implements Command {
   constructor(
     label: string,
     private slide: Slide,
-    private items: Array<{ element: SlideElement; before: Rect; after: Rect }>,
+    private items: Array<{ element: SlideElement; before: Rect; after: Rect; owner: ElementSource }>,
     private editor: SlideEditor,
     mergeKey?: string
   ) {
@@ -102,12 +103,12 @@ class RectsCommand implements Command {
 
   apply(): void {
     for (const { element, after } of this.items) element.rect = cloneRect(after);
-    this.editor.afterCommand(this.slide, this.items.map(item => item.element));
+    this.editor.afterCommand(this.slide, this.items.map(item => item.owner));
   }
 
   revert(): void {
     for (const { element, before } of this.items) element.rect = cloneRect(before);
-    this.editor.afterCommand(this.slide, this.items.map(item => item.element));
+    this.editor.afterCommand(this.slide, this.items.map(item => item.owner));
   }
 
   merge(next: Command): void {
@@ -119,11 +120,40 @@ class RectsCommand implements Command {
   }
 }
 
+const setRotation = (element: SlideElement, degrees: number): void => {
+  element.rotation = degrees;
+};
+
+class RotateCommand implements Command {
+  public readonly label = "旋转";
+
+  constructor(
+    private slide: Slide,
+    private items: Array<{ element: SlideElement; before: number; after: number; owner: ElementSource }>,
+    private editor: SlideEditor
+  ) {}
+
+  apply(): void {
+    for (const { element, after } of this.items) setRotation(element, after);
+    this.editor.afterCommand(this.slide, this.items.map(item => item.owner));
+  }
+
+  revert(): void {
+    for (const { element, before } of this.items) setRotation(element, before);
+    this.editor.afterCommand(this.slide, this.items.map(item => item.owner));
+  }
+}
+
 class DeleteCommand implements Command {
   public readonly label = "删除";
   private removed: Array<{ element: SlideElement; index: number }>;
 
-  constructor(private slide: Slide, elements: SlideElement[], private editor: SlideEditor) {
+  constructor(
+    private slide: Slide,
+    elements: SlideElement[],
+    private owners: ElementSource[],
+    private editor: SlideEditor
+  ) {
     this.removed = elements
       .map(element => ({ element, index: slide.elements.indexOf(element) }))
       .filter(item => item.index >= 0)
@@ -133,12 +163,12 @@ class DeleteCommand implements Command {
   apply(): void {
     const gone = new Set(this.removed.map(item => item.element));
     this.slide.elements = this.slide.elements.filter(element => !gone.has(element));
-    this.editor.afterCommand(this.slide, this.removed.map(item => item.element));
+    this.editor.afterCommand(this.slide, this.owners);
   }
 
   revert(): void {
     for (const { element, index } of this.removed) this.slide.elements.splice(index, 0, element);
-    this.editor.afterCommand(this.slide, this.removed.map(item => item.element));
+    this.editor.afterCommand(this.slide, this.owners);
   }
 }
 
@@ -168,14 +198,14 @@ class TextCommand implements Command {
     this.element.paragraphs = cloneParagraphs(this.after);
     this.element.content = paragraphsText(this.after).split(LINE_BREAK).join("\n");
     if (this.element.source) for (const op of this.ops) this.host.recordTextOp(this.element.source, op);
-    this.editor.afterCommand(this.slide, [this.element], false);
+    this.editor.afterCommand(this.slide, [], false);
   }
 
   revert(): void {
     this.element.paragraphs = cloneParagraphs(this.before);
     this.element.content = paragraphsText(this.before).split(LINE_BREAK).join("\n");
     if (this.element.source) for (const _ of this.ops) this.host.discardTextOp(this.element.source);
-    this.editor.afterCommand(this.slide, [this.element], false);
+    this.editor.afterCommand(this.slide, [], false);
   }
 }
 
@@ -203,6 +233,9 @@ export class SlideEditor {
   private guideLayer: HTMLDivElement;
   private handleNodes = new Map<HandleId, HTMLDivElement>();
   private toolbar: FormatToolbar;
+  /** Groups double-clicked into, outermost first; their children are selectable. */
+  private entered: string[] = [];
+  private groupFrame: HTMLDivElement;
   private textSession: {
     slide: Slide;
     element: TextElement;
@@ -216,6 +249,7 @@ export class SlideEditor {
     this.layer = this.div("edit-layer");
     this.guideLayer = this.div("edit-guides");
     this.hoverBox = this.div("edit-hover");
+    this.groupFrame = this.div("edit-group-frame");
     this.selectBox = this.div("edit-selection");
     this.marqueeBox = this.div("edit-marquee");
     this.badge = this.div("edit-badge");
@@ -225,7 +259,11 @@ export class SlideEditor {
       this.selectBox.appendChild(handle);
       this.handleNodes.set(id, handle);
     }
-    this.layer.append(this.guideLayer, this.hoverBox, this.selectBox, this.marqueeBox, this.badge);
+    const rotate = this.div("edit-rotate");
+    rotate.dataset.handle = "rotate";
+    rotate.title = "旋转 (Shift 吸附 15°)";
+    this.selectBox.appendChild(rotate);
+    this.layer.append(this.guideLayer, this.groupFrame, this.hoverBox, this.selectBox, this.marqueeBox, this.badge);
     container.appendChild(this.layer);
     this.toolbar = new FormatToolbar(this.layer, format => this.applyFormat(format));
 
@@ -261,6 +299,7 @@ export class SlideEditor {
     const slide = this.host.getSlide();
     if (slide && this.selectionSlideId !== slide.id) {
       this.selection.clear();
+      this.entered = [];
       this.selectionSlideId = slide.id;
       this.emit();
     }
@@ -269,6 +308,7 @@ export class SlideEditor {
 
   public reset(): void {
     this.cancelTextSession();
+    this.entered = [];
     this.selection.clear();
     this.selectionSlideId = null;
     this.drag = null;
@@ -293,7 +333,12 @@ export class SlideEditor {
     if (!slide) return;
     const objects = this.selectedObjects(slide);
     if (objects.length === 0) return;
-    const command = new DeleteCommand(slide, objects.flatMap(object => object.elements), this);
+    const command = new DeleteCommand(
+      slide,
+      objects.flatMap(object => object.elements),
+      objects.map(object => object.source),
+      this
+    );
     command.apply();
     this.history.record(command);
     this.selection.clear();
@@ -318,8 +363,8 @@ export class SlideEditor {
   }
 
   /** Used by commands after they change the model. */
-  public afterCommand(slide: Slide, elements: SlideElement[], geometry = true): void {
-    if (geometry) for (const element of elements) this.host.markDirty(element.source);
+  public afterCommand(slide: Slide, owners: ElementSource[], geometry = true): void {
+    if (geometry) for (const owner of owners) this.host.markDirty(owner);
     if (this.host.getSlide() !== slide) this.host.showSlide(slide);
     this.selectionSlideId = slide.id;
     this.host.invalidate(slide);
@@ -333,25 +378,67 @@ export class SlideEditor {
 
   // ----------------------------------------------------------------- model
 
+  /** Which selectable object an element belongs to, given the groups entered so far. */
+  private refFor(element: SlideElement): { key: string; source: ElementSource; isGroup: boolean } | null {
+    const source = element.source;
+    if (!source) return null;
+    const groups = source.groups || [];
+    let depth = 0;
+    while (depth < this.entered.length && depth < groups.length && groups[depth].shapeId === this.entered[depth]) depth++;
+    if (groups.length > depth) {
+      const group = groups[depth];
+      return {
+        key: `${source.part}|${group.shapeId}`,
+        source: { part: source.part, shapeId: group.shapeId, xform: group.xform },
+        isGroup: true
+      };
+    }
+    return { key: `${source.part}|${source.shapeId}`, source, isGroup: false };
+  }
+
   private objects(slide: Slide): SceneObject[] {
     const byKey = new Map<string, SceneObject>();
     slide.elements.forEach((element, index) => {
-      const key = elementKey(element);
-      if (!key) return;
-      const existing = byKey.get(key);
+      const ref = this.refFor(element);
+      if (!ref) return;
+      const existing = byKey.get(ref.key);
       if (existing) {
         existing.elements.push(element);
         existing.order = index;
       } else {
-        byKey.set(key, { key, elements: [element], rect: element.rect, rotation: rotationOf(element), order: index });
+        byKey.set(ref.key, {
+          key: ref.key,
+          source: ref.source,
+          isGroup: ref.isGroup,
+          elements: [element],
+          rect: element.rect,
+          rotation: rotationOf(element),
+          order: index
+        });
       }
     });
     const result = [...byKey.values()];
     for (const object of result) {
       object.rect = union(object.elements.map(element => element.rect));
-      object.rotation = object.elements.reduce((acc, element) => acc || rotationOf(element), 0);
+      object.rotation = object.isGroup ? 0 : object.elements.reduce((acc, element) => acc || rotationOf(element), 0);
     }
     return result.sort((a, b) => a.order - b.order);
+  }
+
+  /** Clicking something outside the entered group leaves it. */
+  private hitInScope(slide: Slide, point: Point): SceneObject | null {
+    let object = this.hit(slide, point);
+    if (this.entered.length > 0 && !this.isInsideEntered(object)) {
+      this.entered = [];
+      object = this.hit(slide, point);
+    }
+    return object;
+  }
+
+  private isInsideEntered(object: SceneObject | null): boolean {
+    if (!object) return false;
+    const groups = object.elements[0].source?.groups || [];
+    return this.entered.every((id, index) => groups[index]?.shapeId === id);
   }
 
   private selectedObjects(slide: Slide): SceneObject[] {
@@ -422,12 +509,24 @@ export class SlideEditor {
     if (!slide) return;
     event.preventDefault();
     const point = this.point(event);
-    const handle = (event.target as HTMLElement).closest<HTMLElement>("[data-handle]")?.dataset.handle as HandleId | undefined;
+    const handle = (event.target as HTMLElement).closest<HTMLElement>("[data-handle]")?.dataset.handle as HandleId | "rotate" | undefined;
     const selected = this.selectedObjects(slide);
 
-    if (handle && selected.length > 0) {
-      const items = selected.flatMap(object => object.elements)
-        .map(element => ({ element, before: cloneRect(element.rect) }));
+    if (handle === "rotate" && selected.length === 1 && !selected[0].isGroup) {
+      const object = selected[0];
+      const center = { x: object.rect.x + object.rect.w / 2, y: object.rect.y + object.rect.h / 2 };
+      this.drag = {
+        kind: "rotate",
+        slide,
+        items: object.elements.map(element => ({ element, before: rotationOf(element), owner: object.source })),
+        center,
+        startAngle: Math.atan2(point.y - center.y, point.x - center.x) * 180 / Math.PI,
+        base: object.rotation
+      };
+      this.host.beginDrag(slide, object.elements);
+    } else if (handle && handle !== "rotate" && selected.length > 0) {
+      const items = selected.flatMap(object =>
+        object.elements.map(element => ({ element, before: cloneRect(element.rect), owner: object.source })));
       this.drag = {
         kind: "resize",
         slide,
@@ -435,11 +534,12 @@ export class SlideEditor {
         items,
         bbox: union(items.map(item => item.before)),
         handle,
-        lockRatio: items.every(item => item.element.type === "image")
+        lockRatio: items.every(item => item.element.type === "image"),
+        rotation: selected.length === 1 ? selected[0].rotation : 0
       };
       this.host.beginDrag(slide, items.map(item => item.element));
     } else {
-      const object = this.hit(slide, point);
+      const object = this.hitInScope(slide, point);
       if (object) {
         let collapseTo: string | null = null;
         if (event.shiftKey) {
@@ -452,7 +552,8 @@ export class SlideEditor {
         }
         this.selectionSlideId = slide.id;
         const moving = this.selectedObjects(slide);
-        const items = moving.flatMap(o => o.elements).map(element => ({ element, before: cloneRect(element.rect) }));
+        const items = moving.flatMap(o =>
+          o.elements.map(element => ({ element, before: cloneRect(element.rect), owner: o.source })));
         this.drag = {
           kind: "move",
           slide,
@@ -464,6 +565,7 @@ export class SlideEditor {
           collapseTo
         };
       } else {
+        this.entered = [];
         const base = event.shiftKey ? new Set(this.selection) : new Set<string>();
         this.selection = new Set(base);
         this.drag = { kind: "marquee", slide, start: point, base };
@@ -494,6 +596,7 @@ export class SlideEditor {
     const drag = this.drag;
     if (drag.kind === "move") this.applyMove(drag, point, event);
     else if (drag.kind === "resize") this.applyResize(drag, point, event);
+    else if (drag.kind === "rotate") this.applyRotate(drag, point, event);
     else this.applyMarquee(drag, point);
   }
 
@@ -509,16 +612,25 @@ export class SlideEditor {
 
     if (drag.kind === "marquee") {
       this.marqueeBox.style.display = "none";
+    } else if (drag.kind === "rotate") {
+      const items = drag.items
+        .filter(item => rotationOf(item.element) !== item.before)
+        .map(item => ({ ...item, after: rotationOf(item.element) }));
+      if (items.length > 0) {
+        this.history.record(new RotateCommand(drag.slide, items, this));
+        items.forEach(item => this.host.markDirty(item.owner));
+        this.host.onCommit(drag.slide);
+      }
     } else {
       const items = drag.items
         .filter(item => item.element.rect.x !== item.before.x || item.element.rect.y !== item.before.y
           || item.element.rect.w !== item.before.w || item.element.rect.h !== item.before.h)
-        .map(item => ({ element: item.element, before: item.before, after: cloneRect(item.element.rect) }));
+        .map(item => ({ element: item.element, before: item.before, after: cloneRect(item.element.rect), owner: item.owner }));
       if (items.length > 0) {
         this.history.record(new RectsCommand(
           drag.kind === "move" ? "移动" : "调整大小", drag.slide, items, this
         ));
-        items.forEach(item => this.host.markDirty(item.element.source));
+        items.forEach(item => this.host.markDirty(item.owner));
         this.host.onCommit(drag.slide);
       } else if (drag.kind === "move" && drag.collapseTo) {
         this.selection = new Set([drag.collapseTo]);
@@ -550,6 +662,9 @@ export class SlideEditor {
       if (this.selection.size === 0) return;
       event.preventDefault();
       this.deleteSelection();
+    } else if (mod && !event.altKey && (key === "b" || key === "i") && this.selection.size > 0) {
+      event.preventDefault();
+      this.toggleStyle(key === "b" ? "bold" : "italic");
     } else if (key === "escape") {
       this.clearSelection();
     } else if (key.startsWith("arrow") && this.selection.size > 0 && !mod) {
@@ -562,13 +677,14 @@ export class SlideEditor {
   }
 
   private nudge(slide: Slide, dx: number, dy: number): void {
-    const elements = this.selectedObjects(slide).flatMap(object => object.elements);
-    if (elements.length === 0) return;
-    const items = elements.map(element => ({
+    const objects = this.selectedObjects(slide);
+    if (objects.length === 0) return;
+    const items = objects.flatMap(object => object.elements.map(element => ({
       element,
       before: cloneRect(element.rect),
-      after: { ...element.rect, x: element.rect.x + dx, y: element.rect.y + dy }
-    }));
+      after: { ...element.rect, x: element.rect.x + dx, y: element.rect.y + dy },
+      owner: object.source
+    })));
     const command = new RectsCommand("移动", slide, items, this, `nudge:${slide.id}:${[...this.selection].join(",")}`);
     command.apply();
     this.history.record(command);
@@ -665,9 +781,31 @@ export class SlideEditor {
     return { dx: sx, dy: sy, guides };
   }
 
+  private applyRotate(drag: Extract<Drag, { kind: "rotate" }>, point: Point, event: PointerEvent): void {
+    const angle = Math.atan2(point.y - drag.center.y, point.x - drag.center.x) * 180 / Math.PI;
+    let degrees = drag.base + (angle - drag.startAngle);
+    if (event.shiftKey) degrees = Math.round(degrees / 15) * 15;
+    degrees = ((degrees % 360) + 360) % 360;
+    for (const item of drag.items) setRotation(item.element, Math.round(degrees * 10) / 10);
+
+    const k = this.scale() || 1;
+    this.badge.textContent = `${Math.round(degrees)}°`;
+    Object.assign(this.badge.style, {
+      display: "block",
+      left: `${drag.center.x * k}px`,
+      top: `${drag.center.y * k + 40}px`
+    });
+    this.paintOverlay();
+    this.queueRepaint(drag.slide);
+  }
+
   private applyResize(drag: Extract<Drag, { kind: "resize" }>, point: Point, event: PointerEvent): void {
-    const dx = point.x - drag.start.x;
-    const dy = point.y - drag.start.y;
+    // For a rotated shape the handles live in its own, turned, frame.
+    const theta = (drag.rotation * Math.PI) / 180;
+    const rawX = point.x - drag.start.x;
+    const rawY = point.y - drag.start.y;
+    const dx = rawX * Math.cos(theta) + rawY * Math.sin(theta);
+    const dy = -rawX * Math.sin(theta) + rawY * Math.cos(theta);
     const b = drag.bbox;
     const h = drag.handle;
     const fromCenter = event.altKey;
@@ -700,6 +838,17 @@ export class SlideEditor {
     // Edge handles only change one axis.
     if (h === "n" || h === "s") { next.x = b.x; next.w = b.w; }
     if (h === "e" || h === "w") { next.y = b.y; next.h = b.h; }
+
+    if (drag.rotation) {
+      // The turned box keeps its pivot at the centre, so move the centre by the
+      // local shift rotated back into slide space.
+      const shiftX = next.x + next.w / 2 - cx;
+      const shiftY = next.y + next.h / 2 - cy;
+      const centreX = cx + shiftX * Math.cos(theta) - shiftY * Math.sin(theta);
+      const centreY = cy + shiftX * Math.sin(theta) + shiftY * Math.cos(theta);
+      next.x = centreX - next.w / 2;
+      next.y = centreY - next.h / 2;
+    }
 
     const sx = next.w / Math.max(b.w, 0.0001);
     const sy = next.h / Math.max(b.h, 0.0001);
@@ -753,9 +902,22 @@ export class SlideEditor {
     if (!slide) return;
     const box = this.box();
     const k = this.scale() || 1;
-    const object = this.hit(slide, { x: (event.clientX - box.left) / k, y: (event.clientY - box.top) / k });
+    const point = { x: (event.clientX - box.left) / k, y: (event.clientY - box.top) / k };
+    let object = this.hitInScope(slide, point);
+
+    // A double-click on a group steps into it and picks the child under the cursor.
+    if (object?.isGroup) {
+      event.preventDefault();
+      this.entered = [...this.entered, object.source.shapeId];
+      object = this.hit(slide, point);
+      this.selection = object ? new Set([object.key]) : new Set();
+      this.paintOverlay();
+      this.emit();
+      return;
+    }
     const element = object?.elements.find((candidate): candidate is TextElement =>
-      candidate.type === "text" && !!candidate.paragraphs?.length && !!candidate.source);
+      candidate.type === "text" && !!candidate.paragraphs?.length && !!candidate.source
+      && !candidate.source.readOnlyText);
     if (!object || !element) return;
     event.preventDefault();
     this.selection = new Set([object.key]);
@@ -776,6 +938,7 @@ export class SlideEditor {
       width: `${element.rect.w * k}px`,
       height: `${element.rect.h * k}px`,
       justifyContent: anchor,
+      transform: element.rotation ? `rotate(${element.rotation}deg)` : "",
       padding: `${(body?.marginTop ?? 4) * k}px ${(body?.marginRight ?? 8) * k}px ${(body?.marginBottom ?? 4) * k}px ${(body?.marginLeft ?? 8) * k}px`
     });
 
@@ -788,6 +951,11 @@ export class SlideEditor {
 
     editable.addEventListener("keydown", event => {
       event.stopPropagation();
+      if ((event.ctrlKey || event.metaKey) && !event.altKey && ["b", "i"].includes(event.key.toLowerCase())) {
+        event.preventDefault();
+        this.toggleStyle(event.key.toLowerCase() === "b" ? "bold" : "italic");
+        return;
+      }
       if (event.key === "Escape") {
         event.preventDefault();
         this.endTextEdit();
@@ -1014,7 +1182,8 @@ export class SlideEditor {
     return this.selectedObjects(slide)
       .flatMap(object => object.elements)
       .filter((element): element is TextElement =>
-        element.type === "text" && !!element.source && (element.paragraphs || []).some(paragraph =>
+        element.type === "text" && !!element.source && !element.source.readOnlyText
+        && (element.paragraphs || []).some(paragraph =>
           paragraph.runs.some(run => run.content !== "")));
   }
 
@@ -1107,11 +1276,32 @@ export class SlideEditor {
       return;
     }
     const rect = union(this.selectedObjects(slide).map(object => object.rect));
+    // Leave room for the rotation handle that sits above a single selection.
+    const lift = this.selection.size === 1 ? 30 : 0;
     this.toolbar.show(
-      { x: rect.x * k, y: rect.y * k, w: rect.w * k, h: rect.h * k },
+      { x: rect.x * k, y: rect.y * k - lift, w: rect.w * k, h: rect.h * k + lift },
       this.formatOfElements(slide, elements),
       bounds
     );
+  }
+
+  /** Ctrl+B / Ctrl+I: flip the style the same way the toolbar button would. */
+  private toggleStyle(kind: "bold" | "italic"): void {
+    const slide = this.host.getSlide();
+    if (!slide) return;
+    let state: FormatState | null = null;
+    if (this.textSession) {
+      const selection = window.getSelection();
+      const range = selection && selection.rangeCount ? selection.getRangeAt(0) : null;
+      if (range && !range.collapsed && this.textSession.body.contains(range.commonAncestorContainer)) {
+        state = this.formatOfDomSelection(range);
+      }
+    } else {
+      const elements = this.textElementsOf(slide);
+      if (elements.length > 0) state = this.formatOfElements(slide, elements);
+    }
+    if (!state) return;
+    this.applyFormat({ [kind]: state[kind] !== true });
   }
 
   private applyFormat(format: TextFormat): void {
@@ -1194,6 +1384,7 @@ export class SlideEditor {
     }
     const objects = this.objects(slide);
     const selected = objects.filter(object => this.selection.has(object.key));
+    this.paintGroupFrame(slide);
 
     const hovered = this.hoverKey && !this.selection.has(this.hoverKey)
       ? objects.find(object => object.key === this.hoverKey) : undefined;
@@ -1207,8 +1398,10 @@ export class SlideEditor {
       const rotation = selected.length === 1 ? selected[0].rotation : 0;
       this.place(this.selectBox, rect, rotation);
       this.selectBox.classList.toggle("is-multi", selected.length > 1);
-      const canResize = rotation === 0 && selected.every(object => object.rotation === 0);
+      const canResize = selected.length === 1 || selected.every(object => object.rotation === 0);
       this.selectBox.classList.toggle("no-resize", !canResize);
+      // Groups have no rotation of their own to write back yet.
+      this.selectBox.classList.toggle("no-rotate", !(selected.length === 1 && !selected[0].isGroup));
       // Small boxes drop the edge handles so corners stay reachable.
       const k = this.scale();
       this.selectBox.classList.toggle("is-compact", rect.w * k < 44 || rect.h * k < 44);
@@ -1216,6 +1409,21 @@ export class SlideEditor {
 
     this.paintGuides();
     this.updateToolbar();
+  }
+
+  /** Faint outline around the group the user has stepped into. */
+  private paintGroupFrame(slide: Slide): void {
+    if (this.entered.length === 0) {
+      this.groupFrame.style.display = "none";
+      return;
+    }
+    const members = slide.elements.filter(element =>
+      this.entered.every((id, index) => element.source?.groups?.[index]?.shapeId === id));
+    if (members.length === 0) {
+      this.groupFrame.style.display = "none";
+      return;
+    }
+    this.place(this.groupFrame, union(members.map(member => member.rect)));
   }
 
   private paintGuides(): void {

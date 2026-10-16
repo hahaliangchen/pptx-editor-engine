@@ -6,6 +6,7 @@ import {
   ComputedShapeStyle,
   EffectStyle,
   ElementSource,
+  GroupRef,
   FillStyle,
   GradientStop,
   ImageElement,
@@ -48,6 +49,7 @@ export * from "./pptx-virtual-dom";
 export class PptxParser {
   private zip: JSZip | null = null;
   private currentSlidePart = "";
+  private groupStack: GroupRef[] = [];
   private styleRegistry: StyleRegistry = { rules: {} };
   private nextStyleRuleId = 1;
   private themeStyleMatrix: ThemeStyleMatrix = { fills: [], backgroundFills: [], lines: [], effects: [] };
@@ -120,7 +122,8 @@ export class PptxParser {
         scaleY: transform.scaleY,
         offsetX: transform.offsetX,
         offsetY: transform.offsetY
-      }
+      },
+      ...(this.groupStack.length ? { groups: [...this.groupStack] } : {})
     };
   }
 
@@ -910,7 +913,36 @@ export class PptxParser {
             }
           }
         }
-        await this.parseElementsRecursive(node, childTransform, imgRelMap, elements, isTemplate, placeholderContext);
+        const groupId = querySelector(node, "p\\:cNvPr, cNvPr")?.getAttribute("id");
+        const group: GroupRef | null = !isTemplate && groupId
+          ? {
+              shapeId: groupId,
+              xform: {
+                scaleX: transform.scaleX,
+                scaleY: transform.scaleY,
+                offsetX: transform.offsetX,
+                offsetY: transform.offsetY
+              },
+              origRect: { x: 0, y: 0, w: 0, h: 0 }
+            }
+          : null;
+        const firstMember = elements.length;
+        if (group) this.groupStack.push(group);
+        try {
+          await this.parseElementsRecursive(node, childTransform, imgRelMap, elements, isTemplate, placeholderContext);
+        } finally {
+          if (group) this.groupStack.pop();
+        }
+        if (group) {
+          const members = elements.slice(firstMember);
+          if (members.length > 0) {
+            const left = Math.min(...members.map(m => m.rect.x));
+            const top = Math.min(...members.map(m => m.rect.y));
+            const right = Math.max(...members.map(m => m.rect.x + m.rect.w));
+            const bottom = Math.max(...members.map(m => m.rect.y + m.rect.h));
+            group.origRect = { x: left, y: top, w: right - left, h: bottom - top };
+          }
+        }
       } else if (tagName.endsWith("graphicFrame")) {
         // Table graphic frame
         await this.parseGraphicFrameNode(node, transform, elements, isTemplate);
@@ -1315,6 +1347,7 @@ export class PptxParser {
         transform.absoluteUnitScale,
         transform.absoluteUnitScale
       );
+      const firstTextElement = elements.length;
       await this.parseTextBody(
         txBody,
         rect.x,
@@ -1335,6 +1368,11 @@ export class PptxParser {
         placeholderContext?.slidePart,
         this.makeSource(isTemplate, cNvPr?.getAttribute("id"), transform)
       );
+      if (rotation) {
+        for (const element of elements.slice(firstTextElement)) {
+          if (element.type === "text") element.rotation = rotation;
+        }
+      }
     }
   }
 
@@ -1354,6 +1392,8 @@ export class PptxParser {
 
     const tbl = querySelector(node, "a\\:tbl, tbl");
     if (!tbl) return;
+    const firstCellElement = elements.length;
+    const frameId = querySelector(node, "p\\:cNvPr, cNvPr")?.getAttribute("id");
 
     // Get position of the graphic frame
     const xfrm = querySelector(node, "a\\:xfrm, xfrm");
@@ -1451,6 +1491,13 @@ export class PptxParser {
         currentX += actualWidth;
       }
       currentY += rowHeight;
+    }
+
+    // Every cell belongs to one selectable object: the table frame.
+    const tableSource = this.makeSource(isTemplate, frameId, transform);
+    if (tableSource) {
+      tableSource.readOnlyText = true;
+      for (const element of elements.slice(firstCellElement)) element.source = tableSource;
     }
   }
 

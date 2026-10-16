@@ -608,6 +608,13 @@ impl RustPptRenderer {
                 }
                 Element::Text(txt) => {
                     self.ctx.save();
+                    if txt.rotation != 0.0 {
+                        let cx = (txt.rect.x + txt.rect.w / 2.0) as f64;
+                        let cy = (txt.rect.y + txt.rect.h / 2.0) as f64;
+                        self.ctx.translate(cx, cy)?;
+                        self.ctx.rotate((txt.rotation as f64).to_radians())?;
+                        self.ctx.translate(-cx, -cy)?;
+                    }
                     let clips_to_shape = txt
                         .body
                         .as_ref()

@@ -43,6 +43,9 @@ pub struct Rect {
 pub struct TextElement {
     pub id: String,
     pub rect: Rect,
+    /// Rotation of the owning shape in degrees; text turns with its shape.
+    #[serde(default)]
+    pub rotation: f32,
     pub content: String,
     pub style: TextStyle,
     #[serde(default)]
