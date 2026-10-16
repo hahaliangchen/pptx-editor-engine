@@ -187,13 +187,16 @@ export interface StructureEdits {
   inserts: Map<string, InsertedShape[]>;
   relAdds: Map<string, RelAdd[]>;
   media: MediaAdd[];
+  /** Files that exist only in the edit session (slides made by "new" or "duplicate", and their relationships). */
+  virtual: Map<string, string>;
 }
 
 export const emptyStructure = (): StructureEdits => ({
   orders: new Map(),
   inserts: new Map(),
   relAdds: new Map(),
-  media: []
+  media: [],
+  virtual: new Map()
 });
 
 export function pushItem<T>(log: Map<string, T[]>, part: string, item: T): void {
@@ -311,10 +314,14 @@ const relsPathOf = (part: string): string => {
 const REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships";
 const R_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
 
-async function readDocument(zip: JSZip, path: string): Promise<{ xml: string; doc: Document } | null> {
-  const file = zip.file(path);
-  if (!file) return null;
-  const xml = await file.async("string");
+async function readDocument(
+  zip: JSZip,
+  path: string,
+  virtual?: Map<string, string>
+): Promise<{ xml: string; doc: Document } | null> {
+  const file = virtual?.has(path) ? null : zip.file(path);
+  if (!file && !virtual?.has(path)) return null;
+  const xml = virtual?.has(path) ? virtual.get(path)! : await file!.async("string");
   const doc = new DOMParser().parseFromString(xml, "application/xml");
   if (doc.getElementsByTagName("parsererror").length > 0) {
     throw new Error(`无法解析 ${path}，已取消导出。`);
@@ -326,10 +333,11 @@ async function readDocument(zip: JSZip, path: string): Promise<{ xml: string; do
 export async function readRelationships(
   zip: JSZip,
   part: string,
-  pending: RelAdd[] = []
+  pending: RelAdd[] = [],
+  virtual?: Map<string, string>
 ): Promise<Map<string, RelAdd>> {
   const result = new Map<string, RelAdd>();
-  const rels = await readDocument(zip, relsPathOf(part));
+  const rels = await readDocument(zip, relsPathOf(part), virtual);
   for (const rel of Array.from(rels?.doc.getElementsByTagNameNS(REL_NS, "Relationship") || [])) {
     result.set(rel.getAttribute("Id") || "", {
       id: rel.getAttribute("Id") || "",
@@ -365,7 +373,7 @@ export async function materializeShape(
   slides: Slide[],
   edits: EditSet
 ): Promise<{ xml: string; relationships: RelAdd[] } | null> {
-  const loaded = await readDocument(zip, part);
+  const loaded = await readDocument(zip, part, edits.structure.virtual);
   if (!loaded) return null;
   applyPartEdits(loaded.doc, part, slides, edits);
   const original = findShapeNode(loaded.doc, shapeId);
@@ -375,11 +383,31 @@ export async function materializeShape(
   for (const custom of Array.from(node.getElementsByTagNameNS("*", "custDataLst"))) {
     custom.parentNode?.removeChild(custom);
   }
-  const known = await readRelationships(zip, part, edits.structure.relAdds.get(part));
+  const known = await readRelationships(zip, part, edits.structure.relAdds.get(part), edits.structure.virtual);
   const relationships = relationshipIdsIn(node)
     .map(id => known.get(id))
     .filter((rel): rel is RelAdd => !!rel);
   return { xml: new XMLSerializer().serializeToString(node), relationships };
+}
+
+/**
+ * A whole slide as it is right now (every pending edit applied) with its
+ * relationships, for duplicating it.
+ */
+export async function materializeSlide(
+  zip: JSZip,
+  part: string,
+  slides: Slide[],
+  edits: EditSet
+): Promise<{ xml: string; relationships: RelAdd[] } | null> {
+  const loaded = await readDocument(zip, part, edits.structure.virtual);
+  if (!loaded) return null;
+  applyPartEdits(loaded.doc, part, slides, edits);
+  const known = await readRelationships(zip, part, edits.structure.relAdds.get(part), edits.structure.virtual);
+  return {
+    xml: new XMLSerializer().serializeToString(loaded.doc),
+    relationships: [...known.values()]
+  };
 }
 
 const CONTENT_TYPES = "[Content_Types].xml";
@@ -415,6 +443,175 @@ async function writeMedia(
   if (changed) {
     originals.set(CONTENT_TYPES, loaded.xml);
     zip.file(CONTENT_TYPES, new XMLSerializer().serializeToString(loaded.doc));
+  }
+}
+
+const PRESENTATION = "ppt/presentation.xml";
+const PRESENTATION_RELS = "ppt/_rels/presentation.xml.rels";
+const SLIDE_REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide";
+const SLIDE_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.presentationml.slide+xml";
+
+/** "ppt/slides/../media/x.png" -> "ppt/media/x.png", also for absolute targets. */
+export function resolveTarget(baseDir: string, target: string): string {
+  const parts = (target.startsWith("/") ? target.slice(1) : `${baseDir}/${target}`).split("/");
+  const out: string[] = [];
+  for (const part of parts) {
+    if (part === "..") out.pop();
+    else if (part !== ".") out.push(part);
+  }
+  return out.join("/");
+}
+
+interface Section {
+  list: Element;
+  ids: string[];
+}
+
+/**
+ * Sections are ranges of slides, so after slides are added, removed or moved
+ * each one is recomputed from where its first surviving slide ended up.
+ * Slides without a place of their own (new copies) join the section they sit in.
+ */
+function updateSections(doc: Document, finalIds: string[]): void {
+  const lists = Array.from(doc.getElementsByTagName("*")).filter(node => node.localName === "sectionLst");
+  if (lists.length === 0) return;
+  const sections: Section[] = [];
+  for (const section of Array.from(lists[0].children).filter(node => node.localName === "section")) {
+    const list = Array.from(section.children).find(node => node.localName === "sldIdLst");
+    if (!list) continue;
+    sections.push({
+      list,
+      ids: Array.from(list.children).filter(node => node.localName === "sldId").map(node => node.getAttribute("id") || "")
+    });
+  }
+  if (sections.length === 0) return;
+
+  const surviving = new Set(finalIds);
+  const anchors = sections.map(section => section.ids.find(id => surviving.has(id)) ?? null);
+  const members: string[][] = sections.map(() => []);
+  let current = 0;
+  for (const id of finalIds) {
+    const anchored = anchors.findIndex((anchor, index) => anchor === id && index > current);
+    if (anchored > 0) current = anchored;
+    members[current].push(id);
+  }
+  sections.forEach((section, index) => {
+    const template = Array.from(section.list.children).find(node => node.localName === "sldId");
+    const namespace = template?.namespaceURI || section.list.namespaceURI;
+    const prefix = template?.prefix ? `${template.prefix}:` : section.list.prefix ? `${section.list.prefix}:` : "";
+    for (const child of Array.from(section.list.children)) section.list.removeChild(child);
+    for (const id of members[index]) {
+      const node = doc.createElementNS(namespace, `${prefix}sldId`);
+      node.setAttribute("id", id);
+      section.list.appendChild(node);
+    }
+  });
+}
+
+/**
+ * Make the package's slide list match the editor's: new slides get an entry,
+ * deleted ones lose theirs (and their files), and the order follows `slides`.
+ * Slide parts that disappear are kept in memory so a later export can bring
+ * them back after an undo.
+ */
+async function syncSlideList(
+  zip: JSZip,
+  slides: Slide[],
+  originals: Map<string, string>,
+  addedFiles: string[],
+  removedFiles: Map<string, Uint8Array>
+): Promise<void> {
+  const presentation = await readDocument(zip, PRESENTATION);
+  const relationships = await readDocument(zip, PRESENTATION_RELS);
+  if (!presentation || !relationships) return;
+  const list = presentation.doc.getElementsByTagNameNS(P_NS, "sldIdLst")[0];
+  if (!list) return;
+
+  const relNodes = new Map(
+    Array.from(relationships.doc.getElementsByTagNameNS(REL_NS, "Relationship")).map(node => [node.getAttribute("Id") || "", node])
+  );
+  const entries = Array.from(list.children).filter(node => node.localName === "sldId").map(node => {
+    const rId = node.getAttributeNS(R_NS, "id") || "";
+    return { node, rId, id: node.getAttribute("id") || "", part: resolveTarget("ppt", relNodes.get(rId)?.getAttribute("Target") || "") };
+  });
+  const finalParts = slides.map(slide => slide.part!);
+  if (finalParts.length === entries.length && finalParts.every((part, index) => entries[index].part === part)) return;
+
+  const byPart = new Map(entries.map(entry => [entry.part, entry]));
+  let nextSlideId = Math.max(255, ...entries.map(entry => parseInt(entry.id, 10) || 0));
+  let nextRel = Math.max(0, ...[...relNodes.keys()].map(id => parseInt(id.replace(/\D/g, ""), 10) || 0));
+  const contentTypes = await readDocument(zip, CONTENT_TYPES);
+  const overrides = new Map(
+    Array.from(contentTypes?.doc.getElementsByTagNameNS(CT_NS, "Override") || []).map(node => [node.getAttribute("PartName") || "", node])
+  );
+  let typesChanged = false;
+
+  const finalNodes: Element[] = [];
+  const finalIds: string[] = [];
+  for (const part of finalParts) {
+    let entry = byPart.get(part);
+    if (!entry) {
+      nextSlideId += 1;
+      nextRel += 1;
+      const rId = `rId${nextRel}`;
+      const rel = relationships.doc.createElementNS(REL_NS, "Relationship");
+      rel.setAttribute("Id", rId);
+      rel.setAttribute("Type", SLIDE_REL);
+      rel.setAttribute("Target", part.replace(/^ppt\//, ""));
+      relationships.doc.documentElement.appendChild(rel);
+      const node = presentation.doc.createElementNS(P_NS, "p:sldId");
+      node.setAttribute("id", String(nextSlideId));
+      node.setAttributeNS(R_NS, "r:id", rId);
+      entry = { node, rId, id: String(nextSlideId), part };
+      if (contentTypes && !overrides.has(`/${part}`)) {
+        const override = contentTypes.doc.createElementNS(CT_NS, "Override");
+        override.setAttribute("PartName", `/${part}`);
+        override.setAttribute("ContentType", SLIDE_CONTENT_TYPE);
+        contentTypes.doc.documentElement.appendChild(override);
+        typesChanged = true;
+      }
+    }
+    finalNodes.push(entry.node);
+    finalIds.push(entry.id);
+  }
+
+  // Deleted slides: entry, relationship, content type, the slide's files and its notes page.
+  for (const entry of entries.filter(candidate => !finalParts.includes(candidate.part))) {
+    relNodes.get(entry.rId)?.parentNode?.removeChild(relNodes.get(entry.rId)!);
+    const slideDir = entry.part.slice(0, entry.part.lastIndexOf("/"));
+    const rels = await readDocument(zip, relsPathOf(entry.part));
+    const doomed = [entry.part, relsPathOf(entry.part)];
+    for (const rel of Array.from(rels?.doc.getElementsByTagNameNS(REL_NS, "Relationship") || [])) {
+      if ((rel.getAttribute("Type") || "").endsWith("/notesSlide")) {
+        const notes = resolveTarget(slideDir, rel.getAttribute("Target") || "");
+        doomed.push(notes, relsPathOf(notes));
+      }
+    }
+    for (const path of doomed) {
+      const file = zip.file(path);
+      if (!file) continue;
+      removedFiles.set(path, await file.async("uint8array"));
+      zip.remove(path);
+      const override = overrides.get(`/${path}`);
+      if (override) {
+        override.parentNode?.removeChild(override);
+        typesChanged = true;
+      }
+    }
+  }
+
+  for (const node of Array.from(list.children)) list.removeChild(node);
+  for (const node of finalNodes) list.appendChild(node);
+  updateSections(presentation.doc, finalIds);
+
+  const serializer = new XMLSerializer();
+  originals.set(PRESENTATION, presentation.xml);
+  zip.file(PRESENTATION, serializer.serializeToString(presentation.doc));
+  originals.set(PRESENTATION_RELS, relationships.xml);
+  zip.file(PRESENTATION_RELS, serializer.serializeToString(relationships.doc));
+  if (contentTypes && typesChanged) {
+    if (!originals.has(CONTENT_TYPES)) originals.set(CONTENT_TYPES, contentTypes.xml);
+    zip.file(CONTENT_TYPES, serializer.serializeToString(contentTypes.doc));
   }
 }
 
@@ -455,13 +652,22 @@ export async function exportEditedPptx(
   // (after an undo, say) starts again from the original package.
   const originals = new Map<string, string>();
   const addedFiles: string[] = [];
+  const removedFiles = new Map<string, Uint8Array>();
+  // Only slides that are still in the deck are written (and sorted out below).
+  const listed = slides.length > 0 && slides.every(slide => !!slide.part);
+  const livingParts = new Set(slides.map(slide => slide.part));
 
   try {
+    for (const [path, xml] of structure.virtual) {
+      zip.file(path, xml);
+      addedFiles.push(path);
+    }
     const parts = new Set([
       ...dirty.keys(), ...textEdits.keys(), ...styleEdits.keys(),
       ...structure.orders.keys(), ...structure.inserts.keys(), ...structure.relAdds.keys()
     ]);
     for (const part of parts) {
+      if (listed && !livingParts.has(part)) continue;
       const loaded = await readDocument(zip, part);
       if (!loaded) continue;
       originals.set(part, loaded.xml);
@@ -478,6 +684,7 @@ export async function exportEditedPptx(
     }
 
     if (structure.media.length > 0) await writeMedia(zip, structure.media, originals, addedFiles);
+    if (listed) await syncSlideList(zip, slides, originals, addedFiles, removedFiles);
 
     return await zip.generateAsync({
       type: "blob",
@@ -486,6 +693,7 @@ export async function exportEditedPptx(
     });
   } finally {
     for (const [path, xml] of originals) zip.file(path, xml);
+    for (const [path, bytes] of removedFiles) zip.file(path, bytes);
     for (const path of addedFiles) zip.remove(path);
   }
 }

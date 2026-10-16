@@ -1383,3 +1383,53 @@ label {
     display: none;
   }
 }
+
+/* ---------- Filmstrip actions ---------- */
+
+.sidebar-heading .sidebar-count {
+  margin-left: auto;
+}
+
+.sidebar-heading .icon-button {
+  margin-left: 8px;
+  width: 26px;
+  height: 26px;
+}
+
+.slide-item {
+  position: relative;
+  outline: none;
+}
+
+.slide-item:focus-visible .slide-thumb {
+  box-shadow: 0 0 0 2px var(--accent);
+}
+
+.slide-item.is-dragging {
+  opacity: 0.4;
+}
+
+.slide-item.drop-before::after,
+.slide-item.drop-after::after {
+  content: "";
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  height: 3px;
+  background: var(--accent);
+  border-radius: 2px;
+  pointer-events: none;
+}
+
+.slide-item.drop-before::after {
+  top: -2px;
+}
+
+.slide-item.drop-after::after {
+  bottom: -2px;
+}
+
+.edit-menu.is-fixed {
+  position: fixed;
+  z-index: 1000;
+}

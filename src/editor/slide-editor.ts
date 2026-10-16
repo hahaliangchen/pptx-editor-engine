@@ -663,6 +663,11 @@ export class SlideEditor {
     this.history.record(command);
   }
 
+  /** Record a command that something outside the editor (the slide list) has already applied. */
+  public record(command: Command): void {
+    this.history.record(command);
+  }
+
   public hasClipboard(): boolean {
     return this.clipboard.length > 0;
   }

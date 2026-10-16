@@ -11,6 +11,8 @@ import {
 } from "./pptx-parser";
 import * as wasm from "../rust-engine/pkg/ppt_engine";
 import { EditorState, SlideEditor } from "./editor/slide-editor";
+import { Command } from "./editor/history";
+import { blankSlideXml, prepareSlideCopy, relationshipsXml } from "./editor/slides";
 import {
   DirtyShapes,
   TextEdits,
@@ -21,6 +23,7 @@ import {
   StyleEdits,
   emptyStructure,
   materializeShape,
+  materializeSlide,
   readRelationships,
   popOp,
   popTextOp,
@@ -38,6 +41,8 @@ export interface ViewerOptions {
   onLoadComplete?: (document: PptVirtualDocument) => void | Promise<void>;
   /** Fired when selection or undo/redo availability changes. */
   onEditStateChange?: (state: EditorState) => void;
+  /** Fired when slides were added, removed or reordered (also by undo/redo). */
+  onSlidesChanged?: (document: PptVirtualDocument, currentIndex: number) => void;
   /** Fired (debounced) after an edit so thumbnails can be refreshed. */
   onSlideEdited?: (slideIndex: number, slide: Slide) => void;
 }
@@ -103,6 +108,9 @@ export default class PptViewer {
   private hiddenElements = new Set<SlideElement>();
   private editNotifyTimer = 0;
   private onSlideEdited?: (slideIndex: number, slide: Slide) => void;
+  private onSlidesChanged?: (document: PptVirtualDocument, currentIndex: number) => void;
+  private slideSerial = 0;
+  private originalSlideParts: Array<string | undefined> = [];
 
   // Callbacks
   private onSlideChange?: (slideIndex: number, slide: Slide) => void;
@@ -113,6 +121,7 @@ export default class PptViewer {
     this.onSlideChange = options.onSlideChange;
     this.onLoadComplete = options.onLoadComplete;
     this.onSlideEdited = options.onSlideEdited;
+    this.onSlidesChanged = options.onSlidesChanged;
     this.preferredWidth = options.width;
     this.preferredHeight = options.height;
     this.debugTextBoxes = options.debugTextBoxes ?? false;
@@ -446,7 +455,8 @@ export default class PptViewer {
    * renderer is bound to a single 2D context, so this temporarily repurposes
    * the main canvas, then restores and repaints the active slide.
    */
-  public async renderThumbnails(targetCssWidth = 240, onlyIndex?: number): Promise<string[]> {
+  public async renderThumbnails(targetCssWidth = 240, only?: number | number[]): Promise<string[]> {
+    const wanted = only === undefined ? null : new Set(Array.isArray(only) ? only : [only]);
     if (!this.presentation || !this.renderer) return [];
     await this.engineReady;
 
@@ -475,7 +485,7 @@ export default class PptViewer {
 
     try {
       for (const [slideIndex, slide] of this.presentation.slides.entries()) {
-        if (onlyIndex !== undefined && slideIndex !== onlyIndex) {
+        if (wanted && !wanted.has(slideIndex)) {
           thumbnails.push("");
           continue;
         }
@@ -645,7 +655,9 @@ export default class PptViewer {
   public hasUnsavedEdits(): boolean {
     return this.dirtyShapes.size > 0 || this.textEdits.size > 0 || this.styleEdits.size > 0
       || this.structureEdits.orders.size > 0 || this.structureEdits.inserts.size > 0
-      || this.structureEdits.media.length > 0;
+      || this.structureEdits.media.length > 0
+      || (this.presentation?.slides || []).some((slide, index) => slide.part !== this.originalSlideParts[index])
+      || (this.presentation?.slides.length ?? 0) !== this.originalSlideParts.length;
   }
 
   /** Build a new .pptx with every edit written back into the original package. */
@@ -653,6 +665,144 @@ export default class PptViewer {
     const zip = this.parser.getZip();
     if (!zip || !this.presentation) throw new Error("请先打开一个 .pptx 文件。");
     return exportEditedPptx(zip, this.presentation.slides, this.dirtyShapes, this.textEdits, this.styleEdits, this.structureEdits);
+  }
+
+  // ------------------------------------------------------------ slide list
+
+  private editSet() {
+    return {
+      dirty: this.dirtyShapes,
+      textEdits: this.textEdits,
+      styleEdits: this.styleEdits,
+      structure: this.structureEdits
+    };
+  }
+
+  private allocateSlidePart(): string {
+    const taken = [
+      ...Object.keys(this.parser.getZip()?.files || {}),
+      ...this.structureEdits.virtual.keys(),
+      ...(this.presentation?.slides || []).map(slide => slide.part || "")
+    ];
+    let highest = 0;
+    for (const path of taken) {
+      const match = path.match(/^ppt\/slides\/slide(\d+)\.xml$/);
+      if (match) highest = Math.max(highest, parseInt(match[1], 10));
+    }
+    return `ppt/slides/slide${highest + 1}.xml`;
+  }
+
+  private cloneElements(elements: SlideElement[], part?: string): SlideElement[] {
+    return elements.map(element => {
+      const copy: SlideElement = JSON.parse(JSON.stringify(element));
+      if (part && copy.source) copy.source.part = part;
+      return copy;
+    });
+  }
+
+  /** Swap the slide list (and current page) and tell the UI; used by every slide command. */
+  public async setSlides(slides: Slide[], index: number): Promise<void> {
+    if (!this.presentation) return;
+    this.presentation.slides = slides;
+    this.currentSlideIndex = Math.max(0, Math.min(index, slides.length - 1));
+    this.editor.clearSelection();
+    await this.renderCurrentSlide();
+    this.onSlidesChanged?.(this.presentation, this.currentSlideIndex);
+  }
+
+  private recordSlideChange(label: string, before: Slide[], beforeIndex: number, after: Slide[], afterIndex: number): void {
+    const command: Command = {
+      label,
+      apply: () => { void this.setSlides([...after], afterIndex); },
+      revert: () => { void this.setSlides([...before], beforeIndex); }
+    };
+    command.apply();
+    this.editor.record(command);
+  }
+
+  private requirePackage(): void {
+    if (!this.parser.getZip() || !this.presentation) throw new Error("请先打开一个 .pptx 文件。");
+  }
+
+  /** A blank page with the same layout as `index`, right after it. */
+  public async addSlide(index = this.currentSlideIndex): Promise<void> {
+    this.requirePackage();
+    const zip = this.parser.getZip()!;
+    const slides = this.presentation!.slides;
+    const reference = slides[index];
+    if (!reference?.part) return;
+
+    const known = await readRelationships(zip, reference.part, this.structureEdits.relAdds.get(reference.part), this.structureEdits.virtual);
+    const layout = [...known.values()].find(rel => rel.type.endsWith("/slideLayout"));
+    if (!layout) throw new Error("找不到这一页使用的版式。");
+
+    const part = this.allocateSlidePart();
+    const xml = blankSlideXml();
+    this.structureEdits.virtual.set(part, xml);
+    this.structureEdits.virtual.set(
+      `${part.slice(0, part.lastIndexOf("/"))}/_rels/${part.slice(part.lastIndexOf("/") + 1)}.rels`,
+      relationshipsXml([{ ...layout, id: "rId1" }])
+    );
+    const slide: Slide = {
+      id: `slide_${++this.slideSerial}`,
+      // Decoration from the master and layout comes along; shapes do not.
+      elements: this.cloneElements(reference.elements.filter(element => !element.source)),
+      rawXml: xml,
+      emuPerPx: reference.emuPerPx,
+      part,
+      xform: reference.xform
+    };
+    const after = [...slides];
+    after.splice(index + 1, 0, slide);
+    this.recordSlideChange("新建幻灯片", [...slides], this.currentSlideIndex, after, index + 1);
+  }
+
+  /** A copy of slide `index`, with the edits made so far, right after it. */
+  public async duplicateSlide(index = this.currentSlideIndex): Promise<void> {
+    this.requirePackage();
+    const zip = this.parser.getZip()!;
+    const slides = this.presentation!.slides;
+    const source = slides[index];
+    if (!source?.part) return;
+
+    const snapshot = await materializeSlide(zip, source.part, slides, this.editSet());
+    if (!snapshot) return;
+    const copy = prepareSlideCopy(snapshot);
+    const part = this.allocateSlidePart();
+    this.structureEdits.virtual.set(part, copy.xml);
+    this.structureEdits.virtual.set(
+      `${part.slice(0, part.lastIndexOf("/"))}/_rels/${part.slice(part.lastIndexOf("/") + 1)}.rels`,
+      relationshipsXml(copy.relationships)
+    );
+    const slide: Slide = {
+      id: `slide_${++this.slideSerial}`,
+      elements: this.cloneElements(source.elements, part),
+      rawXml: copy.xml,
+      emuPerPx: source.emuPerPx,
+      part,
+      xform: source.xform
+    };
+    const after = [...slides];
+    after.splice(index + 1, 0, slide);
+    this.recordSlideChange("复制幻灯片", [...slides], this.currentSlideIndex, after, index + 1);
+  }
+
+  public deleteSlide(index = this.currentSlideIndex): void {
+    this.requirePackage();
+    const slides = this.presentation!.slides;
+    if (slides.length <= 1) throw new Error("至少需要保留一页幻灯片。");
+    const after = slides.filter((_, i) => i !== index);
+    this.recordSlideChange("删除幻灯片", [...slides], this.currentSlideIndex, after, Math.min(index, after.length - 1));
+  }
+
+  public moveSlide(from: number, to: number): void {
+    this.requirePackage();
+    const slides = this.presentation!.slides;
+    if (from === to || from < 0 || from >= slides.length || to < 0 || to >= slides.length) return;
+    const after = [...slides];
+    const [moved] = after.splice(from, 1);
+    after.splice(to, 0, moved);
+    this.recordSlideChange("移动幻灯片", [...slides], this.currentSlideIndex, after, to);
   }
 
   private materializeSource(source: { part: string; shapeId: string }) {
@@ -748,6 +898,8 @@ export default class PptViewer {
   }
 
   private resetEditing(): void {
+    this.originalSlideParts = (this.presentation?.slides || []).map(slide => slide.part);
+    this.slideSerial = this.presentation?.slides.length ?? 0;
     this.dirtyShapes = new Map();
     this.textEdits = new Map();
     this.styleEdits = new Map();

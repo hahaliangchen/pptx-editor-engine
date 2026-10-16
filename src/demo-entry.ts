@@ -1,6 +1,7 @@
 import PptViewer from "./index";
 import { InspectorPanel } from "./editor/inspector-panel";
 import { InsertBar } from "./editor/insert-bar";
+import { Filmstrip } from "./filmstrip";
 import { PptVirtualDocument } from "./pptx-parser";
 import "./style.css";
 
@@ -378,82 +379,35 @@ const initializeDemo = () => {
       insertBar?.update(state.tool, viewer.canExport());
     },
     onSlideEdited: async (index) => {
-      try {
-        const [url] = await viewer.renderThumbnails(240, index).then(urls => [urls[index]]);
-        const img = slideList.querySelectorAll<HTMLImageElement>(".slide-thumb img")[index];
-        if (img && url) img.src = url;
-      } catch (err) {
-        console.error("Failed to refresh thumbnail:", err);
-      }
-    },
-    onSlideChange: (index) => {
-      // Update page indicator
-      pageIndicator.textContent = `Slide ${index + 1} / ${viewer.getSlidesCount()}`;
-      
-      // Update button states
-      btnPrev.disabled = index === 0;
-      btnNext.disabled = index === viewer.getSlidesCount() - 1;
-
-      // Highlight sidebar active item
-      const items = slideList.querySelectorAll(".slide-item");
-      items.forEach((item, idx) => {
-        if (idx === index) {
-          item.classList.add("active");
-        } else {
-          item.classList.remove("active");
-        }
-      });
-
+      await filmstrip.refresh(index);
     },
     onLoadComplete: async (ast) => {
       console.log(`[Demo] onLoadComplete:start slides=${ast.slides.length}`);
-      // Hide welcome view
       welcomeView.style.display = "none";
-      sidebarCount.textContent = ast.slides.length.toString();
-
-      // Build the thumbnail filmstrip with loading placeholders first.
-      slideList.innerHTML = "";
-      const thumbImgs: HTMLImageElement[] = [];
-      const thumbBoxes: HTMLElement[] = [];
-      ast.slides.forEach((_, idx) => {
-        const li = document.createElement("li");
-        li.className = `slide-item ${idx === 0 ? "active" : ""}`;
-        li.onclick = () => viewer.selectSlide(idx);
-        li.setAttribute("aria-label", `幻灯片 ${idx + 1}`);
-
-        const thumb = document.createElement("div");
-        thumb.className = "slide-thumb is-loading";
-
-        const img = document.createElement("img");
-        img.alt = `幻灯片 ${idx + 1} 缩略图`;
-        img.style.display = "none";
-        thumb.appendChild(img);
-
-        li.appendChild(thumb);
-        slideList.appendChild(li);
-        thumbImgs.push(img);
-        thumbBoxes.push(thumb);
-      });
-
-      // Pre-render every slide to a real bitmap thumbnail.
-      try {
-        const dataUrls = await viewer.renderThumbnails();
-        console.log("[Demo] thumbnails:done");
-        dataUrls.forEach((url, idx) => {
-          const box = thumbBoxes[idx];
-          box.classList.remove("is-loading");
-          if (url) {
-            thumbImgs[idx].src = url;
-            thumbImgs[idx].style.display = "block";
-          }
-        });
-      } catch (err) {
-        console.error("Failed to render thumbnails:", err);
-        thumbBoxes.forEach((box) => box.classList.remove("is-loading"));
-      }
+      await filmstrip.rebuild(ast.slides, viewer.getCurrentSlideIndex());
       console.log("[Demo] onLoadComplete:done");
+    },
+    onSlidesChanged: async (doc, index) => {
+      await filmstrip.rebuild(doc.slides, index);
+      pageIndicator.textContent = `Slide ${index + 1} / ${doc.slides.length}`;
+      btnPrev.disabled = index === 0;
+      btnNext.disabled = index === doc.slides.length - 1;
     }
   });
+
+  const report = (err: unknown) => alert(err instanceof Error ? err.message : String(err));
+  const filmstrip = new Filmstrip(slideList, sidebarCount, {
+    select: (index) => void viewer.selectSlide(index),
+    add: (index) => void viewer.addSlide(index).catch(report),
+    duplicate: (index) => void viewer.duplicateSlide(index).catch(report),
+    remove: (index) => { try { viewer.deleteSlide(index); } catch (err) { report(err); } },
+    move: (from, to) => { try { viewer.moveSlide(from, to); } catch (err) { report(err); } },
+    renderThumbnails: (indices) => viewer.renderThumbnails(240, indices)
+  });
+  const btnAddSlide = document.getElementById("btn-add-slide");
+  if (btnAddSlide) {
+    btnAddSlide.onclick = () => void viewer.addSlide().catch(report);
+  }
 
   // Load Demo triggers
   const loadDemo = () => {
