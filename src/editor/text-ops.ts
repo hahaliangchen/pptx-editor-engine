@@ -21,6 +21,11 @@ export interface TextFormat {
   fontSizePt?: number;
 }
 
+/** Paragraph-level formatting. */
+export interface ParagraphFormat {
+  align?: "left" | "center" | "right";
+}
+
 export interface TextOp {
   /** Offsets into the flat text, before the edit. */
   start: number;
@@ -28,6 +33,8 @@ export interface TextOp {
   insert: string;
   /** When set the op only restyles [start, end) and `insert` is ignored. */
   format?: TextFormat;
+  /** When set the op restyles every paragraph touched by [start, end]; `insert` is ignored. */
+  paragraph?: ParagraphFormat;
 }
 
 export interface TextModel<P, R> {
@@ -47,6 +54,7 @@ export interface TextModel<P, R> {
   newParagraphAfter(paragraph: P): P;
   removeParagraph(paragraph: P): void;
   setFormat(run: R, format: TextFormat): void;
+  setParagraphFormat(paragraph: P, format: ParagraphFormat): void;
 }
 
 export function flatText<P, R>(model: TextModel<P, R>): string {
@@ -157,6 +165,10 @@ export function diffText(before: string, after: string): TextOp[] {
 export function applyTextOp<P, R>(model: TextModel<P, R>, op: TextOp): void {
   if (op.format) {
     applyFormat(model, op.start, op.end, op.format);
+    return;
+  }
+  if (op.paragraph) {
+    applyParagraphFormat(model, op.start, op.end, op.paragraph);
     return;
   }
   const insert = op.insert.split(LINE_BREAK).join("");
@@ -329,5 +341,15 @@ function applyFormat<P, R>(model: TextModel<P, R>, start: number, end: number, f
       model.setText(run, middle);
       model.setFormat(run, format);
     }
+  }
+}
+
+/** Paragraph formatting reaches every paragraph the range touches; a caret touches one. */
+function applyParagraphFormat<P, R>(model: TextModel<P, R>, start: number, end: number, format: ParagraphFormat): void {
+  let cursor = 0;
+  for (const paragraph of model.paragraphs()) {
+    const length = paragraphLength(model, paragraph);
+    if (start <= cursor + length && end >= cursor) model.setParagraphFormat(paragraph, format);
+    cursor += length + 1;
   }
 }

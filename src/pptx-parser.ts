@@ -1264,7 +1264,10 @@ export class PptxParser {
       || computedStyle.effects?.fillOverlay
     );
 
-    if (hasFill || hasBorder || hasEffects) {
+    // Slide shapes always get a shape element, even a see-through one, so the
+    // editor has something to give a fill or border to later.
+    const editableShape = !isTemplate && !!cNvPr?.getAttribute("id");
+    if (hasFill || hasBorder || hasEffects || editableShape) {
       elements.push({
         type: "shape",
         id: `shape_bg_${id}`,

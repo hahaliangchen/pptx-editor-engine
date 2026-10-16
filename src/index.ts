@@ -16,7 +16,10 @@ import {
   TextEdits,
   exportEditedPptx,
   markDirty,
+  StyleEdits,
+  popOp,
   popTextOp,
+  pushOp,
   pushTextOp
 } from "./pptx-exporter";
 
@@ -89,6 +92,7 @@ export default class PptViewer {
   } | null = null;
   private dirtyShapes: DirtyShapes = new Map();
   private textEdits: TextEdits = new Map();
+  private styleEdits: StyleEdits = new Map();
   private hiddenElements = new Set<SlideElement>();
   private editNotifyTimer = 0;
   private onSlideEdited?: (slideIndex: number, slide: Slide) => void;
@@ -141,7 +145,9 @@ export default class PptViewer {
       beginTextEdit: (slide, element) => this.setHiddenElements(slide, [element]),
       endTextEdit: slide => this.setHiddenElements(slide, []),
       recordTextOp: (source, op) => pushTextOp(this.textEdits, source, op),
-      discardTextOp: source => popTextOp(this.textEdits, source)
+      discardTextOp: source => popTextOp(this.textEdits, source),
+      recordStyleOp: (source, op) => pushOp(this.styleEdits, source, op),
+      discardStyleOp: source => popOp(this.styleEdits, source)
     });
     if (options.onEditStateChange) this.editor.subscribe(options.onEditStateChange);
 
@@ -553,25 +559,38 @@ export default class PptViewer {
     this.editor.deleteSelection();
   }
 
+  public applyShapeStyle(op: Parameters<SlideEditor["applyShapeStyle"]>[0]): void {
+    this.editor.applyShapeStyle(op);
+  }
+
+  public alignParagraphs(align: "left" | "center" | "right"): void {
+    this.editor.alignParagraphs(align);
+  }
+
+  public alignToSlide(edge: Parameters<SlideEditor["alignToSlide"]>[0]): void {
+    this.editor.alignToSlide(edge);
+  }
+
   /** True when edits can be written back to an opened .pptx package. */
   public canExport(): boolean {
     return this.parser.getZip() !== null;
   }
 
   public hasUnsavedEdits(): boolean {
-    return this.dirtyShapes.size > 0 || this.textEdits.size > 0;
+    return this.dirtyShapes.size > 0 || this.textEdits.size > 0 || this.styleEdits.size > 0;
   }
 
   /** Build a new .pptx with every edit written back into the original package. */
   public async exportPptx(): Promise<Blob> {
     const zip = this.parser.getZip();
     if (!zip || !this.presentation) throw new Error("请先打开一个 .pptx 文件。");
-    return exportEditedPptx(zip, this.presentation.slides, this.dirtyShapes, this.textEdits);
+    return exportEditedPptx(zip, this.presentation.slides, this.dirtyShapes, this.textEdits, this.styleEdits);
   }
 
   private resetEditing(): void {
     this.dirtyShapes = new Map();
     this.textEdits = new Map();
+    this.styleEdits = new Map();
     this.hiddenElements.clear();
     // Fonts differ per document, so the drag renderer is rebuilt on demand.
     this.dragRenderer = null;

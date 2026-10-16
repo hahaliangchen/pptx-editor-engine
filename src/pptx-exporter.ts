@@ -3,6 +3,8 @@ import { ElementSource, GroupRef, Rect, Slide } from "./pptx-virtual-dom";
 import { getDirectChild } from "./pptx-xml";
 import { TextOp } from "./editor/text-ops";
 import { writeTextOps } from "./pptx-text-writer";
+import { ShapeStyleOp } from "./editor/shape-ops";
+import { writeShapeStyleOps } from "./pptx-style-writer";
 
 const A_NS = "http://schemas.openxmlformats.org/drawingml/2006/main";
 const P_NS = "http://schemas.openxmlformats.org/presentationml/2006/main";
@@ -12,23 +14,29 @@ const SHAPE_TAGS = new Set(["sp", "pic", "cxnSp", "grpSp", "graphicFrame"]);
 /** Edited shapes, keyed by slide part then by p:cNvPr id. */
 export type DirtyShapes = Map<string, Set<string>>;
 
-/** Text replacements recorded per shape, in the order they were made. */
-export type TextEdits = Map<string, Map<string, TextOp[]>>;
+/** Edits recorded per shape, in the order they were made. */
+export type OpLog<T> = Map<string, Map<string, T[]>>;
 
-export function pushTextOp(edits: TextEdits, source: ElementSource, op: TextOp): void {
-  let shapes = edits.get(source.part);
-  if (!shapes) edits.set(source.part, shapes = new Map());
+export type TextEdits = OpLog<TextOp>;
+export type StyleEdits = OpLog<ShapeStyleOp>;
+
+export function pushOp<T>(log: OpLog<T>, source: ElementSource, op: T): void {
+  let shapes = log.get(source.part);
+  if (!shapes) log.set(source.part, shapes = new Map());
   const ops = shapes.get(source.shapeId) || [];
   ops.push(op);
   shapes.set(source.shapeId, ops);
 }
 
-export function popTextOp(edits: TextEdits, source: ElementSource): void {
-  const ops = edits.get(source.part)?.get(source.shapeId);
+export function popOp<T>(log: OpLog<T>, source: ElementSource): void {
+  const ops = log.get(source.part)?.get(source.shapeId);
   ops?.pop();
-  if (ops && ops.length === 0) edits.get(source.part)!.delete(source.shapeId);
-  if (edits.get(source.part)?.size === 0) edits.delete(source.part);
+  if (ops && ops.length === 0) log.get(source.part)!.delete(source.shapeId);
+  if (log.get(source.part)?.size === 0) log.delete(source.part);
 }
+
+export const pushTextOp = pushOp<TextOp>;
+export const popTextOp = popOp<TextOp>;
 
 export function markDirty(dirty: DirtyShapes, source: ElementSource | undefined): void {
   if (!source) return;
@@ -159,7 +167,8 @@ export async function exportEditedPptx(
   zip: JSZip,
   slides: Slide[],
   dirty: DirtyShapes,
-  textEdits: TextEdits = new Map()
+  textEdits: TextEdits = new Map(),
+  styleEdits: StyleEdits = new Map()
 ): Promise<Blob> {
   const serializer = new XMLSerializer();
   // Edited parts are put back once the archive is built, so a later export
@@ -167,7 +176,7 @@ export async function exportEditedPptx(
   const originals = new Map<string, string>();
 
   try {
-    const parts = new Set([...dirty.keys(), ...textEdits.keys()]);
+    const parts = new Set([...dirty.keys(), ...textEdits.keys(), ...styleEdits.keys()]);
     for (const part of parts) {
       const shapeIds = dirty.get(part) || new Set<string>();
       const file = zip.file(part);
@@ -211,6 +220,11 @@ export async function exportEditedPptx(
             );
           }
         }
+      }
+
+      for (const [shapeId, ops] of styleEdits.get(part) || []) {
+        const shape = findShapeNode(doc, shapeId);
+        if (shape && ops.length > 0) writeShapeStyleOps(shape, ops);
       }
 
       for (const [shapeId, ops] of textEdits.get(part) || []) {

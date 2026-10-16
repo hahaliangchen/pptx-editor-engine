@@ -53,6 +53,11 @@ export function vdomTextModel(
       const index = paragraphs.indexOf(paragraph);
       if (index >= 0 && paragraphs.length > 1) paragraphs.splice(index, 1);
     },
+    setParagraphFormat: (paragraph, format) => {
+      if (format.align === undefined) return;
+      paragraph.style.align = format.align;
+      for (const run of paragraph.runs) run.style.align = format.align;
+    },
     setFormat: (run, format) => {
       if (format.bold !== undefined) run.style.bold = format.bold;
       if (format.italic !== undefined) run.style.italic = format.italic;

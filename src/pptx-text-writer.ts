@@ -1,6 +1,7 @@
 import { LINE_BREAK, TextFormat, TextModel, TextOp, applyTextOp } from "./editor/text-ops";
 import { getDirectChild, getDirectChildren } from "./pptx-xml";
 
+const A_NS = "http://schemas.openxmlformats.org/drawingml/2006/main";
 const RUN_TAGS = ["r", "fld", "br"];
 const isRunNode = (node: Element) => RUN_TAGS.includes(node.localName);
 
@@ -22,7 +23,7 @@ function xmlTextModel(txBody: Element): TextModel<Element, Element> {
       if (run.localName === "br") return;
       let t = getDirectChild(run, "t");
       if (!t) {
-        t = doc.createElementNS(run.namespaceURI, "a:t");
+        t = doc.createElementNS(A_NS, "a:t");
         run.appendChild(t);
       }
       t.textContent = text;
@@ -35,14 +36,14 @@ function xmlTextModel(txBody: Element): TextModel<Element, Element> {
       if (copy.localName === "br") return copy;
       let t = getDirectChild(copy, "t");
       if (!t) {
-        t = doc.createElementNS(copy.namespaceURI, "a:t");
+        t = doc.createElementNS(A_NS, "a:t");
         copy.appendChild(t);
       }
       t.textContent = text;
       return copy;
     },
     newRun: (paragraph, text) => {
-      const ns = paragraph.namespaceURI;
+      const ns = A_NS;
       const run = doc.createElementNS(ns, "a:r");
       // The paragraph's end properties describe the formatting of new text.
       const end = getDirectChild(paragraph, "endParaRPr");
@@ -75,7 +76,16 @@ function xmlTextModel(txBody: Element): TextModel<Element, Element> {
     removeParagraph: paragraph => {
       if (getDirectChildren(txBody, "p").length > 1) paragraph.parentNode?.removeChild(paragraph);
     },
-    setFormat: (run, format) => writeRunFormat(run, format)
+    setFormat: (run, format) => writeRunFormat(run, format),
+    setParagraphFormat: (paragraph, format) => {
+      if (format.align === undefined) return;
+      let pPr = getDirectChild(paragraph, "pPr");
+      if (!pPr) {
+        pPr = doc.createElementNS(A_NS, "a:pPr");
+        paragraph.insertBefore(pPr, paragraph.firstChild);
+      }
+      pPr.setAttribute("algn", { left: "l", center: "ctr", right: "r" }[format.align]);
+    }
   };
 }
 
@@ -83,7 +93,7 @@ const FILL_TAGS = ["noFill", "solidFill", "gradFill", "blipFill", "pattFill", "g
 
 function writeRunFormat(run: Element, format: TextFormat): void {
   const doc = run.ownerDocument;
-  const ns = run.namespaceURI;
+  const ns = A_NS;
   let rPr = getDirectChild(run, "rPr");
   if (!rPr) {
     rPr = doc.createElementNS(ns, "a:rPr");

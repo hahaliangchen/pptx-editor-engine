@@ -1,4 +1,5 @@
 import PptViewer from "./index";
+import { InspectorPanel } from "./editor/inspector-panel";
 import { PptVirtualDocument } from "./pptx-parser";
 import "./style.css";
 
@@ -328,6 +329,14 @@ const initializeDemo = () => {
   const btnExport = document.getElementById("btn-export") as HTMLButtonElement;
   const selectionHint = document.getElementById("selection-hint") as HTMLElement;
   let openedFileName = "presentation.pptx";
+  const inspectorRoot = document.getElementById("inspector");
+  const inspector = inspectorRoot
+    ? new InspectorPanel(inspectorRoot, {
+      onShapeStyle: op => viewer.applyShapeStyle(op),
+      onAlignText: align => viewer.alignParagraphs(align),
+      onAlignSlide: edge => viewer.alignToSlide(edge)
+    })
+    : null;
 
   // Initialize Viewer
   const viewer = new PptViewer({
@@ -341,6 +350,7 @@ const initializeDemo = () => {
         ? "点击选择元素"
         : `已选中 ${state.selectionCount} 个元素`;
       btnExport.disabled = !viewer.canExport();
+      inspector?.update(state.properties, state.selectionCount);
     },
     onSlideEdited: async (index) => {
       try {

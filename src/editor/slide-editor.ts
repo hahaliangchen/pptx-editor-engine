@@ -1,7 +1,16 @@
-import { ElementSource, Rect, Slide, SlideElement, TextElement, TextParagraph } from "../pptx-virtual-dom";
+import { ElementSource, Rect, ShapeElement, Slide, SlideElement, TextElement, TextParagraph } from "../pptx-virtual-dom";
 import { Command, History } from "./history";
 import { LINE_BREAK, TextFormat, TextOp, applyTextOp, diffText } from "./text-ops";
 import { FormatState, FormatToolbar } from "./format-toolbar";
+import { SelectionProperties, describeSelection } from "./properties";
+import {
+  ShapeSnapshot,
+  ShapeStyleOp,
+  applyAnchorOp,
+  applyShapeStyleOp,
+  restoreShape,
+  snapshotShape
+} from "./shape-ops";
 import { normalizeParagraphs, paragraphsText, vdomTextModel } from "./text-model-vdom";
 
 export interface EditorHost {
@@ -24,12 +33,16 @@ export interface EditorHost {
   endTextEdit(slide: Slide): void;
   recordTextOp(source: ElementSource, op: TextOp): void;
   discardTextOp(source: ElementSource): void;
+  recordStyleOp(source: ElementSource, op: ShapeStyleOp): void;
+  discardStyleOp(source: ElementSource): void;
 }
 
 export interface EditorState {
   canUndo: boolean;
   canRedo: boolean;
   selectionCount: number;
+  /** Look of the selection, for the properties panel; null when nothing is selected. */
+  properties: SelectionProperties | null;
 }
 
 interface SceneObject {
@@ -172,6 +185,61 @@ class DeleteCommand implements Command {
   }
 }
 
+class ShapeStyleCommand implements Command {
+  public readonly label = "设置形状样式";
+
+  constructor(
+    private slide: Slide,
+    private items: Array<{ shape: ShapeElement; before: ShapeSnapshot; after: ShapeSnapshot }>,
+    private op: ShapeStyleOp,
+    private editor: SlideEditor,
+    private host: EditorHost
+  ) {}
+
+  apply(): void {
+    for (const { shape, after } of this.items) {
+      restoreShape(shape, after);
+      if (shape.source) this.host.recordStyleOp(shape.source, this.op);
+    }
+    this.editor.afterCommand(this.slide, [], false);
+  }
+
+  revert(): void {
+    for (const { shape, before } of this.items) {
+      restoreShape(shape, before);
+      if (shape.source) this.host.discardStyleOp(shape.source);
+    }
+    this.editor.afterCommand(this.slide, [], false);
+  }
+}
+
+class AnchorCommand implements Command {
+  public readonly label = "垂直对齐";
+
+  constructor(
+    private slide: Slide,
+    private items: Array<{ text: TextElement; before: TextElement["body"]; value: "top" | "middle" | "bottom" }>,
+    private editor: SlideEditor,
+    private host: EditorHost
+  ) {}
+
+  apply(): void {
+    for (const { text, value } of this.items) {
+      applyAnchorOp(text, value);
+      if (text.source) this.host.recordStyleOp(text.source, { kind: "anchor", value });
+    }
+    this.editor.afterCommand(this.slide, [], false);
+  }
+
+  revert(): void {
+    for (const { text, before } of this.items) {
+      text.body = before;
+      if (text.source) this.host.discardStyleOp(text.source);
+    }
+    this.editor.afterCommand(this.slide, [], false);
+  }
+}
+
 class CompositeCommand implements Command {
   constructor(public readonly label: string, private commands: Command[]) {}
   apply(): void { this.commands.forEach(command => command.apply()); }
@@ -290,8 +358,26 @@ export class SlideEditor {
     return {
       canUndo: this.history.canUndo,
       canRedo: this.history.canRedo,
-      selectionCount: this.selection.size
+      selectionCount: this.selection.size,
+      properties: this.describeProperties()
     };
+  }
+
+  private describeProperties(): SelectionProperties | null {
+    const slide = this.host.getSlide();
+    if (!slide || this.selection.size === 0) return null;
+    return describeSelection(this.selectedShapes(slide), this.selectedTexts(slide), this.emuPerPx(slide));
+  }
+
+  /** Shapes whose fill and border the panel may change (table cells excluded). */
+  private selectedShapes(slide: Slide): ShapeElement[] {
+    return this.selectedObjects(slide).flatMap(object => object.elements)
+      .filter((element): element is ShapeElement => element.type === "shape" && !!element.source && !element.source.readOnlyText);
+  }
+
+  private selectedTexts(slide: Slide): TextElement[] {
+    return this.selectedObjects(slide).flatMap(object => object.elements)
+      .filter((element): element is TextElement => element.type === "text" && !!element.source && !element.source.readOnlyText);
   }
 
   /** Call after a (re)paint or resize so the overlay follows the slide. */
@@ -345,6 +431,81 @@ export class SlideEditor {
     this.host.onCommit(slide);
     this.paintOverlay();
     this.emit();
+  }
+
+  /** Fill / border changes from the properties panel. */
+  public applyShapeStyle(requested: ShapeStyleOp): void {
+    let op = requested;
+    const slide = this.host.getSlide();
+    if (!slide) return;
+    if (this.textSession) this.endTextEdit();
+    if (requested.kind === "anchor") {
+      const value = requested.value;
+      const items = this.selectedTexts(slide).map(text => ({ text, before: text.body, value }));
+      if (items.length === 0) return;
+      const command = new AnchorCommand(slide, items, this, this.host);
+      command.apply();
+      this.history.record(command);
+      return;
+    }
+
+    const emu = this.emuPerPx(slide);
+    const shapes = this.selectedShapes(slide);
+    // Changing width or dash of a shape without a border should show one.
+    const hasBorder = (shape: ShapeElement) =>
+      shape.computedStyle?.line ? shape.computedStyle.line.fill.type !== "none" : !!shape.border;
+    if (op.kind === "line" && op.color === undefined && shapes.length > 0 && !shapes.some(hasBorder)) {
+      op = { ...op, color: "#000000" };
+    }
+    const items = shapes.map(shape => {
+      const before = snapshotShape(shape);
+      applyShapeStyleOp(shape, op, emu);
+      const after = snapshotShape(shape);
+      restoreShape(shape, before);
+      return { shape, before, after };
+    });
+    if (items.length === 0) return;
+    const command = new ShapeStyleCommand(slide, items, op, this, this.host);
+    command.apply();
+    this.history.record(command);
+  }
+
+  /** Left / centre / right alignment of paragraphs (the caret's, the selection's, or all of the shape's). */
+  public alignParagraphs(align: "left" | "center" | "right"): void {
+    this.applyRangeOp({ paragraph: { align } }, true);
+  }
+
+  /** Line a selection up with an edge or the middle of the slide. */
+  public alignToSlide(edge: "left" | "hcenter" | "right" | "top" | "vcenter" | "bottom"): void {
+    const slide = this.host.getSlide();
+    const size = this.host.getSlideSize();
+    if (!slide || !size) return;
+    if (this.textSession) this.endTextEdit();
+    const objects = this.selectedObjects(slide);
+    if (objects.length === 0) return;
+
+    const items = objects.flatMap(object => {
+      let dx = 0;
+      let dy = 0;
+      const r = object.rect;
+      if (edge === "left") dx = -r.x;
+      else if (edge === "hcenter") dx = (size.width - r.w) / 2 - r.x;
+      else if (edge === "right") dx = size.width - r.w - r.x;
+      else if (edge === "top") dy = -r.y;
+      else if (edge === "vcenter") dy = (size.height - r.h) / 2 - r.y;
+      else dy = size.height - r.h - r.y;
+      if (Math.abs(dx) < 0.01 && Math.abs(dy) < 0.01) return [];
+      return object.elements.map(element => ({
+        element,
+        before: cloneRect(element.rect),
+        after: { ...element.rect, x: element.rect.x + dx, y: element.rect.y + dy },
+        owner: object.source
+      }));
+    });
+    if (items.length === 0) return;
+    const command = new RectsCommand("对齐", slide, items, this);
+    command.apply();
+    this.history.record(command);
   }
 
   public selectAll(): void {
@@ -1305,6 +1466,14 @@ export class SlideEditor {
   }
 
   private applyFormat(format: TextFormat): void {
+    this.applyRangeOp({ format }, false);
+  }
+
+  /**
+   * Run a restyling op over the text selection while editing, or over all of
+   * the text of the selected shapes otherwise.
+   */
+  private applyRangeOp(extra: Pick<TextOp, "format" | "paragraph">, allowCollapsed: boolean): void {
     const slide = this.host.getSlide();
     if (!slide) return;
     const session = this.textSession;
@@ -1312,12 +1481,13 @@ export class SlideEditor {
     if (session) {
       const selection = window.getSelection();
       const range = selection && selection.rangeCount ? selection.getRangeAt(0) : null;
-      if (!range || range.collapsed || !session.body.contains(range.commonAncestorContainer)) return;
+      if (!range || !session.body.contains(range.commonAncestorContainer)) return;
+      if (range.collapsed && !allowCollapsed) return;
       const start = this.flatIndex(session.body, range.startContainer, range.startOffset);
       const end = this.flatIndex(session.body, range.endContainer, range.endOffset);
       this.flushText(session);
 
-      const op: TextOp = { start, end, insert: "", format };
+      const op: TextOp = { start, end, insert: "", ...extra };
       const after = cloneParagraphs(session.before);
       applyTextOp(vdomTextModel(after, this.emuPerPx(slide)), op);
       const command = new TextCommand(slide, session.element, session.before, after, [op], this, this.host);
@@ -1333,10 +1503,11 @@ export class SlideEditor {
       return;
     }
 
-    const commands = this.textElementsOf(slide).map(element => {
+    const targets = extra.paragraph ? this.selectedTexts(slide) : this.textElementsOf(slide);
+    const commands = targets.map(element => {
       const before = cloneParagraphs(element.paragraphs || []);
       const after = cloneParagraphs(before);
-      const op: TextOp = { start: 0, end: paragraphsText(before).length, insert: "", format };
+      const op: TextOp = { start: 0, end: paragraphsText(before).length, insert: "", ...extra };
       applyTextOp(vdomTextModel(after, this.emuPerPx(slide)), op);
       return new TextCommand(slide, element, before, after, [op], this, this.host);
     });
