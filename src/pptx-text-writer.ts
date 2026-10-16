@@ -1,4 +1,4 @@
-import { LINE_BREAK, TextModel, TextOp, applyTextOp } from "./editor/text-ops";
+import { LINE_BREAK, TextFormat, TextModel, TextOp, applyTextOp } from "./editor/text-ops";
 import { getDirectChild, getDirectChildren } from "./pptx-xml";
 
 const RUN_TAGS = ["r", "fld", "br"];
@@ -74,8 +74,34 @@ function xmlTextModel(txBody: Element): TextModel<Element, Element> {
     },
     removeParagraph: paragraph => {
       if (getDirectChildren(txBody, "p").length > 1) paragraph.parentNode?.removeChild(paragraph);
-    }
+    },
+    setFormat: (run, format) => writeRunFormat(run, format)
   };
+}
+
+const FILL_TAGS = ["noFill", "solidFill", "gradFill", "blipFill", "pattFill", "grpFill"];
+
+function writeRunFormat(run: Element, format: TextFormat): void {
+  const doc = run.ownerDocument;
+  const ns = run.namespaceURI;
+  let rPr = getDirectChild(run, "rPr");
+  if (!rPr) {
+    rPr = doc.createElementNS(ns, "a:rPr");
+    run.insertBefore(rPr, run.firstChild);
+  }
+  if (format.bold !== undefined) rPr.setAttribute("b", format.bold ? "1" : "0");
+  if (format.italic !== undefined) rPr.setAttribute("i", format.italic ? "1" : "0");
+  if (format.fontSizePt !== undefined) rPr.setAttribute("sz", String(Math.round(format.fontSizePt * 100)));
+  if (format.color !== undefined) {
+    for (const fill of getDirectChildren(rPr, ...FILL_TAGS)) rPr.removeChild(fill);
+    const solid = doc.createElementNS(ns, "a:solidFill");
+    const rgb = doc.createElementNS(ns, "a:srgbClr");
+    rgb.setAttribute("val", format.color.replace("#", "").toUpperCase());
+    solid.appendChild(rgb);
+    // Schema order: a:ln comes first, the fill right after it.
+    const line = getDirectChild(rPr, "ln");
+    rPr.insertBefore(solid, line ? line.nextSibling : rPr.firstChild);
+  }
 }
 
 /** Replay recorded edits, in order, on the text body of a shape node. */

@@ -859,3 +859,142 @@ label {
 .edit-selection.is-editing .edit-handle {
   display: none;
 }
+
+/* ---------- Floating format toolbar ---------- */
+
+.format-toolbar {
+  position: absolute;
+  z-index: 9;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  height: 38px;
+  padding: 0 5px;
+  color: #f5f5f7;
+  background: rgba(36, 36, 40, 0.94);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 11px;
+  box-shadow: 0 8px 26px rgba(0, 0, 0, 0.32), 0 2px 6px rgba(0, 0, 0, 0.2);
+  backdrop-filter: blur(16px);
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(4px) scale(0.98);
+  transition: opacity 120ms ease, transform 120ms ease;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.format-toolbar.is-visible {
+  opacity: 1;
+  pointer-events: auto;
+  transform: none;
+}
+
+.format-button {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  color: inherit;
+  background: transparent;
+  border: 0;
+  border-radius: 7px;
+  cursor: pointer;
+  transition: background-color 100ms ease;
+}
+
+.format-button svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2.2;
+}
+
+.format-button:hover {
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.format-button.is-active {
+  color: #ffffff;
+  background: var(--edit-accent, #0a84ff);
+}
+
+.format-size {
+  min-width: 30px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+.format-divider {
+  width: 1px;
+  height: 18px;
+  margin: 0 4px;
+  background: rgba(255, 255, 255, 0.16);
+}
+
+.format-a {
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 1;
+  margin-top: -3px;
+}
+
+.format-swatch {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: 5px;
+  height: 3px;
+  border-radius: 2px;
+  background: transparent;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.3);
+}
+
+.format-swatch.is-mixed {
+  background: linear-gradient(90deg, #e60012, #ffc000, #00b050, #0070c0) !important;
+}
+
+.format-palette {
+  position: absolute;
+  top: calc(100% + 10px);
+  left: 50%;
+  display: none;
+  grid-template-columns: repeat(8, 20px);
+  gap: 6px;
+  padding: 10px;
+  background: rgba(36, 36, 40, 0.97);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.34);
+  transform: translateX(-50%);
+}
+
+.format-toolbar.is-below .format-palette {
+  top: auto;
+  bottom: calc(100% + 10px);
+}
+
+.format-palette.is-open {
+  display: grid;
+}
+
+.format-chip {
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: 50%;
+  cursor: pointer;
+  transition: transform 100ms ease;
+}
+
+.format-chip:hover {
+  transform: scale(1.18);
+}

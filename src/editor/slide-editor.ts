@@ -1,6 +1,7 @@
 import { ElementSource, Rect, Slide, SlideElement, TextElement, TextParagraph } from "../pptx-virtual-dom";
 import { Command, History } from "./history";
-import { LINE_BREAK, TextOp, applyTextOp, diffText } from "./text-ops";
+import { LINE_BREAK, TextFormat, TextOp, applyTextOp, diffText } from "./text-ops";
+import { FormatState, FormatToolbar } from "./format-toolbar";
 import { normalizeParagraphs, paragraphsText, vdomTextModel } from "./text-model-vdom";
 
 export interface EditorHost {
@@ -141,6 +142,12 @@ class DeleteCommand implements Command {
   }
 }
 
+class CompositeCommand implements Command {
+  constructor(public readonly label: string, private commands: Command[]) {}
+  apply(): void { this.commands.forEach(command => command.apply()); }
+  revert(): void { [...this.commands].reverse().forEach(command => command.revert()); }
+}
+
 const cloneParagraphs = (paragraphs: TextParagraph[]): TextParagraph[] =>
   JSON.parse(JSON.stringify(paragraphs));
 
@@ -195,6 +202,7 @@ export class SlideEditor {
   private badge: HTMLDivElement;
   private guideLayer: HTMLDivElement;
   private handleNodes = new Map<HandleId, HTMLDivElement>();
+  private toolbar: FormatToolbar;
   private textSession: {
     slide: Slide;
     element: TextElement;
@@ -219,6 +227,7 @@ export class SlideEditor {
     }
     this.layer.append(this.guideLayer, this.hoverBox, this.selectBox, this.marqueeBox, this.badge);
     container.appendChild(this.layer);
+    this.toolbar = new FormatToolbar(this.layer, format => this.applyFormat(format));
 
     container.addEventListener("pointerdown", e => this.onPointerDown(e));
     container.addEventListener("pointermove", e => this.onPointerMove(e));
@@ -227,6 +236,9 @@ export class SlideEditor {
     container.addEventListener("pointerleave", () => this.setHover(null));
     container.addEventListener("dblclick", e => this.onDoubleClick(e));
     document.addEventListener("keydown", e => this.onKeyDown(e));
+    document.addEventListener("selectionchange", () => {
+      if (this.textSession) this.updateToolbar();
+    });
     this.history.subscribe(() => this.emit());
   }
 
@@ -267,10 +279,12 @@ export class SlideEditor {
   }
 
   public undo(): void {
+    if (this.textSession) this.endTextEdit();
     this.history.undo();
   }
 
   public redo(): void {
+    if (this.textSession) this.endTextEdit();
     this.history.redo();
   }
 
@@ -402,7 +416,7 @@ export class SlideEditor {
 
   private onPointerDown(event: PointerEvent): void {
     if (event.button !== 0) return;
-    if ((event.target as Element).closest?.(".edit-text")) return;
+    if ((event.target as Element).closest?.(".edit-text, .format-toolbar")) return;
     if (this.textSession) this.endTextEdit();
     const slide = this.host.getSlide();
     if (!slide) return;
@@ -898,27 +912,29 @@ export class SlideEditor {
     return (lines.length ? lines : [""]).join("\n");
   }
 
+  /** Turn typing done so far into an undoable command; the session keeps going. */
+  private flushText(session: NonNullable<SlideEditor["textSession"]>): void {
+    const afterText = this.readEditedParagraphs(session.body);
+    const ops = diffText(paragraphsText(session.before), afterText);
+    if (ops.length === 0 || !session.element.source) return;
+    const after = cloneParagraphs(session.before);
+    const model = vdomTextModel(after, this.emuPerPx(session.slide));
+    for (const op of ops) applyTextOp(model, op);
+    normalizeParagraphs(after, session.element.style);
+    const command = new TextCommand(session.slide, session.element, session.before, after, ops, this, this.host);
+    command.apply();
+    this.history.record(command);
+    session.before = cloneParagraphs(after);
+  }
+
   private endTextEdit(): void {
     const session = this.textSession;
     if (!session) return;
+    this.flushText(session);
     this.textSession = null;
-
-    const afterText = this.readEditedParagraphs(session.body);
     session.shell.remove();
     this.selectBox.classList.remove("is-editing");
-
-    const beforeText = paragraphsText(session.before);
-    const ops = diffText(beforeText, afterText);
     this.host.endTextEdit(session.slide);
-    if (ops.length > 0 && session.element.source) {
-      const after = cloneParagraphs(session.before);
-      const model = vdomTextModel(after);
-      for (const op of ops) applyTextOp(model, op);
-      normalizeParagraphs(after, session.element.style);
-      const command = new TextCommand(session.slide, session.element, session.before, after, ops, this, this.host);
-      command.apply();
-      this.history.record(command);
-    }
     this.paintOverlay();
     this.emit();
   }
@@ -930,6 +946,214 @@ export class SlideEditor {
     session.shell.remove();
     this.selectBox.classList.remove("is-editing");
     this.host.endTextEdit(session.slide);
+  }
+
+  // ------------------------------------------------------------- formatting
+
+  /** Flat text offset of a DOM position inside the text editor. */
+  private flatIndex(body: HTMLElement, node: Node, offset: number): number {
+    if (node === body) {
+      const children = Array.from(body.children);
+      const holder = document.createElement("div");
+      children.slice(0, offset).forEach(child => holder.appendChild(child.cloneNode(true)));
+      const length = this.readEditedParagraphs(holder).length;
+      return offset > 0 && offset < children.length ? length + 1 : length;
+    }
+    const range = document.createRange();
+    range.setStart(body, 0);
+    range.setEnd(node, offset);
+    const holder = document.createElement("div");
+    holder.appendChild(range.cloneContents());
+    return this.readEditedParagraphs(holder).length;
+  }
+
+  /** Put the DOM selection on the flat offsets [start, end). */
+  private selectFlat(body: HTMLElement, start: number, end: number): void {
+    const locate = (position: number): [Node, number] => {
+      let cursor = 0;
+      const paragraphs = Array.from(body.children);
+      for (let index = 0; index < paragraphs.length; index++) {
+        const paragraph = paragraphs[index];
+        const text = this.readEditedParagraphs(this.wrap(paragraph));
+        if (position <= cursor + text.length || index === paragraphs.length - 1) {
+          let rest = Math.max(0, position - cursor);
+          const walker = document.createTreeWalker(paragraph, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT);
+          for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+            if (node.nodeType === Node.TEXT_NODE) {
+              const length = node.textContent?.length || 0;
+              if (rest <= length) return [node, rest];
+              rest -= length;
+            } else if (node.nodeName === "BR" && text.length > 0) {
+              if (rest === 0) return [node.parentNode!, Array.from(node.parentNode!.childNodes).indexOf(node as ChildNode)];
+              rest -= 1;
+            }
+          }
+          return [paragraph, paragraph.childNodes.length];
+        }
+        cursor += text.length + 1;
+      }
+      return [body, 0];
+    };
+    const [startNode, startOffset] = locate(start);
+    const [endNode, endOffset] = locate(end);
+    const range = document.createRange();
+    range.setStart(startNode, startOffset);
+    range.setEnd(endNode, endOffset);
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+  }
+
+  private wrap(node: Element): HTMLElement {
+    const holder = document.createElement("div");
+    holder.appendChild(node.cloneNode(true));
+    return holder;
+  }
+
+  private textElementsOf(slide: Slide): TextElement[] {
+    return this.selectedObjects(slide)
+      .flatMap(object => object.elements)
+      .filter((element): element is TextElement =>
+        element.type === "text" && !!element.source && (element.paragraphs || []).some(paragraph =>
+          paragraph.runs.some(run => run.content !== "")));
+  }
+
+  private formatOfElements(slide: Slide, elements: TextElement[]): FormatState {
+    const px = this.emuPerPx(slide) / 12700;
+    const runs = elements.flatMap(element => element.paragraphs || [])
+      .flatMap(paragraph => paragraph.runs).filter(run => run.content !== "");
+    return this.mergeFormat(runs.map(run => ({
+      bold: run.style.bold,
+      italic: !!run.style.italic,
+      color: run.style.color,
+      fontSizePt: run.style.fontSize * px
+    })));
+  }
+
+  private formatOfDomSelection(range: Range): FormatState {
+    const body = this.textSession!.body;
+    const k = this.scale() || 1;
+    const slide = this.textSession!.slide;
+    const walker = document.createTreeWalker(body, NodeFilter.SHOW_TEXT);
+    const samples: FormatState[] = [];
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      if (!(node.textContent || "").length) continue;
+      // Skip nodes that only touch the selection edge.
+      const whole = document.createRange();
+      whole.selectNodeContents(node);
+      if (
+        whole.compareBoundaryPoints(Range.START_TO_END, range) <= 0
+        || whole.compareBoundaryPoints(Range.END_TO_START, range) >= 0
+      ) continue;
+      const style = getComputedStyle((node.parentElement || body));
+      samples.push({
+        bold: Number(style.fontWeight) >= 600,
+        italic: style.fontStyle === "italic",
+        color: this.cssToHex(style.color),
+        fontSizePt: parseFloat(style.fontSize) / k * (this.emuPerPx(slide) / 12700)
+      });
+    }
+    return this.mergeFormat(samples);
+  }
+
+  private mergeFormat(samples: FormatState[]): FormatState {
+    const merged: FormatState = { bold: null, italic: null, color: null, fontSizePt: null };
+    if (samples.length === 0) return merged;
+    const same = <T,>(pick: (sample: FormatState) => T, equal: (a: T, b: T) => boolean) =>
+      samples.every(sample => equal(pick(sample), pick(samples[0]))) ? pick(samples[0]) : null;
+    merged.bold = same(sample => sample.bold, (a, b) => a === b);
+    merged.italic = same(sample => sample.italic, (a, b) => a === b);
+    merged.color = same(sample => sample.color, (a, b) => a === b);
+    merged.fontSizePt = same(sample => sample.fontSizePt, (a, b) => Math.abs((a ?? 0) - (b ?? 0)) < 0.3);
+    return merged;
+  }
+
+  private cssToHex(color: string): string | null {
+    const match = color.match(/\d+(\.\d+)?/g);
+    if (!match || match.length < 3) return null;
+    return `#${match.slice(0, 3).map(value => Math.round(Number(value)).toString(16).padStart(2, "0")).join("")}`;
+  }
+
+  /** Show, move or hide the floating format toolbar for the current context. */
+  private updateToolbar(): void {
+    const slide = this.host.getSlide();
+    const box = this.box();
+    const k = this.scale() || 1;
+    const bounds = { w: box.width, h: box.height };
+    if (!slide || this.drag) {
+      this.toolbar.hide();
+      return;
+    }
+
+    if (this.textSession) {
+      const selection = window.getSelection();
+      const range = selection && selection.rangeCount ? selection.getRangeAt(0) : null;
+      if (!range || range.collapsed || !this.textSession.body.contains(range.commonAncestorContainer)) {
+        this.toolbar.hide();
+        return;
+      }
+      const rect = range.getBoundingClientRect();
+      this.toolbar.show(
+        { x: rect.left - box.left, y: rect.top - box.top, w: rect.width, h: rect.height },
+        this.formatOfDomSelection(range),
+        bounds
+      );
+      return;
+    }
+
+    const elements = this.textElementsOf(slide);
+    if (elements.length === 0) {
+      this.toolbar.hide();
+      return;
+    }
+    const rect = union(this.selectedObjects(slide).map(object => object.rect));
+    this.toolbar.show(
+      { x: rect.x * k, y: rect.y * k, w: rect.w * k, h: rect.h * k },
+      this.formatOfElements(slide, elements),
+      bounds
+    );
+  }
+
+  private applyFormat(format: TextFormat): void {
+    const slide = this.host.getSlide();
+    if (!slide) return;
+    const session = this.textSession;
+
+    if (session) {
+      const selection = window.getSelection();
+      const range = selection && selection.rangeCount ? selection.getRangeAt(0) : null;
+      if (!range || range.collapsed || !session.body.contains(range.commonAncestorContainer)) return;
+      const start = this.flatIndex(session.body, range.startContainer, range.startOffset);
+      const end = this.flatIndex(session.body, range.endContainer, range.endOffset);
+      this.flushText(session);
+
+      const op: TextOp = { start, end, insert: "", format };
+      const after = cloneParagraphs(session.before);
+      applyTextOp(vdomTextModel(after, this.emuPerPx(slide)), op);
+      const command = new TextCommand(slide, session.element, session.before, after, [op], this, this.host);
+      command.apply();
+      this.history.record(command);
+      session.before = cloneParagraphs(after);
+
+      const k = this.scale() || 1;
+      session.body.replaceChildren(...after.map(paragraph => this.paragraphNode(paragraph, k)));
+      session.body.focus();
+      this.selectFlat(session.body, start, end);
+      this.updateToolbar();
+      return;
+    }
+
+    const commands = this.textElementsOf(slide).map(element => {
+      const before = cloneParagraphs(element.paragraphs || []);
+      const after = cloneParagraphs(before);
+      const op: TextOp = { start: 0, end: paragraphsText(before).length, insert: "", format };
+      applyTextOp(vdomTextModel(after, this.emuPerPx(slide)), op);
+      return new TextCommand(slide, element, before, after, [op], this, this.host);
+    });
+    if (commands.length === 0) return;
+    const command = commands.length === 1 ? commands[0] : new CompositeCommand("设置格式", commands);
+    command.apply();
+    this.history.record(command);
   }
 
   // ---------------------------------------------------------------- painting
@@ -991,6 +1215,7 @@ export class SlideEditor {
     }
 
     this.paintGuides();
+    this.updateToolbar();
   }
 
   private paintGuides(): void {

@@ -11,11 +11,23 @@
 
 export const LINE_BREAK = " ";
 
+/** Character formatting a toolbar can set; omitted fields stay as they are. */
+export interface TextFormat {
+  bold?: boolean;
+  italic?: boolean;
+  /** "#rrggbb" */
+  color?: string;
+  /** Font size in points. */
+  fontSizePt?: number;
+}
+
 export interface TextOp {
   /** Offsets into the flat text, before the edit. */
   start: number;
   end: number;
   insert: string;
+  /** When set the op only restyles [start, end) and `insert` is ignored. */
+  format?: TextFormat;
 }
 
 export interface TextModel<P, R> {
@@ -34,6 +46,7 @@ export interface TextModel<P, R> {
   /** Empty paragraph right after `paragraph`, sharing its paragraph properties. */
   newParagraphAfter(paragraph: P): P;
   removeParagraph(paragraph: P): void;
+  setFormat(run: R, format: TextFormat): void;
 }
 
 export function flatText<P, R>(model: TextModel<P, R>): string {
@@ -142,6 +155,10 @@ export function diffText(before: string, after: string): TextOp[] {
 }
 
 export function applyTextOp<P, R>(model: TextModel<P, R>, op: TextOp): void {
+  if (op.format) {
+    applyFormat(model, op.start, op.end, op.format);
+    return;
+  }
   const insert = op.insert.split(LINE_BREAK).join("");
   if (op.end > op.start) deleteRange(model, op.start, op.end);
   if (insert) insertText(model, op.start, insert);
@@ -279,5 +296,38 @@ function insertText<P, R>(model: TextModel<P, R>, position: number, text: string
     }
     insertInParagraph(model, next, 0, pieces[i]);
     previous = next;
+  }
+}
+
+/** Restyle [start, end), splitting runs at the edges so neighbours keep their look. */
+function applyFormat<P, R>(model: TextModel<P, R>, start: number, end: number, format: TextFormat): void {
+  if (end <= start) return;
+  let cursor = 0;
+  for (const paragraph of model.paragraphs()) {
+    const length = paragraphLength(model, paragraph);
+    const from = Math.max(start, cursor) - cursor;
+    const to = Math.min(end, cursor + length) - cursor;
+    cursor += length + 1;
+    if (to <= from) continue;
+
+    let runStart = 0;
+    for (const run of model.runs(paragraph)) {
+      const text = model.text(run);
+      const runEnd = runStart + text.length;
+      const lo = Math.max(from, runStart);
+      const hi = Math.min(to, runEnd);
+      const offset = runStart;
+      runStart = runEnd;
+      if (hi <= lo || text === LINE_BREAK) continue;
+
+      const head = text.slice(0, lo - offset);
+      const middle = text.slice(lo - offset, hi - offset);
+      const tail = text.slice(hi - offset);
+      const indexOf = () => model.runs(paragraph).indexOf(run);
+      if (tail) model.insertRun(paragraph, indexOf() + 1, model.cloneRun(run, tail));
+      if (head) model.insertRun(paragraph, indexOf(), model.cloneRun(run, head));
+      model.setText(run, middle);
+      model.setFormat(run, format);
+    }
   }
 }
