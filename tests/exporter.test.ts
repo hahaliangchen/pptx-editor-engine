@@ -1,6 +1,14 @@
 import JSZip from "jszip";
 import { describe, expect, it } from "vitest";
-import { exportEditedPptx, markDirty, popTextOp, pushTextOp } from "../src/pptx-exporter";
+import {
+  emptyStructure,
+  exportEditedPptx,
+  markDirty,
+  materializeShape,
+  popTextOp,
+  pushItem,
+  pushTextOp
+} from "../src/pptx-exporter";
 import { ElementSource, ShapeElement, Slide, TextElement } from "../src/pptx-virtual-dom";
 
 const PART = "ppt/slides/slide1.xml";
@@ -159,4 +167,68 @@ describe("exportEditedPptx", () => {
     const straight = { ...turned, rotation: 0 };
     expect(await read(await exportEditedPptx(zip, [slide([straight])], dirty), PART)).not.toContain('rot="');
   });
+
+  const orderOf = (xml: string) => Array.from(xml.matchAll(/<p:cNvPr id="(\d+)"/g)).map(m => m[1]);
+
+  it("replays z-order changes among sibling shapes", async () => {
+    const zip = await makeZip();
+    const structure = emptyStructure();
+    pushItem(structure.orders, PART, { shapeId: "2", op: "front" });
+    let xml = await read(await exportEditedPptx(zip, [], new Map(), new Map(), new Map(), structure), PART);
+    expect(orderOf(xml).filter(id => ["2", "3", "4", "5"].includes(id))).toEqual(["3", "4", "5", "2"]);
+
+    const back = emptyStructure();
+    pushItem(back.orders, PART, { shapeId: "4", op: "back" });
+    xml = await read(await exportEditedPptx(zip, [], new Map(), new Map(), new Map(), back), PART);
+    expect(orderOf(xml).filter(id => ["2", "3", "4", "5"].includes(id))).toEqual(["4", "2", "3", "5"]);
+
+    const steps = emptyStructure();
+    pushItem(steps.orders, PART, { shapeId: "3", op: "forward" });
+    pushItem(steps.orders, PART, { shapeId: "5", op: "backward" });
+    xml = await read(await exportEditedPptx(zip, [], new Map(), new Map(), new Map(), steps), PART);
+    expect(orderOf(xml).filter(id => ["2", "3", "4", "5"].includes(id))).toEqual(["2", "4", "5", "3"]);
+  });
+
+  it("inserts a pasted shape on top, positions it from its elements, and adds its relationships", async () => {
+    const zip = await makeZip();
+    zip.file("ppt/slides/_rels/slide1.xml.rels", `<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="t/layout" Target="../slideLayouts/l.xml"/></Relationships>`);
+    const structure = emptyStructure();
+    pushItem(structure.inserts, PART, {
+      id: "9",
+      xml: `<p:sp ${NS}><p:nvSpPr><p:cNvPr id="9" name="copy"/></p:nvSpPr><p:spPr><a:xfrm><a:off x="1" y="1"/><a:ext cx="1" cy="1"/></a:xfrm></p:spPr></p:sp>`
+    });
+    pushItem(structure.relAdds, PART, { id: "rId2", type: "t/image", target: "../media/image1.png" });
+    const dirty = new Map();
+    markDirty(dirty, source("9"));
+    const blob = await exportEditedPptx(zip, [slide([shape("9", { x: 5, y: 6, w: 7, h: 8 })])], dirty, new Map(), new Map(), structure);
+    const xml = await read(blob, PART);
+    expect(orderOf(xml).pop()).toBe("9");
+    expect(xml).toContain('<a:off x="5000" y="6000"/><a:ext cx="7000" cy="8000"/>');
+    const rels = await read(blob, "ppt/slides/_rels/slide1.xml.rels");
+    expect(rels).toContain('Id="rId2"');
+    expect(rels).toContain('Target="../media/image1.png"');
+    expect(rels).toContain('Id="rId1"');
+    // the original package is left as it was
+    expect(await zip.file("ppt/slides/_rels/slide1.xml.rels")!.async("string")).not.toContain("rId2");
+  });
+
+  it("materializes a shape with its pending edits and reports its relationships", async () => {
+    const zip = new JSZip();
+    zip.file(PART, `<p:sld ${NS} xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:cSld><p:spTree>`
+      + `<p:pic><p:nvPicPr><p:cNvPr id="4" name="C"/><p:cNvPicPr/><p:nvPr><p:custDataLst><p:tags r:id="rId9"/></p:custDataLst></p:nvPr></p:nvPicPr><p:blipFill><a:blip r:embed="rId5"/></p:blipFill><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="10" cy="10"/></a:xfrm></p:spPr></p:pic>`
+      + `<p:sp><p:nvSpPr><p:cNvPr id="2" name="A"/></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:p><a:r><a:t>Hello</a:t></a:r></a:p></p:txBody></p:sp>`
+      + `</p:spTree></p:cSld></p:sld>`);
+    zip.file("ppt/slides/_rels/slide1.xml.rels", `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId5" Type="t/image" Target="../media/image7.png"/><Relationship Id="rId9" Type="t/tags" Target="../tags/tag1.xml"/></Relationships>`);
+    const edits = { dirty: new Map(), textEdits: new Map(), styleEdits: new Map(), structure: emptyStructure() };
+    pushTextOpTo(edits, "2");
+    const text = await materializeShape(zip, PART, "2", [], edits);
+    expect(text!.xml).toContain("<a:t>Hello!</a:t>");
+    const picture = await materializeShape(zip, PART, "4", [], edits);
+    expect(picture!.relationships).toEqual([{ id: "rId5", type: "t/image", target: "../media/image7.png", targetMode: undefined }]);
+    expect(picture!.xml).not.toContain("custDataLst");
+  });
 });
+
+function pushTextOpTo(edits: { textEdits: Map<string, Map<string, unknown[]>> }, shapeId: string) {
+  pushTextOp(edits.textEdits as never, { part: PART, shapeId, xform }, { start: 5, end: 5, insert: "!" });
+}

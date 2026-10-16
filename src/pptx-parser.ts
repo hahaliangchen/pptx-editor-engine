@@ -689,7 +689,14 @@ export class PptxParser {
       await this.parseElementsRecursive(spTree, initialTransform, imgRelMap, elements, false, placeholderContext);
     }
 
-    return { id: slideId, elements, rawXml: xmlText, emuPerPx: 1 / Math.min(scaleX, scaleY) };
+    return {
+      id: slideId,
+      elements,
+      rawXml: xmlText,
+      emuPerPx: 1 / Math.min(scaleX, scaleY),
+      part: slidePath,
+      xform: { scaleX, scaleY }
+    };
   }
 
   private resolveRelativePath(baseDir: string, relativePath: string): string {

@@ -157,8 +157,240 @@ function writeXfrm(
   ext.setAttribute("cy", String(emu.cy));
 }
 
+export type OrderOp = "front" | "back" | "forward" | "backward";
+
+/** A shape node added by paste/duplicate, already carrying its final ids. */
+export interface InsertedShape {
+  id: string;
+  xml: string;
+}
+
+/** A relationship a pasted shape needs in its slide (an image, a hyperlink...). */
+export interface RelAdd {
+  id: string;
+  type: string;
+  target: string;
+  targetMode?: string;
+}
+
+/** Changes to the shape tree itself, kept as per-slide lists in the order they happened. */
+export interface StructureEdits {
+  orders: Map<string, Array<{ shapeId: string; op: OrderOp }>>;
+  inserts: Map<string, InsertedShape[]>;
+  relAdds: Map<string, RelAdd[]>;
+}
+
+export const emptyStructure = (): StructureEdits => ({
+  orders: new Map(),
+  inserts: new Map(),
+  relAdds: new Map()
+});
+
+export function pushItem<T>(log: Map<string, T[]>, part: string, item: T): void {
+  const list = log.get(part) || [];
+  list.push(item);
+  log.set(part, list);
+}
+
+export function popItem<T>(log: Map<string, T[]>, part: string): void {
+  const list = log.get(part);
+  list?.pop();
+  if (list && list.length === 0) log.delete(part);
+}
+
+/** Everything an export replays on top of the original package. */
+export interface EditSet {
+  dirty: DirtyShapes;
+  textEdits: TextEdits;
+  styleEdits: StyleEdits;
+  structure: StructureEdits;
+}
+
+function shapeSiblings(parent: Element): Element[] {
+  return Array.from(parent.children).filter(child => SHAPE_TAGS.has(child.localName));
+}
+
+function applyOrderOp(node: Element, op: OrderOp): void {
+  const parent = node.parentNode as Element | null;
+  if (!parent) return;
+  const siblings = shapeSiblings(parent);
+  const index = siblings.indexOf(node);
+  if (op === "front") {
+    parent.appendChild(node);
+  } else if (op === "back") {
+    parent.insertBefore(node, siblings[0]);
+  } else if (op === "forward" && index < siblings.length - 1) {
+    parent.insertBefore(node, siblings[index + 1].nextSibling);
+  } else if (op === "backward" && index > 0) {
+    parent.insertBefore(node, siblings[index - 1]);
+  }
+}
+
+function spTreeOf(doc: Document): Element | null {
+  return doc.getElementsByTagNameNS(P_NS, "spTree")[0] || null;
+}
+
 /**
- * Write the edited geometry back into the original package. Only slide parts
+ * Replay every recorded edit on one slide part. Order matters: pasted shapes
+ * must exist before anything that addresses them, and moves come before
+ * z-order changes.
+ */
+function applyPartEdits(doc: Document, part: string, slides: Slide[], edits: EditSet): void {
+  const spTree = spTreeOf(doc);
+  for (const inserted of edits.structure.inserts.get(part) || []) {
+    const fragment = new DOMParser().parseFromString(inserted.xml, "application/xml");
+    if (fragment.getElementsByTagName("parsererror").length > 0 || !spTree) continue;
+    spTree.appendChild(doc.importNode(fragment.documentElement, true));
+  }
+
+  for (const shapeId of edits.dirty.get(part) || []) {
+    const shape = findShapeNode(doc, shapeId);
+    if (!shape) continue;
+
+    // A shape is 1-2 elements (fill + text) and a table is one per cell;
+    // the box of the object is the union of them.
+    const inGroup = shape.localName === "grpSp";
+    const members = slides
+      .flatMap(slide => slide.elements)
+      .filter(candidate => candidate.source?.part === part && (inGroup
+        ? candidate.source.groups?.some(group => group.shapeId === shapeId)
+        : candidate.source.shapeId === shapeId));
+    if (members.length === 0) {
+      shape.parentNode?.removeChild(shape);
+      continue;
+    }
+    const left = Math.min(...members.map(m => m.rect.x));
+    const top = Math.min(...members.map(m => m.rect.y));
+    const right = Math.max(...members.map(m => m.rect.x + m.rect.w));
+    const bottom = Math.max(...members.map(m => m.rect.y + m.rect.h));
+    const box = { x: left, y: top, w: right - left, h: bottom - top };
+    if (inGroup) {
+      const ref = members[0].source!.groups!.find(group => group.shapeId === shapeId)!;
+      writeGroupXfrm(shape, ref, box);
+    } else {
+      writeXfrm(
+        doc,
+        shape,
+        toEmu(box, members[0].source!),
+        members.map(m => m.rotation).find((r): r is number => typeof r === "number")
+      );
+    }
+  }
+
+  for (const [shapeId, ops] of edits.styleEdits.get(part) || []) {
+    const shape = findShapeNode(doc, shapeId);
+    if (shape && ops.length > 0) writeShapeStyleOps(shape, ops);
+  }
+
+  for (const [shapeId, ops] of edits.textEdits.get(part) || []) {
+    const shape = findShapeNode(doc, shapeId);
+    if (shape && ops.length > 0) writeTextOps(shape, ops);
+  }
+
+  for (const { shapeId, op } of edits.structure.orders.get(part) || []) {
+    const shape = findShapeNode(doc, shapeId);
+    if (shape) applyOrderOp(shape, op);
+  }
+}
+
+const relsPathOf = (part: string): string => {
+  const slash = part.lastIndexOf("/");
+  return `${part.slice(0, slash)}/_rels/${part.slice(slash + 1)}.rels`;
+};
+
+const REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships";
+const R_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+
+async function readDocument(zip: JSZip, path: string): Promise<{ xml: string; doc: Document } | null> {
+  const file = zip.file(path);
+  if (!file) return null;
+  const xml = await file.async("string");
+  const doc = new DOMParser().parseFromString(xml, "application/xml");
+  if (doc.getElementsByTagName("parsererror").length > 0) {
+    throw new Error(`无法解析 ${path}，已取消导出。`);
+  }
+  return { xml, doc };
+}
+
+/** Existing relationships of a slide, plus those pending for it. */
+export async function readRelationships(
+  zip: JSZip,
+  part: string,
+  pending: RelAdd[] = []
+): Promise<Map<string, RelAdd>> {
+  const result = new Map<string, RelAdd>();
+  const rels = await readDocument(zip, relsPathOf(part));
+  for (const rel of Array.from(rels?.doc.getElementsByTagNameNS(REL_NS, "Relationship") || [])) {
+    result.set(rel.getAttribute("Id") || "", {
+      id: rel.getAttribute("Id") || "",
+      type: rel.getAttribute("Type") || "",
+      target: rel.getAttribute("Target") || "",
+      targetMode: rel.getAttribute("TargetMode") || undefined
+    });
+  }
+  for (const rel of pending) result.set(rel.id, rel);
+  return result;
+}
+
+/** Relationship ids a shape node refers to (r:embed, r:id, r:link ...). */
+export function relationshipIdsIn(node: Element): string[] {
+  const ids = new Set<string>();
+  for (const element of [node, ...Array.from(node.getElementsByTagName("*"))]) {
+    for (const attribute of Array.from(element.attributes)) {
+      if (attribute.namespaceURI === R_NS && attribute.value) ids.add(attribute.value);
+    }
+  }
+  return [...ids];
+}
+
+/**
+ * The XML a shape has right now, with every pending edit applied, for copy
+ * and paste. Returns the shapes' relationships too, so a paste into another
+ * slide can recreate them.
+ */
+export async function materializeShape(
+  zip: JSZip,
+  part: string,
+  shapeId: string,
+  slides: Slide[],
+  edits: EditSet
+): Promise<{ xml: string; relationships: RelAdd[] } | null> {
+  const loaded = await readDocument(zip, part);
+  if (!loaded) return null;
+  applyPartEdits(loaded.doc, part, slides, edits);
+  const original = findShapeNode(loaded.doc, shapeId);
+  if (!original) return null;
+  // Custom data (tags) belongs to one specific shape; a copy must not share it.
+  const node = original.cloneNode(true) as Element;
+  for (const custom of Array.from(node.getElementsByTagNameNS("*", "custDataLst"))) {
+    custom.parentNode?.removeChild(custom);
+  }
+  const known = await readRelationships(zip, part, edits.structure.relAdds.get(part));
+  const relationships = relationshipIdsIn(node)
+    .map(id => known.get(id))
+    .filter((rel): rel is RelAdd => !!rel);
+  return { xml: new XMLSerializer().serializeToString(node), relationships };
+}
+
+async function writeRelationships(zip: JSZip, part: string, adds: RelAdd[], originals: Map<string, string>): Promise<void> {
+  const path = relsPathOf(part);
+  const loaded = await readDocument(zip, path);
+  if (!loaded) return;
+  originals.set(path, loaded.xml);
+  const root = loaded.doc.documentElement;
+  for (const add of adds) {
+    const rel = loaded.doc.createElementNS(REL_NS, "Relationship");
+    rel.setAttribute("Id", add.id);
+    rel.setAttribute("Type", add.type);
+    rel.setAttribute("Target", add.target);
+    if (add.targetMode) rel.setAttribute("TargetMode", add.targetMode);
+    root.appendChild(rel);
+  }
+  zip.file(path, new XMLSerializer().serializeToString(loaded.doc));
+}
+
+/**
+ * Write the edited deck back into the original package. Only slide parts
  * that were touched are rewritten, and only the targeted shape nodes inside
  * them change, so everything the engine cannot edit yet (charts, animations,
  * masters, media) is carried over byte-for-byte.
@@ -168,75 +400,34 @@ export async function exportEditedPptx(
   slides: Slide[],
   dirty: DirtyShapes,
   textEdits: TextEdits = new Map(),
-  styleEdits: StyleEdits = new Map()
+  styleEdits: StyleEdits = new Map(),
+  structure: StructureEdits = emptyStructure()
 ): Promise<Blob> {
   const serializer = new XMLSerializer();
+  const edits: EditSet = { dirty, textEdits, styleEdits, structure };
   // Edited parts are put back once the archive is built, so a later export
   // (after an undo, say) starts again from the original package.
   const originals = new Map<string, string>();
 
   try {
-    const parts = new Set([...dirty.keys(), ...textEdits.keys(), ...styleEdits.keys()]);
+    const parts = new Set([
+      ...dirty.keys(), ...textEdits.keys(), ...styleEdits.keys(),
+      ...structure.orders.keys(), ...structure.inserts.keys(), ...structure.relAdds.keys()
+    ]);
     for (const part of parts) {
-      const shapeIds = dirty.get(part) || new Set<string>();
-      const file = zip.file(part);
-      if (!file) continue;
-      const originalXml = await file.async("string");
-      originals.set(part, originalXml);
-      const doc = new DOMParser().parseFromString(originalXml, "application/xml");
-      if (doc.getElementsByTagName("parsererror").length > 0) {
-        throw new Error(`无法解析 ${part}，已取消导出。`);
-      }
+      const loaded = await readDocument(zip, part);
+      if (!loaded) continue;
+      originals.set(part, loaded.xml);
+      applyPartEdits(loaded.doc, part, slides, edits);
 
-      for (const shapeId of shapeIds) {
-        const shape = findShapeNode(doc, shapeId);
-        if (!shape) continue;
-
-        // A shape is 1-2 elements (fill + text) and a table is one per cell;
-        // the box of the object is the union of them.
-        const inGroup = shape.localName === "grpSp";
-        const members = slides
-          .flatMap(slide => slide.elements)
-          .filter(candidate => candidate.source?.part === part && (inGroup
-            ? candidate.source.groups?.some(group => group.shapeId === shapeId)
-            : candidate.source.shapeId === shapeId));
-        if (members.length === 0) {
-          shape.parentNode?.removeChild(shape);
-        } else {
-          const left = Math.min(...members.map(m => m.rect.x));
-          const top = Math.min(...members.map(m => m.rect.y));
-          const right = Math.max(...members.map(m => m.rect.x + m.rect.w));
-          const bottom = Math.max(...members.map(m => m.rect.y + m.rect.h));
-          const box = { x: left, y: top, w: right - left, h: bottom - top };
-          if (inGroup) {
-            const ref = members[0].source!.groups!.find(group => group.shapeId === shapeId)!;
-            writeGroupXfrm(shape, ref, box);
-          } else {
-            writeXfrm(
-              doc,
-              shape,
-              toEmu(box, members[0].source!),
-              members.map(m => m.rotation).find((r): r is number => typeof r === "number")
-            );
-          }
-        }
-      }
-
-      for (const [shapeId, ops] of styleEdits.get(part) || []) {
-        const shape = findShapeNode(doc, shapeId);
-        if (shape && ops.length > 0) writeShapeStyleOps(shape, ops);
-      }
-
-      for (const [shapeId, ops] of textEdits.get(part) || []) {
-        const shape = findShapeNode(doc, shapeId);
-        if (shape && ops.length > 0) writeTextOps(shape, ops);
-      }
-
-      let xml = serializer.serializeToString(doc);
+      let xml = serializer.serializeToString(loaded.doc);
       if (!xml.startsWith("<?xml")) {
         xml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n${xml}`;
       }
       zip.file(part, xml);
+
+      const adds = structure.relAdds.get(part);
+      if (adds && adds.length > 0) await writeRelationships(zip, part, adds, originals);
     }
 
     return await zip.generateAsync({
@@ -245,6 +436,6 @@ export async function exportEditedPptx(
       compression: "DEFLATE"
     });
   } finally {
-    for (const [part, xml] of originals) zip.file(part, xml);
+    for (const [path, xml] of originals) zip.file(path, xml);
   }
 }

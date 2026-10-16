@@ -334,7 +334,9 @@ const initializeDemo = () => {
     ? new InspectorPanel(inspectorRoot, {
       onShapeStyle: op => viewer.applyShapeStyle(op),
       onAlignText: align => viewer.alignParagraphs(align),
-      onAlignSlide: edge => viewer.alignToSlide(edge)
+      onAlignSlide: edge => viewer.alignToSlide(edge),
+      onArrange: mode => viewer.arrange(mode),
+      onDuplicate: () => void viewer.duplicate()
     })
     : null;
 

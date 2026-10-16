@@ -1,6 +1,9 @@
-import { ElementSource, Rect, ShapeElement, Slide, SlideElement, TextElement, TextParagraph } from "../pptx-virtual-dom";
+import { ElementSource, GroupRef, Rect, ShapeElement, Slide, SlideElement, TextElement, TextParagraph } from "../pptx-virtual-dom";
 import { Command, History } from "./history";
 import { LINE_BREAK, TextFormat, TextOp, applyTextOp, diffText } from "./text-ops";
+import { reorderSiblings } from "./arrange";
+import { remapShapeXml, shapeIdsIn } from "./clone";
+import { InsertedShape, OrderOp, RelAdd, StructureEdits, popItem, pushItem } from "../pptx-exporter";
 import { FormatState, FormatToolbar } from "./format-toolbar";
 import { SelectionProperties, describeSelection } from "./properties";
 import {
@@ -35,6 +38,17 @@ export interface EditorHost {
   discardTextOp(source: ElementSource): void;
   recordStyleOp(source: ElementSource, op: ShapeStyleOp): void;
   discardStyleOp(source: ElementSource): void;
+  /** Live record of shapes added, reordered or given new relationships. */
+  structure(): StructureEdits;
+  /** The XML a shape has right now (edits applied), for copying. */
+  materialize(source: ElementSource): Promise<{ xml: string; relationships: RelAdd[] } | null>;
+  allocateShapeId(part: string): string;
+  /** Relationship ids to use in `targetPart` for relationships that belong to `sourcePart`. */
+  resolveRelationships(
+    targetPart: string,
+    sourcePart: string,
+    relationships: RelAdd[]
+  ): Promise<{ ids: Map<string, string>; adds: RelAdd[] }>;
 }
 
 export interface EditorState {
@@ -50,6 +64,10 @@ interface SceneObject {
   /** What gets written back on export: the shape itself, or the group. */
   source: ElementSource;
   isGroup: boolean;
+  /** Ids of the groups the object sits in (its siblings share this). */
+  parent: string;
+  /** Groups entered above the object. */
+  depth: number;
   elements: SlideElement[];
   rect: Rect;
   rotation: number;
@@ -240,6 +258,80 @@ class AnchorCommand implements Command {
   }
 }
 
+class ArrangeCommand implements Command {
+  public readonly label = "调整层级";
+
+  constructor(
+    private slide: Slide,
+    private before: SlideElement[],
+    private after: SlideElement[],
+    private moves: Array<{ part: string; shapeId: string; op: OrderOp }>,
+    private editor: SlideEditor,
+    private host: EditorHost
+  ) {}
+
+  apply(): void {
+    this.slide.elements = [...this.after];
+    for (const move of this.moves) {
+      pushItem(this.host.structure().orders, move.part, { shapeId: move.shapeId, op: move.op });
+    }
+    this.editor.afterCommand(this.slide, [], false);
+  }
+
+  revert(): void {
+    this.slide.elements = [...this.before];
+    for (const move of this.moves) popItem(this.host.structure().orders, move.part);
+    this.editor.afterCommand(this.slide, [], false);
+  }
+}
+
+interface PastedObject {
+  elements: SlideElement[];
+  inserted: InsertedShape;
+  adds: RelAdd[];
+  owner: ElementSource;
+}
+
+class PasteCommand implements Command {
+  public readonly label = "粘贴";
+
+  constructor(
+    private slide: Slide,
+    private part: string,
+    private pasted: PastedObject[],
+    private editor: SlideEditor,
+    private host: EditorHost
+  ) {}
+
+  apply(): void {
+    const structure = this.host.structure();
+    for (const item of this.pasted) {
+      this.slide.elements.push(...item.elements);
+      for (const add of item.adds) pushItem(structure.relAdds, this.part, add);
+      pushItem(structure.inserts, this.part, item.inserted);
+    }
+    this.editor.afterCommand(this.slide, this.pasted.map(item => item.owner));
+  }
+
+  revert(): void {
+    const structure = this.host.structure();
+    const gone = new Set(this.pasted.flatMap(item => item.elements));
+    this.slide.elements = this.slide.elements.filter(element => !gone.has(element));
+    for (const item of [...this.pasted].reverse()) {
+      popItem(structure.inserts, this.part);
+      for (const _ of item.adds) popItem(structure.relAdds, this.part);
+    }
+    this.editor.afterCommand(this.slide, [], false);
+  }
+}
+
+interface ClipboardEntry {
+  object: { source: ElementSource; isGroup: boolean; depth: number };
+  xml: string;
+  relationships: RelAdd[];
+  elements: SlideElement[];
+}
+
 class CompositeCommand implements Command {
   constructor(public readonly label: string, private commands: Command[]) {}
   apply(): void { this.commands.forEach(command => command.apply()); }
@@ -304,6 +396,9 @@ export class SlideEditor {
   /** Groups double-clicked into, outermost first; their children are selectable. */
   private entered: string[] = [];
   private groupFrame: HTMLDivElement;
+  private clipboard: ClipboardEntry[] = [];
+  private pasteCount = 0;
+  private menu: HTMLDivElement | null = null;
   private textSession: {
     slide: Slide;
     element: TextElement;
@@ -341,6 +436,7 @@ export class SlideEditor {
     container.addEventListener("pointercancel", e => this.onPointerUp(e));
     container.addEventListener("pointerleave", () => this.setHover(null));
     container.addEventListener("dblclick", e => this.onDoubleClick(e));
+    container.addEventListener("contextmenu", e => this.openMenu(e));
     document.addEventListener("keydown", e => this.onKeyDown(e));
     document.addEventListener("selectionchange", () => {
       if (this.textSession) this.updateToolbar();
@@ -508,6 +604,263 @@ export class SlideEditor {
     this.history.record(command);
   }
 
+  // ------------------------------------------------- layers, copy and paste
+
+  /** Change the stacking order of the selection among its siblings. */
+  public arrange(mode: OrderOp): void {
+    const slide = this.host.getSlide();
+    if (!slide) return;
+    if (this.textSession) this.endTextEdit();
+    const objects = this.objects(slide);
+    const selected = this.selectedObjects(slide);
+    if (selected.length === 0) return;
+
+    const before = [...slide.elements];
+    const next = [...slide.elements];
+    const moves: Array<{ part: string; shapeId: string; op: OrderOp }> = [];
+    for (const parent of new Set(selected.map(object => object.parent))) {
+      const siblings = objects.filter(object => object.parent === parent);
+      const byKey = new Map(siblings.map(object => [object.key, object]));
+      const result = reorderSiblings(
+        siblings.map(object => object.key),
+        new Set(selected.filter(object => object.parent === parent).map(object => object.key)),
+        mode
+      );
+      if (result.moves.length === 0) continue;
+
+      // The siblings keep occupying the same slots; only which one sits where changes.
+      const slots = siblings.flatMap(object => object.elements.map(element => before.indexOf(element))).sort((a, b) => a - b);
+      const sequence = result.order.flatMap(key => [...byKey.get(key)!.elements].sort((a, b) => before.indexOf(a) - before.indexOf(b)));
+      slots.forEach((slot, index) => { next[slot] = sequence[index]; });
+      for (const move of result.moves) {
+        const object = byKey.get(move.key)!;
+        moves.push({ part: object.source.part, shapeId: object.source.shapeId, op: move.op });
+      }
+    }
+    if (moves.length === 0) return;
+    const command = new ArrangeCommand(slide, before, next, moves, this, this.host);
+    command.apply();
+    this.history.record(command);
+  }
+
+  public hasClipboard(): boolean {
+    return this.clipboard.length > 0;
+  }
+
+  /** Snapshot the selection (with pending edits applied) for pasting. */
+  private async collect(slide: Slide): Promise<ClipboardEntry[]> {
+    const entries: ClipboardEntry[] = [];
+    for (const object of this.selectedObjects(slide)) {
+      // A group nested inside an entered group lives in another coordinate space.
+      if (object.isGroup && object.depth > 0) continue;
+      const snapshot = await this.host.materialize(object.source);
+      if (!snapshot) continue;
+      entries.push({
+        object: { source: object.source, isGroup: object.isGroup, depth: object.depth },
+        xml: snapshot.xml,
+        relationships: snapshot.relationships,
+        elements: JSON.parse(JSON.stringify(object.elements))
+      });
+    }
+    return entries;
+  }
+
+  public async copy(): Promise<boolean> {
+    const slide = this.host.getSlide();
+    if (!slide) return false;
+    if (this.textSession) this.endTextEdit();
+    const entries = await this.collect(slide);
+    if (entries.length === 0) return false;
+    this.clipboard = entries;
+    this.pasteCount = 0;
+    this.emit();
+    return true;
+  }
+
+  public async cut(): Promise<void> {
+    if (await this.copy()) this.deleteSelection();
+  }
+
+  public async paste(): Promise<void> {
+    const slide = this.host.getSlide();
+    if (!slide || this.clipboard.length === 0) return;
+    if (this.textSession) this.endTextEdit();
+    // Pasting again on the same slide steps the copy further from the original.
+    const sameSlide = this.clipboard[0].object.source.part === slide.part;
+    this.pasteCount += 1;
+    await this.insert(slide, this.clipboard, sameSlide ? 24 * this.pasteCount : 0);
+  }
+
+  /** Copy the selection in place, offset a little, without touching the clipboard. */
+  public async duplicate(): Promise<void> {
+    const slide = this.host.getSlide();
+    if (!slide) return;
+    if (this.textSession) this.endTextEdit();
+    const entries = await this.collect(slide);
+    if (entries.length > 0) await this.insert(slide, entries, 24);
+  }
+
+  private async insert(slide: Slide, entries: ClipboardEntry[], offset: number): Promise<void> {
+    const part = slide.part;
+    if (!part) return;
+    const base = slide.xform || { scaleX: 1 / this.emuPerPx(slide), scaleY: 1 / this.emuPerPx(slide) };
+    const pasted: PastedObject[] = [];
+
+    for (const entry of entries) {
+      const { ids, adds } = await this.host.resolveRelationships(part, entry.object.source.part, entry.relationships);
+      const remapped = remapShapeXml(entry.xml, () => this.host.allocateShapeId(part), ids);
+      const topId = remapped.idMap.get(entry.object.source.shapeId);
+      if (!topId) continue;
+
+      const refs = new Map<string, GroupRef>();
+      const stamp = Date.now().toString(36);
+      const elements = entry.elements.map((original, index) => {
+        const element: SlideElement = JSON.parse(JSON.stringify(original));
+        const src = original.source!;
+        const groups = (src.groups || []).slice(entry.object.depth);
+        const rebased = { ...base, offsetX: 0, offsetY: 0 };
+        const newGroups = groups.map((group, level) => {
+          let ref = refs.get(group.shapeId);
+          if (!ref) {
+            ref = {
+              shapeId: remapped.idMap.get(group.shapeId) || group.shapeId,
+              xform: level === 0 ? rebased : group.xform,
+              origRect: { x: 0, y: 0, w: 0, h: 0 }
+            };
+            refs.set(group.shapeId, ref);
+          }
+          return ref;
+        });
+        element.source = {
+          part,
+          shapeId: remapped.idMap.get(src.shapeId) || src.shapeId,
+          // A leaf lifted out of an entered group is placed on the slide itself.
+          xform: groups.length === 0 && entry.object.depth > 0 ? rebased : src.xform,
+          ...(src.readOnlyText ? { readOnlyText: true } : {}),
+          ...(newGroups.length ? { groups: newGroups } : {})
+        };
+        element.id = `${element.id}_c${stamp}${index}`;
+        return element;
+      });
+
+      for (const [oldId, ref] of refs) {
+        const members = elements.filter(element => element.source?.groups?.some(group => group.shapeId === ref.shapeId));
+        if (members.length === 0) continue;
+        void oldId;
+        const left = Math.min(...members.map(m => m.rect.x));
+        const top = Math.min(...members.map(m => m.rect.y));
+        ref.origRect = {
+          x: left,
+          y: top,
+          w: Math.max(...members.map(m => m.rect.x + m.rect.w)) - left,
+          h: Math.max(...members.map(m => m.rect.y + m.rect.h)) - top
+        };
+      }
+      for (const element of elements) {
+        element.rect = { ...element.rect, x: element.rect.x + offset, y: element.rect.y + offset };
+      }
+
+      const top = entry.object.isGroup
+        ? { part, shapeId: topId, xform: elements[0].source!.groups![0].xform }
+        : elements[0].source!;
+      pasted.push({ elements, inserted: { id: topId, xml: remapped.xml }, adds, owner: top });
+    }
+    if (pasted.length === 0) return;
+
+    this.entered = [];
+    const command = new PasteCommand(slide, part, pasted, this, this.host);
+    command.apply();
+    this.history.record(command);
+    this.selection = new Set(pasted.map(item => `${part}|${item.inserted.id}`));
+    this.paintOverlay();
+    this.emit();
+  }
+
+  // ------------------------------------------------------------ context menu
+
+  private openMenu(event: MouseEvent): void {
+    const slide = this.host.getSlide();
+    if (!slide) return;
+    event.preventDefault();
+    this.closeMenu();
+    const box = this.box();
+    const k = this.scale() || 1;
+    const point = { x: (event.clientX - box.left) / k, y: (event.clientY - box.top) / k };
+    const object = this.hitInScope(slide, point);
+    if (object && !this.selection.has(object.key)) {
+      this.selection = new Set([object.key]);
+      this.paintOverlay();
+      this.emit();
+    } else if (!object) {
+      this.selection.clear();
+      this.paintOverlay();
+      this.emit();
+    }
+
+    const hasSelection = this.selection.size > 0;
+    const item = (label: string, hint: string, enabled: boolean, run: () => void) => ({ label, hint, enabled, run });
+    const groups: Array<Array<ReturnType<typeof item>>> = [
+      [
+        item("剪切", "Ctrl+X", hasSelection, () => void this.cut()),
+        item("复制", "Ctrl+C", hasSelection, () => void this.copy()),
+        item("粘贴", "Ctrl+V", this.hasClipboard(), () => void this.paste()),
+        item("创建副本", "Ctrl+D", hasSelection, () => void this.duplicate())
+      ],
+      [
+        item("置于顶层", "Ctrl+Shift+]", hasSelection, () => this.arrange("front")),
+        item("上移一层", "Ctrl+]", hasSelection, () => this.arrange("forward")),
+        item("下移一层", "Ctrl+[", hasSelection, () => this.arrange("backward")),
+        item("置于底层", "Ctrl+Shift+[", hasSelection, () => this.arrange("back"))
+      ],
+      [item("删除", "Delete", hasSelection, () => this.deleteSelection())]
+    ];
+
+    const menu = this.div("edit-menu");
+    groups.forEach((group, index) => {
+      if (index > 0) menu.appendChild(this.div("edit-menu-divider"));
+      for (const entry of group) {
+        const row = document.createElement("button");
+        row.type = "button";
+        row.className = "edit-menu-item";
+        row.disabled = !entry.enabled;
+        const label = document.createElement("span");
+        label.textContent = entry.label;
+        const hint = document.createElement("kbd");
+        hint.textContent = entry.hint;
+        row.append(label, hint);
+        row.addEventListener("click", () => {
+          this.closeMenu();
+          entry.run();
+        });
+        menu.appendChild(row);
+      }
+    });
+    menu.addEventListener("pointerdown", e => e.stopPropagation());
+    menu.addEventListener("contextmenu", e => e.preventDefault());
+    this.layer.appendChild(menu);
+    this.menu = menu;
+
+    const width = menu.offsetWidth;
+    const height = menu.offsetHeight;
+    menu.style.left = `${Math.max(4, Math.min(event.clientX - box.left, box.width - width - 4))}px`;
+    menu.style.top = `${Math.max(4, Math.min(event.clientY - box.top, Math.max(4, box.height - height - 4)))}px`;
+
+    const dismiss = (e: Event) => {
+      if (e instanceof KeyboardEvent && e.key !== "Escape") return;
+      if (e.target instanceof Node && menu.contains(e.target)) return;
+      this.closeMenu();
+      document.removeEventListener("pointerdown", dismiss, true);
+      document.removeEventListener("keydown", dismiss, true);
+    };
+    document.addEventListener("pointerdown", dismiss, true);
+    document.addEventListener("keydown", dismiss, true);
+  }
+
+  private closeMenu(): void {
+    this.menu?.remove();
+    this.menu = null;
+  }
+
   public selectAll(): void {
     const slide = this.host.getSlide();
     if (!slide) return;
@@ -540,7 +893,13 @@ export class SlideEditor {
   // ----------------------------------------------------------------- model
 
   /** Which selectable object an element belongs to, given the groups entered so far. */
-  private refFor(element: SlideElement): { key: string; source: ElementSource; isGroup: boolean } | null {
+  private refFor(element: SlideElement): {
+    key: string;
+    source: ElementSource;
+    isGroup: boolean;
+    parent: string;
+    depth: number;
+  } | null {
     const source = element.source;
     if (!source) return null;
     const groups = source.groups || [];
@@ -551,10 +910,18 @@ export class SlideEditor {
       return {
         key: `${source.part}|${group.shapeId}`,
         source: { part: source.part, shapeId: group.shapeId, xform: group.xform },
-        isGroup: true
+        isGroup: true,
+        parent: groups.slice(0, depth).map(g => g.shapeId).join("/"),
+        depth
       };
     }
-    return { key: `${source.part}|${source.shapeId}`, source, isGroup: false };
+    return {
+      key: `${source.part}|${source.shapeId}`,
+      source,
+      isGroup: false,
+      parent: groups.map(g => g.shapeId).join("/"),
+      depth: groups.length
+    };
   }
 
   private objects(slide: Slide): SceneObject[] {
@@ -571,6 +938,8 @@ export class SlideEditor {
           key: ref.key,
           source: ref.source,
           isGroup: ref.isGroup,
+          parent: ref.parent,
+          depth: ref.depth,
           elements: [element],
           rect: element.rect,
           rotation: rotationOf(element),
@@ -823,6 +1192,22 @@ export class SlideEditor {
       if (this.selection.size === 0) return;
       event.preventDefault();
       this.deleteSelection();
+    } else if (mod && key === "c" && this.selection.size > 0) {
+      event.preventDefault();
+      void this.copy();
+    } else if (mod && key === "x" && this.selection.size > 0) {
+      event.preventDefault();
+      void this.cut();
+    } else if (mod && key === "v" && this.hasClipboard()) {
+      event.preventDefault();
+      void this.paste();
+    } else if (mod && key === "d" && this.selection.size > 0) {
+      event.preventDefault();
+      void this.duplicate();
+    } else if (mod && (event.code === "BracketRight" || event.code === "BracketLeft") && this.selection.size > 0) {
+      event.preventDefault();
+      const up = event.code === "BracketRight";
+      this.arrange(event.shiftKey ? (up ? "front" : "back") : (up ? "forward" : "backward"));
     } else if (mod && !event.altKey && (key === "b" || key === "i") && this.selection.size > 0) {
       event.preventDefault();
       this.toggleStyle(key === "b" ? "bold" : "italic");

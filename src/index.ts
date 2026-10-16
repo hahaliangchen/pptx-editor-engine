@@ -16,7 +16,12 @@ import {
   TextEdits,
   exportEditedPptx,
   markDirty,
+  RelAdd,
+  StructureEdits,
   StyleEdits,
+  emptyStructure,
+  materializeShape,
+  readRelationships,
   popOp,
   popTextOp,
   pushOp,
@@ -93,6 +98,8 @@ export default class PptViewer {
   private dirtyShapes: DirtyShapes = new Map();
   private textEdits: TextEdits = new Map();
   private styleEdits: StyleEdits = new Map();
+  private structureEdits: StructureEdits = emptyStructure();
+  private shapeIdCounters = new Map<string, number>();
   private hiddenElements = new Set<SlideElement>();
   private editNotifyTimer = 0;
   private onSlideEdited?: (slideIndex: number, slide: Slide) => void;
@@ -146,6 +153,10 @@ export default class PptViewer {
       endTextEdit: slide => this.setHiddenElements(slide, []),
       recordTextOp: (source, op) => pushTextOp(this.textEdits, source, op),
       discardTextOp: source => popTextOp(this.textEdits, source),
+      structure: () => this.structureEdits,
+      materialize: source => this.materializeSource(source),
+      allocateShapeId: part => this.allocateShapeId(part),
+      resolveRelationships: (target, source, relationships) => this.resolveRelationships(target, source, relationships),
       recordStyleOp: (source, op) => pushOp(this.styleEdits, source, op),
       discardStyleOp: source => popOp(this.styleEdits, source)
     });
@@ -563,6 +574,26 @@ export default class PptViewer {
     this.editor.applyShapeStyle(op);
   }
 
+  public arrange(mode: Parameters<SlideEditor["arrange"]>[0]): void {
+    this.editor.arrange(mode);
+  }
+
+  public copy(): Promise<boolean> {
+    return this.editor.copy();
+  }
+
+  public cut(): Promise<void> {
+    return this.editor.cut();
+  }
+
+  public paste(): Promise<void> {
+    return this.editor.paste();
+  }
+
+  public duplicate(): Promise<void> {
+    return this.editor.duplicate();
+  }
+
   public alignParagraphs(align: "left" | "center" | "right"): void {
     this.editor.alignParagraphs(align);
   }
@@ -577,20 +608,79 @@ export default class PptViewer {
   }
 
   public hasUnsavedEdits(): boolean {
-    return this.dirtyShapes.size > 0 || this.textEdits.size > 0 || this.styleEdits.size > 0;
+    return this.dirtyShapes.size > 0 || this.textEdits.size > 0 || this.styleEdits.size > 0
+      || this.structureEdits.orders.size > 0 || this.structureEdits.inserts.size > 0;
   }
 
   /** Build a new .pptx with every edit written back into the original package. */
   public async exportPptx(): Promise<Blob> {
     const zip = this.parser.getZip();
     if (!zip || !this.presentation) throw new Error("请先打开一个 .pptx 文件。");
-    return exportEditedPptx(zip, this.presentation.slides, this.dirtyShapes, this.textEdits, this.styleEdits);
+    return exportEditedPptx(zip, this.presentation.slides, this.dirtyShapes, this.textEdits, this.styleEdits, this.structureEdits);
+  }
+
+  private materializeSource(source: { part: string; shapeId: string }) {
+    const zip = this.parser.getZip();
+    if (!zip || !this.presentation) return Promise.resolve(null);
+    return materializeShape(zip, source.part, source.shapeId, this.presentation.slides, {
+      dirty: this.dirtyShapes,
+      textEdits: this.textEdits,
+      styleEdits: this.styleEdits,
+      structure: this.structureEdits
+    });
+  }
+
+  /** Next free p:cNvPr id of a slide, seeded from the highest id in its XML. */
+  private allocateShapeId(part: string): string {
+    let counter = this.shapeIdCounters.get(part);
+    if (counter === undefined) {
+      const xml = this.presentation?.slides.find(slide => slide.part === part)?.rawXml || "";
+      counter = 1;
+      for (const match of xml.matchAll(/<p:cNvPr\b[^>]*?\bid="(\d+)"/g)) {
+        counter = Math.max(counter, parseInt(match[1], 10));
+      }
+    }
+    counter += 1;
+    this.shapeIdCounters.set(part, counter);
+    return String(counter);
+  }
+
+  /** Relationship ids for pasted shapes: reuse what the target slide has, add what it lacks. */
+  private async resolveRelationships(
+    targetPart: string,
+    sourcePart: string,
+    relationships: RelAdd[]
+  ): Promise<{ ids: Map<string, string>; adds: RelAdd[] }> {
+    const ids = new Map<string, string>();
+    const adds: RelAdd[] = [];
+    const zip = this.parser.getZip();
+    if (targetPart === sourcePart || !zip || relationships.length === 0) return { ids, adds };
+
+    const existing = await readRelationships(zip, targetPart, this.structureEdits.relAdds.get(targetPart));
+    let counter = 0;
+    for (const id of existing.keys()) counter = Math.max(counter, parseInt(id.replace(/\D/g, ""), 10) || 0);
+    for (const rel of relationships) {
+      const same = [...existing.values()].find(candidate =>
+        candidate.type === rel.type && candidate.target === rel.target && candidate.targetMode === rel.targetMode);
+      if (same) {
+        ids.set(rel.id, same.id);
+        continue;
+      }
+      counter += 1;
+      const added: RelAdd = { ...rel, id: `rId${counter}` };
+      existing.set(added.id, added);
+      adds.push(added);
+      ids.set(rel.id, added.id);
+    }
+    return { ids, adds };
   }
 
   private resetEditing(): void {
     this.dirtyShapes = new Map();
     this.textEdits = new Map();
     this.styleEdits = new Map();
+    this.structureEdits = emptyStructure();
+    this.shapeIdCounters.clear();
     this.hiddenElements.clear();
     // Fonts differ per document, so the drag renderer is rebuilt on demand.
     this.dragRenderer = null;

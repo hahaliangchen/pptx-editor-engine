@@ -339,6 +339,10 @@ export interface Slide {
   rawXml: string;
   /** EMU per logical pixel, used to show real-world sizes while editing. */
   emuPerPx?: number;
+  /** Package part this slide was read from. */
+  part?: string;
+  /** Slide-level EMU to logical-px scale, for shapes placed directly on the slide. */
+  xform?: { scaleX: number; scaleY: number };
 }
 
 export interface PresentationSize {

@@ -5,6 +5,8 @@ export interface InspectorActions {
   onShapeStyle(op: ShapeStyleOp): void;
   onAlignText(align: "left" | "center" | "right"): void;
   onAlignSlide(edge: "left" | "hcenter" | "right" | "top" | "vcenter" | "bottom"): void;
+  onArrange(mode: "front" | "forward" | "backward" | "back"): void;
+  onDuplicate(): void;
 }
 
 const PALETTE = [
@@ -29,6 +31,11 @@ const ICONS = {
   alignTop: svg('<path d="M4 4h16"/><rect x="6" y="8" width="4" height="12" rx="1"/><rect x="14" y="8" width="4" height="7" rx="1"/>'),
   alignVCenter: svg('<path d="M4 12h16"/><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="8" width="4" height="8" rx="1"/>'),
   alignBottom: svg('<path d="M4 20h16"/><rect x="6" y="4" width="4" height="12" rx="1"/><rect x="14" y="9" width="4" height="7" rx="1"/>'),
+  front: svg('<rect x="3" y="3" width="11" height="11" rx="1.5" fill="currentColor" fill-opacity=".18"/><rect x="10" y="10" width="11" height="11" rx="1.5" fill="currentColor"/>'),
+  forward: svg('<rect x="3" y="9" width="10" height="10" rx="1.5"/><rect x="9" y="4" width="10" height="10" rx="1.5" fill="currentColor" fill-opacity=".18"/>'),
+  backward: svg('<rect x="9" y="4" width="10" height="10" rx="1.5"/><rect x="3" y="9" width="10" height="10" rx="1.5" fill="currentColor" fill-opacity=".18"/>'),
+  back: svg('<rect x="10" y="10" width="11" height="11" rx="1.5" fill-opacity=".18"/><rect x="3" y="3" width="11" height="11" rx="1.5" fill="currentColor"/>'),
+  duplicate: svg('<rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/>'),
   solid: svg('<path d="M4 12h16"/>'),
   dash: svg('<path d="M3 12h4M10 12h4M17 12h4"/>'),
   dot: svg('<path d="M4 12h.01M9 12h.01M14 12h.01M19 12h.01" stroke-width="3"/>'),
@@ -79,6 +86,7 @@ export class InspectorPanel {
     this.buildLine();
     this.buildText();
     this.buildArrange();
+    this.buildLayers();
     this.update(null);
   }
 
@@ -90,6 +98,7 @@ export class InspectorPanel {
     has("line", !!props && props.shapeCount > 0);
     has("text", !!props && props.textCount > 0);
     has("arrange", !!props);
+    has("layers", !!props);
 
     this.paintPalette(this.fillChips, this.fillNone, this.fillCustom, props?.fill ?? { kind: "mixed" });
     this.paintPalette(this.lineChips, this.lineNone, this.lineCustom, props?.lineColor ?? { kind: "mixed" });
@@ -200,6 +209,23 @@ export class InspectorPanel {
     for (const [edge, icon, title] of edges) {
       row.appendChild(this.iconButton(icon, title, () => this.actions.onAlignSlide(edge)));
     }
+    card.appendChild(row);
+  }
+
+  private buildLayers(): void {
+    const card = this.section("layers", "层级与副本");
+    const row = document.createElement("div");
+    row.className = "inspector-grid inspector-grid-five";
+    const layers: Array<["front" | "forward" | "backward" | "back", string, string]> = [
+      ["front", ICONS.front, "置于顶层 (Ctrl+Shift+])"],
+      ["forward", ICONS.forward, "上移一层 (Ctrl+])"],
+      ["backward", ICONS.backward, "下移一层 (Ctrl+[)"],
+      ["back", ICONS.back, "置于底层 (Ctrl+Shift+[)"]
+    ];
+    for (const [mode, icon, title] of layers) {
+      row.appendChild(this.iconButton(icon, title, () => this.actions.onArrange(mode)));
+    }
+    row.appendChild(this.iconButton(ICONS.duplicate, "创建副本 (Ctrl+D)", () => this.actions.onDuplicate()));
     card.appendChild(row);
   }
 
