@@ -801,3 +801,61 @@ label {
     display: none;
   }
 }
+
+/* ---------- In-place text editing ---------- */
+
+.edit-text {
+  position: absolute;
+  z-index: 7;
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+  pointer-events: auto;
+  cursor: text;
+  outline: 1.5px solid var(--edit-accent);
+  outline-offset: 0;
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--edit-accent) 16%, transparent);
+  border-radius: 1px;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.edit-text-body {
+  width: 100%;
+  outline: none;
+  caret-color: var(--edit-accent);
+  word-break: break-word;
+  line-break: strict;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.edit-text-body ::selection,
+.edit-text-body::selection {
+  background: color-mix(in srgb, var(--edit-accent) 32%, transparent);
+}
+
+.edit-p {
+  min-height: 1em;
+}
+
+.edit-p[data-bullet]::before {
+  content: attr(data-bullet);
+  display: inline-block;
+  width: var(--bullet-width, 1em);
+  color: var(--bullet-color);
+  font-size: var(--bullet-size);
+  line-height: 1;
+  text-indent: 0;
+  user-select: none;
+  pointer-events: none;
+}
+
+.edit-selection.is-editing {
+  border-color: transparent;
+  box-shadow: none;
+}
+
+.edit-selection.is-editing .edit-handle {
+  display: none;
+}

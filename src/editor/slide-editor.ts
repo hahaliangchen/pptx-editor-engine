@@ -1,5 +1,7 @@
-import { ElementSource, Rect, Slide, SlideElement } from "../pptx-virtual-dom";
+import { ElementSource, Rect, Slide, SlideElement, TextElement, TextParagraph } from "../pptx-virtual-dom";
 import { Command, History } from "./history";
+import { LINE_BREAK, TextOp, applyTextOp, diffText } from "./text-ops";
+import { normalizeParagraphs, paragraphsText, vdomTextModel } from "./text-model-vdom";
 
 export interface EditorHost {
   /** Element that wraps the canvas; the editor overlay is mounted inside it. */
@@ -16,6 +18,11 @@ export interface EditorHost {
   /** Called after an edit is finished so thumbnails can refresh. */
   onCommit(slide: Slide): void;
   markDirty(source: ElementSource | undefined): void;
+  /** Hide an element's canvas text while it is edited in the DOM overlay. */
+  beginTextEdit(slide: Slide, element: TextElement): void;
+  endTextEdit(slide: Slide): void;
+  recordTextOp(source: ElementSource, op: TextOp): void;
+  discardTextOp(source: ElementSource): void;
 }
 
 export interface EditorState {
@@ -134,6 +141,37 @@ class DeleteCommand implements Command {
   }
 }
 
+const cloneParagraphs = (paragraphs: TextParagraph[]): TextParagraph[] =>
+  JSON.parse(JSON.stringify(paragraphs));
+
+class TextCommand implements Command {
+  public readonly label = "编辑文字";
+
+  constructor(
+    private slide: Slide,
+    private element: TextElement,
+    private before: TextParagraph[],
+    private after: TextParagraph[],
+    private ops: TextOp[],
+    private editor: SlideEditor,
+    private host: EditorHost
+  ) {}
+
+  apply(): void {
+    this.element.paragraphs = cloneParagraphs(this.after);
+    this.element.content = paragraphsText(this.after).split(LINE_BREAK).join("\n");
+    if (this.element.source) for (const op of this.ops) this.host.recordTextOp(this.element.source, op);
+    this.editor.afterCommand(this.slide, [this.element], false);
+  }
+
+  revert(): void {
+    this.element.paragraphs = cloneParagraphs(this.before);
+    this.element.content = paragraphsText(this.before).split(LINE_BREAK).join("\n");
+    if (this.element.source) for (const _ of this.ops) this.host.discardTextOp(this.element.source);
+    this.editor.afterCommand(this.slide, [this.element], false);
+  }
+}
+
 /**
  * Interactive layer on top of the rendered canvas: selection, move, resize,
  * marquee, smart guides, keyboard shortcuts and undo/redo. All geometry is kept
@@ -157,6 +195,13 @@ export class SlideEditor {
   private badge: HTMLDivElement;
   private guideLayer: HTMLDivElement;
   private handleNodes = new Map<HandleId, HTMLDivElement>();
+  private textSession: {
+    slide: Slide;
+    element: TextElement;
+    shell: HTMLDivElement;
+    body: HTMLDivElement;
+    before: TextParagraph[];
+  } | null = null;
 
   constructor(private host: EditorHost) {
     const container = host.container;
@@ -180,6 +225,7 @@ export class SlideEditor {
     container.addEventListener("pointerup", e => this.onPointerUp(e));
     container.addEventListener("pointercancel", e => this.onPointerUp(e));
     container.addEventListener("pointerleave", () => this.setHover(null));
+    container.addEventListener("dblclick", e => this.onDoubleClick(e));
     document.addEventListener("keydown", e => this.onKeyDown(e));
     this.history.subscribe(() => this.emit());
   }
@@ -210,6 +256,7 @@ export class SlideEditor {
   }
 
   public reset(): void {
+    this.cancelTextSession();
     this.selection.clear();
     this.selectionSlideId = null;
     this.drag = null;
@@ -257,8 +304,8 @@ export class SlideEditor {
   }
 
   /** Used by commands after they change the model. */
-  public afterCommand(slide: Slide, elements: SlideElement[]): void {
-    for (const element of elements) this.host.markDirty(element.source);
+  public afterCommand(slide: Slide, elements: SlideElement[], geometry = true): void {
+    if (geometry) for (const element of elements) this.host.markDirty(element.source);
     if (this.host.getSlide() !== slide) this.host.showSlide(slide);
     this.selectionSlideId = slide.id;
     this.host.invalidate(slide);
@@ -355,6 +402,8 @@ export class SlideEditor {
 
   private onPointerDown(event: PointerEvent): void {
     if (event.button !== 0) return;
+    if ((event.target as Element).closest?.(".edit-text")) return;
+    if (this.textSession) this.endTextEdit();
     const slide = this.host.getSlide();
     if (!slide) return;
     event.preventDefault();
@@ -418,6 +467,7 @@ export class SlideEditor {
     const point = this.point(event);
 
     if (!this.drag) {
+      if (this.textSession) return;
       const hovered = this.hit(slide, point);
       this.setHover(hovered ? hovered.key : null);
       this.host.container.classList.toggle(
@@ -679,6 +729,207 @@ export class SlideEditor {
     });
     this.paintOverlay();
     this.emit();
+  }
+
+  // ------------------------------------------------------------ text editing
+
+  private onDoubleClick(event: MouseEvent): void {
+    if ((event.target as Element).closest?.(".edit-text")) return;
+    const slide = this.host.getSlide();
+    if (!slide) return;
+    const box = this.box();
+    const k = this.scale() || 1;
+    const object = this.hit(slide, { x: (event.clientX - box.left) / k, y: (event.clientY - box.top) / k });
+    const element = object?.elements.find((candidate): candidate is TextElement =>
+      candidate.type === "text" && !!candidate.paragraphs?.length && !!candidate.source);
+    if (!object || !element) return;
+    event.preventDefault();
+    this.selection = new Set([object.key]);
+    this.startTextEdit(slide, element);
+  }
+
+  private startTextEdit(slide: Slide, element: TextElement): void {
+    if (this.textSession) this.endTextEdit();
+    const paragraphs = element.paragraphs || [];
+    const k = this.scale() || 1;
+    const body = element.body;
+
+    const shell = this.div("edit-text");
+    const anchor = body?.verticalAnchor === "middle" ? "center" : body?.verticalAnchor === "bottom" ? "flex-end" : "flex-start";
+    Object.assign(shell.style, {
+      left: `${element.rect.x * k}px`,
+      top: `${element.rect.y * k}px`,
+      width: `${element.rect.w * k}px`,
+      height: `${element.rect.h * k}px`,
+      justifyContent: anchor,
+      padding: `${(body?.marginTop ?? 4) * k}px ${(body?.marginRight ?? 8) * k}px ${(body?.marginBottom ?? 4) * k}px ${(body?.marginLeft ?? 8) * k}px`
+    });
+
+    const editable = this.div("edit-text-body");
+    editable.contentEditable = "true";
+    editable.spellcheck = false;
+    editable.style.whiteSpace = body?.wrap === "none" ? "pre" : "pre-wrap";
+    paragraphs.forEach(paragraph => editable.appendChild(this.paragraphNode(paragraph, k)));
+    shell.appendChild(editable);
+
+    editable.addEventListener("keydown", event => {
+      event.stopPropagation();
+      if (event.key === "Escape") {
+        event.preventDefault();
+        this.endTextEdit();
+      }
+    });
+    editable.addEventListener("paste", event => {
+      event.preventDefault();
+      const text = event.clipboardData?.getData("text/plain") ?? "";
+      text.replace(/\r\n?/g, "\n").split("\n").forEach((line, index) => {
+        if (index > 0) document.execCommand("insertParagraph");
+        if (line) document.execCommand("insertText", false, line);
+      });
+    });
+    editable.addEventListener("dragstart", event => event.preventDefault());
+
+    this.layer.appendChild(shell);
+    this.textSession = { slide, element, shell, body: editable, before: cloneParagraphs(paragraphs) };
+    this.host.beginTextEdit(slide, element);
+    this.selectBox.classList.add("is-editing");
+    this.paintOverlay();
+    this.emit();
+
+    editable.focus();
+    const range = document.createRange();
+    range.selectNodeContents(editable);
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+  }
+
+  private paragraphNode(paragraph: TextParagraph, k: number): HTMLElement {
+    const node = document.createElement("div");
+    node.className = "edit-p";
+    const firstRun = paragraph.runs[0];
+    const style = paragraph.style;
+    const lineHeight = style.lineSpacing
+      ? style.lineSpacing.unit === "percent" ? 1.2 * style.lineSpacing.value : style.lineSpacing.value * k
+      : 1.2;
+    Object.assign(node.style, {
+      textAlign: style.align,
+      paddingLeft: `${Math.max(0, style.marginLeft) * k}px`,
+      textIndent: `${style.indent * k}px`,
+      lineHeight: typeof lineHeight === "number" && lineHeight < 4 ? String(lineHeight) : `${lineHeight}px`,
+      marginTop: `${(style.spaceBefore || 0) * k}px`,
+      marginBottom: `${(style.spaceAfter || 0) * k}px`,
+      fontSize: `${(firstRun?.style.fontSize || 18) * k}px`
+    });
+
+    if (paragraph.bullet) {
+      node.dataset.bullet = paragraph.bullet.char;
+      node.style.setProperty("--bullet-color", paragraph.bullet.color);
+      node.style.setProperty("--bullet-size", `${(paragraph.bullet.fontSize || firstRun?.style.fontSize || 18) * k}px`);
+      node.style.setProperty("--bullet-width", `${Math.max(0, -style.indent) * k}px`);
+    }
+
+    let hasContent = false;
+    for (const run of paragraph.runs) {
+      if (run.content === "\n") {
+        node.appendChild(document.createElement("br"));
+        hasContent = true;
+        continue;
+      }
+      if (!run.content) continue;
+      const span = document.createElement("span");
+      // East Asian first: the browser would otherwise pick a system CJK font
+      // for Chinese glyphs and look nothing like the Rust-rendered text.
+      const families = [run.style.eastAsianFontFamily, run.style.fontFamily]
+        .filter((family): family is string => !!family && family !== "sans-serif")
+        .map(family => `"${family}"`);
+      Object.assign(span.style, {
+        fontSize: `${run.style.fontSize * k}px`,
+        color: run.style.color,
+        fontWeight: run.style.bold ? "700" : "400",
+        fontStyle: run.style.italic ? "italic" : "normal",
+        fontFamily: [...families, "sans-serif"].join(", "),
+        letterSpacing: run.style.letterSpacing ? `${run.style.letterSpacing * k}px` : ""
+      });
+      span.textContent = run.content;
+      node.appendChild(span);
+      hasContent = true;
+    }
+    if (!hasContent) node.appendChild(document.createElement("br"));
+    return node;
+  }
+
+  private readEditedParagraphs(body: HTMLElement): string {
+    const lines: string[] = [];
+    const readBlock = (block: Node): string => {
+      let text = "";
+      const walk = (node: Node) => {
+        if (node.nodeType === Node.TEXT_NODE) {
+          text += node.textContent || "";
+        } else if (node.nodeName === "BR") {
+          text += LINE_BREAK;
+        } else {
+          node.childNodes.forEach(walk);
+        }
+      };
+      walk(block);
+      // A lone <br> only keeps an empty line open in the browser.
+      if (text === LINE_BREAK) text = "";
+      return text.replace(/\u00a0/g, " ");
+    };
+
+    let inline = "";
+    let hasInline = false;
+    const flushInline = () => {
+      if (hasInline) lines.push(inline);
+      inline = "";
+      hasInline = false;
+    };
+    body.childNodes.forEach(node => {
+      if (node.nodeName === "DIV" || node.nodeName === "P") {
+        flushInline();
+        lines.push(readBlock(node));
+      } else {
+        inline += readBlock(node);
+        hasInline = true;
+      }
+    });
+    flushInline();
+    return (lines.length ? lines : [""]).join("\n");
+  }
+
+  private endTextEdit(): void {
+    const session = this.textSession;
+    if (!session) return;
+    this.textSession = null;
+
+    const afterText = this.readEditedParagraphs(session.body);
+    session.shell.remove();
+    this.selectBox.classList.remove("is-editing");
+
+    const beforeText = paragraphsText(session.before);
+    const ops = diffText(beforeText, afterText);
+    this.host.endTextEdit(session.slide);
+    if (ops.length > 0 && session.element.source) {
+      const after = cloneParagraphs(session.before);
+      const model = vdomTextModel(after);
+      for (const op of ops) applyTextOp(model, op);
+      normalizeParagraphs(after, session.element.style);
+      const command = new TextCommand(session.slide, session.element, session.before, after, ops, this, this.host);
+      command.apply();
+      this.history.record(command);
+    }
+    this.paintOverlay();
+    this.emit();
+  }
+
+  private cancelTextSession(): void {
+    const session = this.textSession;
+    if (!session) return;
+    this.textSession = null;
+    session.shell.remove();
+    this.selectBox.classList.remove("is-editing");
+    this.host.endTextEdit(session.slide);
   }
 
   // ---------------------------------------------------------------- painting

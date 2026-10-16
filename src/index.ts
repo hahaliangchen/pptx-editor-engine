@@ -5,12 +5,20 @@ import {
   PresentationAST,
   Slide,
   SlideElement,
+  TextElement,
   ShapeElement,
   PresentationSize
 } from "./pptx-parser";
 import * as wasm from "../rust-engine/pkg/ppt_engine";
 import { EditorState, SlideEditor } from "./editor/slide-editor";
-import { DirtyShapes, exportEditedPptx, markDirty } from "./pptx-exporter";
+import {
+  DirtyShapes,
+  TextEdits,
+  exportEditedPptx,
+  markDirty,
+  popTextOp,
+  pushTextOp
+} from "./pptx-exporter";
 
 export interface ViewerOptions {
   container: HTMLElement;
@@ -80,6 +88,8 @@ export default class PptViewer {
     offsetY: number;
   } | null = null;
   private dirtyShapes: DirtyShapes = new Map();
+  private textEdits: TextEdits = new Map();
+  private hiddenElements = new Set<SlideElement>();
   private editNotifyTimer = 0;
   private onSlideEdited?: (slideIndex: number, slide: Slide) => void;
 
@@ -127,7 +137,11 @@ export default class PptViewer {
         if (index >= 0) this.currentSlideIndex = index;
       },
       onCommit: slide => this.notifySlideEdited(slide),
-      markDirty: source => markDirty(this.dirtyShapes, source)
+      markDirty: source => markDirty(this.dirtyShapes, source),
+      beginTextEdit: (slide, element) => this.setHiddenElements(slide, [element]),
+      endTextEdit: slide => this.setHiddenElements(slide, []),
+      recordTextOp: (source, op) => pushTextOp(this.textEdits, source, op),
+      discardTextOp: source => popTextOp(this.textEdits, source)
     });
     if (options.onEditStateChange) this.editor.subscribe(options.onEditStateChange);
 
@@ -270,6 +284,16 @@ export default class PptViewer {
       this.registeredFontBytes.push(fontBytes);
       if (this.cacheRenderer) {
         this.cacheRenderer.register_font(fontBytes);
+      }
+      try {
+        // The in-place text editor is DOM based, so it needs the same font.
+        const face = new FontFace(family, fontBytes.slice().buffer, {
+          weight: String(weight),
+          style: italic ? "italic" : "normal"
+        });
+        document.fonts.add(await face.load());
+      } catch (err) {
+        console.warn(`[Font Manager] DOM font registration failed for ${family}`, err);
       }
       this.loadedFontKeys.add(key);
       console.log(`[Font Manager] Registered backend font in Rust: ${family} (${weight}, italic=${italic}).`);
@@ -535,23 +559,31 @@ export default class PptViewer {
   }
 
   public hasUnsavedEdits(): boolean {
-    return this.dirtyShapes.size > 0;
+    return this.dirtyShapes.size > 0 || this.textEdits.size > 0;
   }
 
   /** Build a new .pptx with every edit written back into the original package. */
   public async exportPptx(): Promise<Blob> {
     const zip = this.parser.getZip();
     if (!zip || !this.presentation) throw new Error("请先打开一个 .pptx 文件。");
-    return exportEditedPptx(zip, this.presentation.slides, this.dirtyShapes);
+    return exportEditedPptx(zip, this.presentation.slides, this.dirtyShapes, this.textEdits);
   }
 
   private resetEditing(): void {
     this.dirtyShapes = new Map();
+    this.textEdits = new Map();
+    this.hiddenElements.clear();
     // Fonts differ per document, so the drag renderer is rebuilt on demand.
     this.dragRenderer = null;
     this.dragScratch = null;
     this.dragLayers = null;
     this.editor.reset();
+  }
+
+  /** Elements drawn by the DOM text editor instead of the canvas while editing. */
+  private setHiddenElements(slide: Slide, elements: SlideElement[]): void {
+    this.hiddenElements = new Set(elements);
+    this.invalidateSlide(slide);
   }
 
   private invalidateSlide(slide: Slide): void {
@@ -756,6 +788,12 @@ export default class PptViewer {
   }
 
   private serializeSlideForRenderer(slide: Slide): string {
+    if (this.hiddenElements.size > 0) {
+      return JSON.stringify({
+        id: slide.id,
+        elements: slide.elements.filter(element => !this.hiddenElements.has(element))
+      });
+    }
     const cached = this.slideJsonCache.get(slide.id);
     if (cached) return cached;
 

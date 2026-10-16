@@ -1,6 +1,8 @@
 import JSZip from "jszip";
 import { ElementSource, Rect, Slide } from "./pptx-virtual-dom";
 import { getDirectChild } from "./pptx-xml";
+import { TextOp } from "./editor/text-ops";
+import { writeTextOps } from "./pptx-text-writer";
 
 const A_NS = "http://schemas.openxmlformats.org/drawingml/2006/main";
 const P_NS = "http://schemas.openxmlformats.org/presentationml/2006/main";
@@ -9,6 +11,24 @@ const SHAPE_TAGS = new Set(["sp", "pic", "cxnSp", "grpSp", "graphicFrame"]);
 
 /** Edited shapes, keyed by slide part then by p:cNvPr id. */
 export type DirtyShapes = Map<string, Set<string>>;
+
+/** Text replacements recorded per shape, in the order they were made. */
+export type TextEdits = Map<string, Map<string, TextOp[]>>;
+
+export function pushTextOp(edits: TextEdits, source: ElementSource, op: TextOp): void {
+  let shapes = edits.get(source.part);
+  if (!shapes) edits.set(source.part, shapes = new Map());
+  const ops = shapes.get(source.shapeId) || [];
+  ops.push(op);
+  shapes.set(source.shapeId, ops);
+}
+
+export function popTextOp(edits: TextEdits, source: ElementSource): void {
+  const ops = edits.get(source.part)?.get(source.shapeId);
+  ops?.pop();
+  if (ops && ops.length === 0) edits.get(source.part)!.delete(source.shapeId);
+  if (edits.get(source.part)?.size === 0) edits.delete(source.part);
+}
 
 export function markDirty(dirty: DirtyShapes, source: ElementSource | undefined): void {
   if (!source) return;
@@ -81,43 +101,60 @@ function writeXfrm(doc: Document, shape: Element, emu: ReturnType<typeof toEmu>)
 export async function exportEditedPptx(
   zip: JSZip,
   slides: Slide[],
-  dirty: DirtyShapes
+  dirty: DirtyShapes,
+  textEdits: TextEdits = new Map()
 ): Promise<Blob> {
   const serializer = new XMLSerializer();
+  // Edited parts are put back once the archive is built, so a later export
+  // (after an undo, say) starts again from the original package.
+  const originals = new Map<string, string>();
 
-  for (const [part, shapeIds] of dirty) {
-    const file = zip.file(part);
-    if (!file) continue;
-    const doc = new DOMParser().parseFromString(await file.async("string"), "application/xml");
-    if (doc.getElementsByTagName("parsererror").length > 0) {
-      throw new Error(`无法解析 ${part}，已取消导出。`);
-    }
-
-    for (const shapeId of shapeIds) {
-      const shape = findShapeNode(doc, shapeId);
-      if (!shape) continue;
-
-      // A shape is represented by 1-2 elements (fill + text); either carries the same box.
-      const element = slides
-        .flatMap(slide => slide.elements)
-        .find(candidate => candidate.source?.part === part && candidate.source.shapeId === shapeId);
-      if (!element || !element.source) {
-        shape.parentNode?.removeChild(shape);
-      } else {
-        writeXfrm(doc, shape, toEmu(element.rect, element.source));
+  try {
+    const parts = new Set([...dirty.keys(), ...textEdits.keys()]);
+    for (const part of parts) {
+      const shapeIds = dirty.get(part) || new Set<string>();
+      const file = zip.file(part);
+      if (!file) continue;
+      const originalXml = await file.async("string");
+      originals.set(part, originalXml);
+      const doc = new DOMParser().parseFromString(originalXml, "application/xml");
+      if (doc.getElementsByTagName("parsererror").length > 0) {
+        throw new Error(`无法解析 ${part}，已取消导出。`);
       }
+
+      for (const shapeId of shapeIds) {
+        const shape = findShapeNode(doc, shapeId);
+        if (!shape) continue;
+
+        // A shape is represented by 1-2 elements (fill + text); either carries the same box.
+        const element = slides
+          .flatMap(slide => slide.elements)
+          .find(candidate => candidate.source?.part === part && candidate.source.shapeId === shapeId);
+        if (!element || !element.source) {
+          shape.parentNode?.removeChild(shape);
+        } else {
+          writeXfrm(doc, shape, toEmu(element.rect, element.source));
+        }
+      }
+
+      for (const [shapeId, ops] of textEdits.get(part) || []) {
+        const shape = findShapeNode(doc, shapeId);
+        if (shape && ops.length > 0) writeTextOps(shape, ops);
+      }
+
+      let xml = serializer.serializeToString(doc);
+      if (!xml.startsWith("<?xml")) {
+        xml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n${xml}`;
+      }
+      zip.file(part, xml);
     }
 
-    let xml = serializer.serializeToString(doc);
-    if (!xml.startsWith("<?xml")) {
-      xml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n${xml}`;
-    }
-    zip.file(part, xml);
+    return await zip.generateAsync({
+      type: "blob",
+      mimeType: PPTX_MIME,
+      compression: "DEFLATE"
+    });
+  } finally {
+    for (const [part, xml] of originals) zip.file(part, xml);
   }
-
-  return zip.generateAsync({
-    type: "blob",
-    mimeType: PPTX_MIME,
-    compression: "DEFLATE"
-  });
 }
