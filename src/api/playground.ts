@@ -31,6 +31,32 @@ const EXAMPLES: Example[] = [
     }]
   },
   {
+    title: "加图表（柱形 + 饼图）",
+    commands: {
+      label: "加图表",
+      commands: [
+        {
+          op: "addChart", slide: 1, type: "column", title: "季度营收（万元）", dataLabels: true,
+          categories: ["一季度", "二季度", "三季度", "四季度"],
+          series: [{ name: "华东", values: [120, 150, 90, 180] }, { name: "华北", values: [80, 110, 130, 95] }],
+          rect: { x: 1, y: 8, w: 15, h: 9 }, name: "营收图"
+        },
+        {
+          op: "addChart", slide: 1, type: "pie", title: "市场份额",
+          categories: ["自营", "渠道", "线上", "其他"], series: [{ name: "份额", values: [45, 25, 20, 10] }],
+          rect: { x: 17.5, y: 8, w: 15, h: 9 }
+        }
+      ]
+    }
+  },
+  {
+    title: "改图表数据",
+    commands: [{
+      op: "setChart", target: { slide: 1, name: "营收图" }, title: "更新后的营收",
+      categories: ["Q1", "Q2", "Q3"], series: [{ name: "线上", values: [10, 30, 60] }, { name: "线下", values: [40, 35, 30] }]
+    }]
+  },
+  {
     title: "复制本页并在新页改字",
     commands: [{ op: "duplicateSlide", slide: 1 }, { op: "setText", target: { slide: 2, placeholder: "title" }, text: "第二页标题" }]
   },

@@ -1,3 +1,5 @@
+import { ChartAdd, ChartElement, ChartModel, cloneChart } from "../charts/model";
+import { CHART_REL_TYPE, graphicFrameXml } from "../charts/write";
 import { ElementSource, GroupRef, Rect, ShapeElement, Slide, SlideElement, TextElement, TextParagraph } from "../pptx-virtual-dom";
 import { Command, History, HistoryEntry } from "./history";
 import { LINE_BREAK, TextFormat, TextOp, applyTextOp, diffText } from "./text-ops";
@@ -56,6 +58,12 @@ export interface EditorHost {
   deckFont(): { fontFamily?: string; eastAsianFontFamily?: string };
   allocateRelationshipId(part: string): Promise<string>;
   allocateMediaPath(extension: string): string;
+  /** Free part paths for a new chart and its embedded workbook. */
+  allocateChartParts(): { part: string; workbook: string };
+  /** The deck's six accent colours, for charts that name no colours. */
+  themePalette(): string[];
+  /** Give a copy of a chart element's model a chart part of its own (see `cloneChartParts`). */
+  cloneChart(model: ChartModel): Promise<{ part: string; add?: ChartAdd }>;
   /** Relationship ids to use in `targetPart` for relationships that belong to `sourcePart`. */
   resolveRelationships(
     targetPart: string,
@@ -318,6 +326,7 @@ interface PastedObject {
   adds: RelAdd[];
   owner: ElementSource;
   media?: MediaAdd;
+  chart?: ChartAdd;
 }
 
 class PasteCommand implements Command {
@@ -336,6 +345,7 @@ class PasteCommand implements Command {
       this.slide.elements.push(...item.elements);
       for (const add of item.adds) pushItem(structure.relAdds, this.part, add);
       if (item.media) structure.media.push(item.media);
+      if (item.chart) structure.charts.push(item.chart);
       pushItem(structure.inserts, this.part, item.inserted);
     }
     this.editor.afterCommand(this.slide, this.pasted.map(item => item.owner));
@@ -348,6 +358,7 @@ class PasteCommand implements Command {
     for (const item of [...this.pasted].reverse()) {
       popItem(structure.inserts, this.part);
       if (item.media) structure.media.pop();
+      if (item.chart) structure.charts.pop();
       for (const _ of item.adds) popItem(structure.relAdds, this.part);
     }
     this.editor.afterCommand(this.slide, [], false);
@@ -359,6 +370,30 @@ interface ClipboardEntry {
   xml: string;
   relationships: RelAdd[];
   elements: SlideElement[];
+}
+
+class ChartCommand implements Command {
+  constructor(
+    private slide: Slide,
+    private element: ChartElement,
+    private before: ChartModel,
+    private after: ChartModel,
+    private editor: SlideEditor,
+    private host: EditorHost,
+    public readonly label: string
+  ) {}
+
+  private write(model: ChartModel): void {
+    // The model object is shared with the export's chart list, so it is changed in place.
+    const target = this.element.chart;
+    for (const key of Object.keys(target)) delete (target as unknown as Record<string, unknown>)[key];
+    Object.assign(target, cloneChart(model));
+    if (target.part) this.host.structure().chartEdits.set(target.part, target);
+    this.editor.afterCommand(this.slide, this.element.source ? [this.element.source] : [], false);
+  }
+
+  apply(): void { this.write(this.after); }
+  revert(): void { this.write(this.before); }
 }
 
 class CompositeCommand implements Command {
@@ -862,7 +897,24 @@ export class SlideEditor {
     const pasted: PastedObject[] = [];
 
     for (const entry of entries) {
-      const { ids, adds } = await this.host.resolveRelationships(part, entry.object.source.part, entry.relationships);
+      const isChart = (rel: RelAdd) => rel.type.endsWith("/chart");
+      const { ids, adds } = await this.host.resolveRelationships(
+        part, entry.object.source.part, entry.relationships.filter(rel => !isChart(rel)));
+      // A chart is never shared between two frames: the copy gets a chart part of its own.
+      let chart: ChartAdd | undefined;
+      let chartCopy: ChartModel | undefined;
+      const chartOriginal = entry.elements.find((element): element is ChartElement => element.type === "chart");
+      const chartRel = entry.relationships.find(isChart);
+      if (chartOriginal && chartRel) {
+        chartCopy = cloneChart(chartOriginal.chart);
+        const cloned = await this.host.cloneChart(chartCopy);
+        chart = cloned.add;
+        const pending = [...pasted.flatMap(item => item.adds), ...adds].length;
+        const base = parseInt((await this.host.allocateRelationshipId(part)).replace(/\D/g, ""), 10) || 1;
+        const relId = `rId${base + pending}`;
+        adds.push({ ...chartRel, id: relId, target: `../charts/${cloned.part.split("/").pop()}` });
+        ids.set(chartRel.id, relId);
+      }
       const remapped = remapShapeXml(entry.xml, () => this.host.allocateShapeId(part), ids);
       const topId = remapped.idMap.get(entry.object.source.shapeId);
       if (!topId) continue;
@@ -895,6 +947,7 @@ export class SlideEditor {
           ...(newGroups.length ? { groups: newGroups } : {})
         };
         element.id = `${element.id}_c${stamp}${index}`;
+        if (element.type === "chart" && chartCopy) element.chart = chartCopy;
         return element;
       });
 
@@ -918,7 +971,7 @@ export class SlideEditor {
       const top = entry.object.isGroup
         ? { part, shapeId: topId, xform: elements[0].source!.groups![0].xform }
         : elements[0].source!;
-      pasted.push({ elements, inserted: { id: topId, xml: remapped.xml }, adds, owner: top });
+      pasted.push({ elements, inserted: { id: topId, xml: remapped.xml }, adds, owner: top, ...(chart ? { chart } : {}) });
     }
     if (pasted.length === 0) return;
 
@@ -1157,6 +1210,58 @@ export class SlideEditor {
       media: { path, bytes: image.bytes, extension: image.extension, contentType: image.contentType }
     }], "插入图片");
     return { id, name: image.name, part };
+  }
+
+  /** Add a chart to the current slide; `rect` is in slide pixels, centred and sized to the slide when absent. */
+  public async createChart(spec: { chart: ChartModel; rect?: Rect; name?: string }): Promise<CreatedShape | null> {
+    const slide = this.host.getSlide();
+    const size = this.host.getSlideSize();
+    const part = slide?.part;
+    if (!slide || !size || !part) return null;
+    if (this.textSession) this.endTextEdit();
+    this.setTool(null);
+
+    const id = this.host.allocateShapeId(part);
+    const relId = await this.host.allocateRelationshipId(part);
+    const parts = this.host.allocateChartParts();
+    const base = this.slideTransform(slide);
+    const rect = spec.rect ?? {
+      x: size.width * 0.15, y: size.height * 0.18, w: size.width * 0.7, h: size.height * 0.64
+    };
+    const name = spec.name || `图表 ${id}`;
+
+    const chart = cloneChart(spec.chart);
+    chart.palette = this.host.themePalette();
+    const font = this.host.deckFont();
+    chart.font = { ...chart.font, family: chart.font.family ?? font.fontFamily, eastAsianFamily: chart.font.eastAsianFamily ?? font.eastAsianFontFamily };
+
+    const source: ElementSource = { part, shapeId: id, name, xform: base };
+    const element: ChartElement = {
+      type: "chart", id: `chart_${id}`, source, rect: { ...rect }, chart, pxPerPt: 12700 * base.scaleX
+    };
+    const xml = graphicFrameXml(id, name, relId, {
+      x: Math.round(rect.x / base.scaleX),
+      y: Math.round(rect.y / base.scaleY),
+      cx: Math.round(rect.w / base.scaleX),
+      cy: Math.round(rect.h / base.scaleY)
+    });
+    this.commitInserted(slide, part, [{
+      elements: [element],
+      inserted: { id, xml },
+      adds: [{ id: relId, type: CHART_REL_TYPE, target: `../charts/${parts.part.split("/").pop()}` }],
+      owner: source,
+      chart: { part: parts.part, workbook: parts.workbook, model: chart }
+    }], "插入图表");
+    return { id, name, part };
+  }
+
+  /** Replace a chart's data or settings in one undoable step. */
+  public updateChart(element: ChartElement, next: ChartModel, label = "修改图表"): void {
+    const slide = this.host.getSlide();
+    if (!slide || !slide.elements.includes(element)) return;
+    const command = new ChartCommand(slide, element, cloneChart(element.chart), cloneChart(next), this, this.host, label);
+    command.apply();
+    this.history.record(command);
   }
 
   private slideTransform(slide: Slide): ElementSource["xform"] {

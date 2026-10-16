@@ -1,4 +1,6 @@
 import { PptVirtualDocument, PptxParser, Slide, SlideElement } from "./pptx-parser";
+import { ChartAdd, ChartModel } from "./charts/model";
+import { cloneChartParts } from "./charts/clone";
 import { SlideEditor } from "./editor/slide-editor";
 import { Command } from "./editor/history";
 import { DeckPort, DecodedImage, EditApi } from "./api/engine";
@@ -111,6 +113,9 @@ export class DocumentSession {
       deckFont: () => this.deckFont(),
       allocateRelationshipId: part => this.allocateRelationshipId(part),
       allocateMediaPath: extension => this.allocateMediaPath(extension),
+      allocateChartParts: () => this.allocateChartParts(),
+      cloneChart: model => this.cloneChart(model),
+      themePalette: () => this.parser.themeAccents(),
       resolveRelationships: (target, source, relationships) => this.resolveRelationships(target, source, relationships),
       recordStyleOp: (source, op) => pushOp(this.styleEdits, source, op),
       discardStyleOp: source => popOp(this.styleEdits, source)
@@ -277,6 +282,8 @@ export class DocumentSession {
     if (!snapshot) return;
     const copy = prepareSlideCopy(snapshot);
     const part = this.allocateSlidePart();
+    const elements = this.cloneElements(source.elements, part);
+    await this.cloneCharts(copy, elements);
     this.structureEdits.virtual.set(part, copy.xml);
     this.structureEdits.virtual.set(
       `${part.slice(0, part.lastIndexOf("/"))}/_rels/${part.slice(part.lastIndexOf("/") + 1)}.rels`,
@@ -284,7 +291,7 @@ export class DocumentSession {
     );
     const slide: Slide = {
       id: `slide_${++this.slideSerial}`,
-      elements: this.cloneElements(source.elements, part),
+      elements,
       rawXml: copy.xml,
       emuPerPx: source.emuPerPx,
       part,
@@ -448,6 +455,50 @@ export class DocumentSession {
       if (match) highest = Math.max(highest, parseInt(match[1], 10));
     }
     return `ppt/media/image${highest + 1}.${extension}`;
+  }
+
+  private allocateChartParts(): { part: string; workbook: string } {
+    const taken = [
+      ...Object.keys(this.parser.getZip()?.files || {}),
+      ...this.structureEdits.charts.flatMap(add => [add.part, add.workbook]),
+      ...this.structureEdits.media.map(item => item.path)
+    ];
+    const highest = (pattern: RegExp) => taken.reduce((max, path) => {
+      const match = path.match(pattern);
+      return match ? Math.max(max, parseInt(match[1], 10)) : max;
+    }, 0);
+    return {
+      part: `ppt/charts/chart${highest(/^ppt\/charts\/chart(\d+)\.xml$/) + 1}.xml`,
+      workbook: `ppt/embeddings/Microsoft_Excel_Sheet${highest(/^ppt\/embeddings\/Microsoft_Excel_Sheet(\d+)\.xlsx$/) + 1}.xlsx`
+    };
+  }
+
+  /** A chart of its own for a copy of a chart element: its parts, or a new `ChartAdd`. */
+  private cloneChart(model: ChartModel): Promise<{ part: string; add?: ChartAdd }> {
+    return cloneChartParts({
+      zip: this.parser.getZip(),
+      structure: this.structureEdits,
+      allocateChartParts: () => this.allocateChartParts()
+    }, model);
+  }
+
+  /** Point each chart of a copied slide at a chart part of its own. */
+  private async cloneCharts(copy: { xml: string; relationships: RelAdd[] }, elements: SlideElement[]): Promise<void> {
+    const doc = new DOMParser().parseFromString(copy.xml, "application/xml");
+    for (const element of elements) {
+      if (element.type !== "chart" || !element.source) continue;
+      const frame = (Array.from(doc.getElementsByTagName("*")).find(node =>
+        node.localName === "cNvPr" && node.getAttribute("id") === element.source!.shapeId
+        && (node.parentNode as Element | null)?.localName === "nvGraphicFramePr")?.parentNode?.parentNode ?? undefined) as Element | undefined;
+      const reference = frame && Array.from(frame.getElementsByTagName("*")).find(node => node.localName === "chart");
+      const relId = reference?.getAttributeNS("http://schemas.openxmlformats.org/officeDocument/2006/relationships", "id")
+        || reference?.getAttribute("r:id");
+      const rel = copy.relationships.find(candidate => candidate.id === relId && candidate.type.endsWith("/chart"));
+      if (!rel) continue;
+      const cloned = await this.cloneChart(element.chart);
+      if (cloned.add) this.structureEdits.charts.push(cloned.add);
+      rel.target = `../charts/${cloned.part.split("/").pop()}`;
+    }
   }
 
   /** Relationship ids for pasted shapes: reuse what the target slide has, add what it lacks. */

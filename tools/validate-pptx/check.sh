@@ -19,8 +19,9 @@ fi
 dll="$here/bin/Release/net8.0/validate-pptx.dll"
 [ -f "$dll" ] || dotnet build -c Release "$here" >/dev/null
 
-# Compare problems by what they are, not where in the tree they sit.
-normalise() { cut -f1,2,4,5 | sort -u; }
+# Compare problems by what they are, not where in the tree they sit. A chart
+# copied from another keeps the other's problems, so chart numbers are ignored.
+normalise() { cut -f1,2,4,5 | sed -E 's#/ppt/charts/chart[0-9]+\.xml#/ppt/charts/chartN.xml#' | sort -u; }
 
 edited="$(dotnet "$dll" "$1" 2>/dev/null | normalise || true)"
 if [ -n "${2:-}" ]; then

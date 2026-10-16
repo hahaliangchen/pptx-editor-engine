@@ -27,8 +27,15 @@ describe("slide helpers", () => {
     expect(copy.xml).not.toContain("custDataLst");
   });
 
-  it("refuses slides that own charts or other parts", () => {
-    expect(() => prepareSlideCopy({ xml: "<p:sld xmlns:p='x'/>", relationships: [rel("rId1", "chart")] })).toThrow(/暂不支持/);
+  it("refuses slides that own diagrams or embedded objects", () => {
+    for (const kind of ["diagramData", "oleObject"]) {
+      expect(() => prepareSlideCopy({ xml: "<p:sld xmlns:p='x'/>", relationships: [rel("rId1", kind)] })).toThrow(/暂不支持/);
+    }
+  });
+
+  it("keeps a chart's relationship, for the caller to give the copy a chart of its own", () => {
+    const copy = prepareSlideCopy({ xml: "<p:sld xmlns:p='x'/>", relationships: [rel("rId1", "chart")] });
+    expect(copy.relationships.map(entry => entry.id)).toEqual(["rId1"]);
   });
 });
 

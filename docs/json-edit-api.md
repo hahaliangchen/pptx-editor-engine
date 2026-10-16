@@ -59,6 +59,26 @@
 
 `rect` 为 `{ "x": 3, "y": 2, "w": 10, "h": 4 }`（厘米）。`as` 给新对象起别名，后面的指令用 `"$别名"` 引用。
 
+### 图表
+
+| op | 参数 | 说明 |
+|---|---|---|
+| `addChart` | `slide*`、`type*`、`categories*`、`series*`、`title?`、`legend?`、`dataLabels?`、`stacked?`、`rect?`、`name?`、`as?` | 新建图表 |
+| `setChart` | `target*`，以及上面任意字段（至少一个）；`title: null` 删除标题 | 改图表的数据或设置；`categories` / `series` 整体替换 |
+
+- `type`：`column`（竖柱）、`bar`（横条）、`line`（折线）、`pie`（饼图）。
+- `categories`：坐标轴上每组的标签（饼图是每块的名称）；`series`：`[{ "name", "values", "color?" }]`，
+  `values` 的个数必须等于 `categories` 的个数，缺的数据写 `null`（折线断开、柱子留空）。饼图只能有一个系列，且不能为负。
+- `legend`：`top` `bottom` `left` `right` `none`，缺省为饼图 `right`、其余 `bottom`；`dataLabels` 缺省为饼图 `true`、其余 `false`。
+- 没写 `color` 的系列用文稿主题的强调色（accent1…accent6）依次取色；颜色不够时在同一色上变深或变浅。
+- 新建的图表带一个内嵌的 Excel 工作簿，在 PowerPoint 里"编辑数据"可以直接打开。
+- 文稿里**已有**的图表同样可以用 `setChart` 改数据：只改数据、标题、图例、数据标签，原有的样式、字体、坐标轴格式保持不变；
+  改 `type` 或 `stacked` 时整张图重新生成，自定义样式会丢失。
+- 图表可以移动、缩放（`setBounds`）、调层级、删除、复制（`duplicate`、`copyTo`、`duplicateSlide`，复制出的图表有自己独立的数据）；
+  不能旋转，也没有填充和边框可设（`setFill`、`setLine`、`setRotation` 返回 `NOT_APPLICABLE`）。
+- 暂不支持的图表（组合图、面积图、散点图、雷达图、圆环图、百分比堆积等）读出来是 `chart.unsupported`，画面上显示占位框，
+  位置和大小仍可编辑，数据不能改。
+
 ### 修改文字
 
 | op | 参数 | 说明 |
@@ -164,6 +184,10 @@
           "fill": "#4472C4", "line": { "color": "#2F528F", "widthPt": 1, "dash": "solid" },
           "text": "增长 30%" },
         { "id": "7", "name": "图片 6", "type": "image", "rect": { "x": 18, "y": 6, "w": 12, "h": 7 } },
+        { "id": "8", "name": "图表 7", "type": "chart", "rect": { "x": 1, "y": 8, "w": 15, "h": 9 },
+          "chart": { "type": "column", "title": "季度营收", "categories": ["一季度", "二季度"],
+                     "series": [{ "name": "华东", "values": [120, 150] }], "legend": "bottom",
+                     "dataLabels": false, "stacked": false } },
         { "id": "9", "name": "组合 8", "type": "group", "rect": { "x": 1, "y": 14, "w": 30, "h": 4 },
           "children": [ ... ] }
       ]
@@ -192,7 +216,8 @@
 | 能做（引擎已具备） | 暂时做不了 |
 |---|---|
 | 页面增删复制移动、新建带占位符 | 组合 / 取消组合 |
-| 文本框、基本形状、直线箭头、图片 | 图表（解析与渲染都还没有） |
+| 文本框、基本形状、直线箭头、图片 | 组合图、面积图、散点图等其他图表类型 |
+| 柱形图、条形图、折线图、饼图：读取、渲染、新建、改数据、导出 | 图表的自定义样式编辑、坐标轴设置 |
 | 改文字（保留格式）、局部格式、段落对齐 | 表格单元格文字与行列 |
 | 位置、大小、旋转、填充、边框、垂直对齐 | 渐变填充、阴影、透明度 |
 | 对齐到页面、层级、副本、跨页复制 | 动画、切换效果、备注页 |

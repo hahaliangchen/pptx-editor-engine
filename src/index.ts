@@ -12,6 +12,7 @@ import * as wasm from "../rust-engine/pkg/ppt_engine";
 import { EditorState, SlideEditor } from "./editor/slide-editor";
 import { EditApi } from "./api/engine";
 import { DocumentSession } from "./document-session";
+import { expandForRender } from "./charts/layout";
 
 export interface ViewerOptions {
   container: HTMLElement;
@@ -266,7 +267,7 @@ export default class PptViewer {
     };
 
     for (const slide of document.slides) {
-      for (const element of slide.elements) {
+      for (const element of expandForRender(slide.elements)) {
         if (element.type !== "text") continue;
         addStyle(element.style);
         for (const paragraph of element.paragraphs || []) {
@@ -359,6 +360,14 @@ export default class PptViewer {
     };
     for (const slide of document.slides) {
       for (const element of slide.elements) {
+        if (element.type === "chart") {
+          const font = element.chart.font;
+          if (font.family) font.family = latinFallbacks.get(font.family.toLowerCase()) || font.family;
+          if (font.eastAsianFamily) {
+            font.eastAsianFamily = eastAsianFallbacks.get(font.eastAsianFamily.toLowerCase()) || font.eastAsianFamily;
+          }
+          continue;
+        }
         if (element.type !== "text") continue;
         applyBackendFamily(element.style);
         for (const paragraph of element.paragraphs || []) {
@@ -778,7 +787,7 @@ export default class PptViewer {
       scratchContext.setTransform(1, 0, 0, 1, 0, 0);
       scratchContext.clearRect(0, 0, width, height);
       scratchContext.setTransform(scale, 0, 0, scale, offsetX, offsetY);
-      const json = JSON.stringify({ id: slide.id, elements });
+      const json = JSON.stringify({ id: slide.id, elements: expandForRender(elements) });
       if (withBackground) this.dragRenderer!.render_slide(json, this.imageCache);
       else if (elements.length > 0) this.dragRenderer!.render_slide_overlay(json, this.imageCache);
       layer.getContext("2d")!.drawImage(scratch, 0, 0);
@@ -819,7 +828,7 @@ export default class PptViewer {
     scratchContext.clearRect(0, 0, scratch.width, scratch.height);
     scratchContext.setTransform(layers.scale, 0, 0, layers.scale, layers.offsetX, layers.offsetY);
     this.dragRenderer!.render_slide_overlay(
-      JSON.stringify({ id: layers.slide.id, elements: layers.moving }),
+      JSON.stringify({ id: layers.slide.id, elements: expandForRender(layers.moving) }),
       this.imageCache
     );
 
@@ -943,7 +952,7 @@ export default class PptViewer {
     if (this.hiddenElements.size > 0) {
       return JSON.stringify({
         id: slide.id,
-        elements: slide.elements.filter(element => !this.hiddenElements.has(element))
+        elements: expandForRender(slide.elements.filter(element => !this.hiddenElements.has(element)))
       });
     }
     const cached = this.slideJsonCache.get(slide.id);
@@ -951,7 +960,7 @@ export default class PptViewer {
 
     // rawXml is only for the inspector. Rust deserializes id/elements and
     // should not receive the complete source XML on every page switch.
-    const json = JSON.stringify({ id: slide.id, elements: slide.elements });
+    const json = JSON.stringify({ id: slide.id, elements: expandForRender(slide.elements) });
     this.slideJsonCache.set(slide.id, json);
     return json;
   }

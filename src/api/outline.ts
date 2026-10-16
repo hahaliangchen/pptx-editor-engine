@@ -1,4 +1,5 @@
 import { LineStyle, PptVirtualDocument, ShapeElement, Slide, TextElement } from "../pptx-virtual-dom";
+import { ChartElement, ChartKind, LegendPosition } from "../charts/model";
 import { SceneNode, SlideScene, buildScene, textOf } from "./scene";
 
 export interface CmRect {
@@ -23,6 +24,17 @@ export interface OutlineShape {
   fill?: string | null;
   line?: { color: string; widthPt: number; dash: string } | null;
   children?: OutlineShape[];
+  /** The data and settings of a chart; `unsupported` names kinds that are only drawn as a placeholder. */
+  chart?: {
+    type: ChartKind;
+    title?: string;
+    categories: string[];
+    series: Array<{ name: string; values: Array<number | null>; color?: string }>;
+    legend: LegendPosition;
+    dataLabels: boolean;
+    stacked: boolean;
+    unsupported?: string;
+  };
 }
 
 export interface OutlineSlide {
@@ -69,6 +81,26 @@ function describeNode(node: SceneNode, emuPerPx: number, maxText: number): Outli
 
   if (node.kind === "group") {
     out.children = node.children.map(child => describeNode(child, emuPerPx, maxText));
+    return out;
+  }
+
+  if (node.kind === "chart") {
+    const chart = node.elements.find((element): element is ChartElement => element.type === "chart")!.chart;
+    out.chart = chart.unsupported
+      ? { type: chart.kind, categories: [], series: [], legend: chart.legend, dataLabels: false, stacked: false, unsupported: chart.unsupported }
+      : {
+        type: chart.kind,
+        ...(chart.title ? { title: chart.title } : {}),
+        categories: chart.categories,
+        series: chart.series.map(series => ({
+          name: series.name,
+          values: series.values,
+          ...(series.color ? { color: lower(series.color) } : {})
+        })),
+        legend: chart.legend,
+        dataLabels: chart.dataLabels,
+        stacked: chart.stacked
+      };
     return out;
   }
 

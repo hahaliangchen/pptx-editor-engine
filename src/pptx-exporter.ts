@@ -1,5 +1,15 @@
 import JSZip from "jszip";
 import { ElementSource, GroupRef, Rect, Slide } from "./pptx-virtual-dom";
+import { ChartAdd, ChartModel } from "./charts/model";
+import { chartShapeOf, patchChartXml } from "./charts/patch";
+import {
+  CHART_CONTENT_TYPE,
+  PACKAGE_REL_TYPE,
+  XLSX_CONTENT_TYPE,
+  chartRelsXml,
+  chartXml,
+  workbookBytes
+} from "./charts/write";
 import { getDirectChild } from "./pptx-xml";
 import { TextOp } from "./editor/text-ops";
 import { writeTextOps } from "./pptx-text-writer";
@@ -180,6 +190,8 @@ export interface MediaAdd {
   bytes: Uint8Array;
   extension: string;
   contentType: string;
+  /** Set for parts that need their own type declaration (charts); otherwise the extension's default applies. */
+  partType?: string;
 }
 
 /** Changes to the shape tree itself, kept as per-slide lists in the order they happened. */
@@ -190,6 +202,10 @@ export interface StructureEdits {
   media: MediaAdd[];
   /** Files that exist only in the edit session (slides made by "new" or "duplicate", and their relationships). */
   virtual: Map<string, string>;
+  /** Charts made in this session; their parts are written from the live models on export. */
+  charts: ChartAdd[];
+  /** Charts of the opened deck whose data or settings changed, by chart part. */
+  chartEdits: Map<string, ChartModel>;
 }
 
 export const emptyStructure = (): StructureEdits => ({
@@ -197,7 +213,9 @@ export const emptyStructure = (): StructureEdits => ({
   inserts: new Map(),
   relAdds: new Map(),
   media: [],
-  virtual: new Map()
+  virtual: new Map(),
+  charts: [],
+  chartEdits: new Map()
 });
 
 export function pushItem<T>(log: Map<string, T[]>, part: string, item: T): void {
@@ -429,25 +447,125 @@ async function writeMedia(
     zip.file(item.path, item.bytes);
     addedFiles.push(item.path);
   }
+  await declareContentTypes(
+    zip,
+    originals,
+    media.filter(item => !item.partType).map(item => [item.extension, item.contentType] as [string, string]),
+    media.filter(item => item.partType).map(item => [`/${item.path}`, item.partType!] as [string, string])
+  );
+}
+
+/** Declare file types the package does not know yet: by extension (Default) or by part (Override). */
+async function declareContentTypes(
+  zip: JSZip,
+  originals: Map<string, string>,
+  defaults: Array<[string, string]>,
+  overrides: Array<[string, string]>
+): Promise<void> {
   const loaded = await readDocument(zip, CONTENT_TYPES);
   if (!loaded) return;
   const root = loaded.doc.documentElement;
-  const declared = new Set(
+  const declaredDefaults = new Set(
     Array.from(root.getElementsByTagNameNS(CT_NS, "Default")).map(node => (node.getAttribute("Extension") || "").toLowerCase())
   );
+  const declaredOverrides = new Set(
+    Array.from(root.getElementsByTagNameNS(CT_NS, "Override")).map(node => node.getAttribute("PartName") || "")
+  );
   let changed = false;
-  for (const item of media) {
-    if (declared.has(item.extension.toLowerCase())) continue;
+  for (const [extension, type] of defaults) {
+    if (declaredDefaults.has(extension.toLowerCase())) continue;
     const node = loaded.doc.createElementNS(CT_NS, "Default");
-    node.setAttribute("Extension", item.extension);
-    node.setAttribute("ContentType", item.contentType);
+    node.setAttribute("Extension", extension);
+    node.setAttribute("ContentType", type);
     root.insertBefore(node, root.firstChild);
-    declared.add(item.extension.toLowerCase());
+    declaredDefaults.add(extension.toLowerCase());
+    changed = true;
+  }
+  for (const [partName, type] of overrides) {
+    if (declaredOverrides.has(partName)) continue;
+    const node = loaded.doc.createElementNS(CT_NS, "Override");
+    node.setAttribute("PartName", partName);
+    node.setAttribute("ContentType", type);
+    root.appendChild(node);
+    declaredOverrides.add(partName);
     changed = true;
   }
   if (changed) {
-    originals.set(CONTENT_TYPES, loaded.xml);
+    if (!originals.has(CONTENT_TYPES)) originals.set(CONTENT_TYPES, loaded.xml);
     zip.file(CONTENT_TYPES, new XMLSerializer().serializeToString(loaded.doc));
+  }
+}
+
+const baseName = (path: string) => path.slice(path.lastIndexOf("/") + 1);
+const dirName = (path: string) => path.slice(0, path.lastIndexOf("/"));
+
+/** Write the chart parts a session added, and bring edited charts of the opened deck up to date. */
+async function writeCharts(
+  zip: JSZip,
+  structure: StructureEdits,
+  originals: Map<string, string>,
+  addedFiles: string[],
+  replacedBinary: Map<string, Uint8Array>
+): Promise<void> {
+  const overrides: Array<[string, string]> = [];
+  let needsWorkbookType = false;
+
+  for (const add of structure.charts) {
+    zip.file(add.part, chartXml(add.model));
+    addedFiles.push(add.part);
+    const rels = `${dirName(add.part)}/_rels/${baseName(add.part)}.rels`;
+    zip.file(rels, chartRelsXml(`../embeddings/${baseName(add.workbook)}`));
+    addedFiles.push(rels);
+    zip.file(add.workbook, await workbookBytes(add.model));
+    addedFiles.push(add.workbook);
+    overrides.push([`/${add.part}`, CHART_CONTENT_TYPE]);
+    needsWorkbookType = true;
+  }
+
+  for (const [part, model] of structure.chartEdits) {
+    const file = zip.file(part);
+    if (!file) continue;
+    const xml = await file.async("string");
+    originals.set(part, xml);
+
+    const known = await readRelationships(zip, part);
+    const workbookRel = [...known.values()].find(rel => rel.type === PACKAGE_REL_TYPE && rel.targetMode !== "External");
+    const workbookPath = workbookRel ? resolveTarget(dirName(part), workbookRel.target) : null;
+
+    const shape = chartShapeOf(xml);
+    const regenerate = shape.kind !== model.kind || shape.stacked !== model.stacked;
+    let next = regenerate ? chartXml(model) : patchChartXml(xml, model);
+    let targetWorkbook = workbookPath && zip.file(workbookPath) ? workbookPath : null;
+
+    if (regenerate && !targetWorkbook) {
+      // The old chart had no workbook of its own; give the new one an embedded one.
+      let serial = 1;
+      while (zip.file(`ppt/embeddings/Microsoft_Excel_Sheet${serial}.xlsx`) || addedFiles.includes(`ppt/embeddings/Microsoft_Excel_Sheet${serial}.xlsx`)) serial++;
+      targetWorkbook = `ppt/embeddings/Microsoft_Excel_Sheet${serial}.xlsx`;
+      const relsPath = `${dirName(part)}/_rels/${baseName(part)}.rels`;
+      const oldRels = zip.file(relsPath);
+      if (oldRels) {
+        originals.set(relsPath, await oldRels.async("string"));
+      } else {
+        addedFiles.push(relsPath);
+      }
+      zip.file(relsPath, chartRelsXml(`../embeddings/${baseName(targetWorkbook)}`));
+      addedFiles.push(targetWorkbook);
+    } else if (regenerate && workbookRel && workbookRel.id !== "rId1") {
+      next = next.replace('r:id="rId1"', `r:id="${workbookRel.id}"`);
+    }
+    zip.file(part, next);
+
+    if (targetWorkbook) {
+      const existing = zip.file(targetWorkbook);
+      if (existing) replacedBinary.set(targetWorkbook, await existing.async("uint8array"));
+      zip.file(targetWorkbook, await workbookBytes(model));
+      needsWorkbookType = true;
+    }
+  }
+
+  if (overrides.length > 0 || needsWorkbookType) {
+    await declareContentTypes(zip, originals, needsWorkbookType ? [["xlsx", XLSX_CONTENT_TYPE]] : [], overrides);
   }
 }
 
@@ -736,6 +854,9 @@ export async function exportEditedPptx(
     }
 
     if (structure.media.length > 0) await writeMedia(zip, structure.media, originals, addedFiles);
+    if (structure.charts.length > 0 || structure.chartEdits.size > 0) {
+      await writeCharts(zip, structure, originals, addedFiles, removedFiles);
+    }
     if (listed) await syncSlideList(zip, slides, originals, addedFiles, removedFiles);
 
     return await zip.generateAsync({

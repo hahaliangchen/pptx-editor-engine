@@ -5,7 +5,9 @@ import { TextOp } from "../editor/text-ops";
 import { paragraphsText } from "../editor/text-model-vdom";
 import { OrderOp } from "../pptx-exporter";
 import { PptVirtualDocument, Rect, TextElement } from "../pptx-virtual-dom";
+import { ChartElement, ChartKind, ChartModel } from "../charts/model";
 import { ApiError } from "./errors";
+import { ChartFields, applyChartFields, newChart } from "./charts";
 import { Outline, OutlineOptions, buildOutline, emuPerPxOf } from "./outline";
 import { ResolveContext, Target, resolveNode, resolveSlide } from "./resolve";
 import { SceneNode, SlideScene, buildScene } from "./scene";
@@ -29,6 +31,8 @@ export interface EditorPort {
   deleteSelection(): void;
   createShape(kind: NewShapeKind, rect: Rect, flip?: { flipH: boolean; flipV: boolean }): CreatedShape | null;
   insertImage(image: DecodedImage & { name: string }): Promise<CreatedShape | null>;
+  createChart(spec: { chart: ChartModel; rect?: Rect; name?: string }): Promise<CreatedShape | null>;
+  updateChart(element: ChartElement, next: ChartModel, label?: string): void;
 }
 
 export interface DecodedImage {
@@ -169,8 +173,9 @@ export class EditApi {
   private textElementOf(node: SceneNode, path: string): TextElement {
     const element = node.elements.find((candidate): candidate is TextElement =>
       candidate.type === "text" && !candidate.source?.readOnlyText);
-    if (node.kind === "group" || node.kind === "table" || !element) {
+    if (node.kind === "group" || node.kind === "table" || node.kind === "chart" || !element) {
       const why = node.kind === "group" ? "组合本身没有文字，请指向组合里的具体形状"
+        : node.kind === "chart" ? "图表的标题和数据请用 setChart 修改"
         : node.kind === "table" ? "暂不支持修改表格里的文字"
         : "这个对象没有文字框";
       throw new ApiError("NOT_APPLICABLE", `${node.name}：${why}`, path);
@@ -179,8 +184,9 @@ export class EditApi {
   }
 
   private requirePaintable(node: SceneNode, path: string): void {
-    if (node.kind === "image" || node.kind === "table") {
-      throw new ApiError("NOT_APPLICABLE", `${node.name} 是${node.kind === "image" ? "图片" : "表格"}，没有填充和边框可以设置`, path);
+    if (node.kind === "image" || node.kind === "table" || node.kind === "chart") {
+      const what = node.kind === "image" ? "图片" : node.kind === "chart" ? "图表" : "表格";
+      throw new ApiError("NOT_APPLICABLE", `${node.name} 是${what}，没有填充和边框可以设置`, path);
     }
   }
 
@@ -293,6 +299,31 @@ export class EditApi {
         return this.createdResult(scene, created);
       }
 
+      // ---- charts
+      case "addChart": {
+        const scene = resolveSlide(context.scenes, command.slide, at("slide"));
+        await this.deck.showSlide(scene.index - 1);
+        const chart = newChart(command as unknown as ChartFields & { type: ChartKind }, at);
+        const created = await this.editor.createChart({ chart, name: command.name });
+        if (!created) throw new ApiError("FAILED", "无法插入图表", path);
+        if (command.rect) {
+          this.editor.selectShapes([{ part: created.part, id: created.id }]);
+          this.editor.setBounds(command.rect);
+        }
+        this.register(aliases, command.as, created);
+        return this.createdResult(scene, created);
+      }
+      case "setChart": {
+        const { node: found } = await node(command.target);
+        const element = found.elements.find((candidate): candidate is ChartElement => candidate.type === "chart");
+        if (!element) throw new ApiError("NOT_APPLICABLE", `${found.name} 不是图表`, at("target"));
+        if (element.chart.unsupported) {
+          throw new ApiError("NOT_APPLICABLE", `${found.name} 是${element.chart.unsupported}，暂不支持修改`, at("target"));
+        }
+        this.editor.updateChart(element, applyChartFields(element.chart, command as unknown as ChartFields, at));
+        return {};
+      }
+
       // ---- text
       case "setText": {
         const { node: found } = await node(command.target);
@@ -343,7 +374,9 @@ export class EditApi {
       }
       case "setRotation": {
         const { node: found } = await node(command.target);
-        if (found.kind === "group") throw new ApiError("NOT_APPLICABLE", `${found.name} 是组合，暂不支持旋转`, at("target"));
+        if (found.kind === "group" || found.kind === "chart") {
+          throw new ApiError("NOT_APPLICABLE", `${found.name} 是${found.kind === "chart" ? "图表" : "组合"}，不能旋转`, at("target"));
+        }
         this.editor.setRotationDegrees(command.degrees);
         return {};
       }

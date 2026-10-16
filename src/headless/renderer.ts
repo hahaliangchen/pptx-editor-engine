@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { resolveObjectURL } from "node:buffer";
 import { createCanvas, loadImage } from "@napi-rs/canvas";
+import { expandForRender } from "../charts/layout";
 import { PptVirtualDocument, Slide } from "../pptx-virtual-dom";
 import { FontResolver, collectFontRequests } from "./fonts";
 import { installNodeEnv } from "./node-env";
@@ -59,7 +60,7 @@ export class HeadlessRenderer {
     this.ctx.setTransform(scale, 0, 0, scale, 0, 0);
 
     const images = await this.loadImages(slide);
-    this.quietly(() => this.renderer.render_slide(JSON.stringify({ id: slide.id, elements: slide.elements }), images));
+    this.quietly(() => this.renderer.render_slide(JSON.stringify({ id: slide.id, elements: expandForRender(slide.elements) }), images));
     return this.canvas.toBuffer("image/png");
   }
 

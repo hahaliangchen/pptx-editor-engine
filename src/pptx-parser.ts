@@ -1,3 +1,4 @@
+import { parseChartXml } from "./charts/parse";
 import JSZip from "jszip";
 
 import {
@@ -49,6 +50,8 @@ export * from "./pptx-virtual-dom";
 export class PptxParser {
   private zip: JSZip | null = null;
   private currentSlidePart = "";
+  /** Chart parts the slide being parsed refers to, by relationship id. */
+  private currentChartRels: Record<string, string> = {};
   /** presentation.xml defaultTextStyle: the bottom of every placeholder's inheritance chain. */
   private defaultTextStyle: globalThis.Element | null = null;
   private groupStack: GroupRef[] = [];
@@ -98,6 +101,11 @@ export class PptxParser {
       themeStyleMatrix: this.themeStyleMatrix,
       registerStyleRule: rule => this.registerStyleRule(rule)
     });
+  }
+
+  /** The theme's six accent colours, in order. */
+  public themeAccents(): string[] {
+    return ["accent1", "accent2", "accent3", "accent4", "accent5", "accent6"].map(name => this.themeColors[name]);
   }
 
   /** The opened package, kept so edits can be written back on export. */
@@ -574,10 +582,12 @@ export class PptxParser {
 
   private async loadRelationships(relsPath: string, baseDir: string): Promise<{
     imgRelMap: Record<string, string>;
+    chartRelMap: Record<string, string>;
     layoutPath?: string;
     masterPath?: string;
   }> {
     const relMap: Record<string, string> = {};
+    const chartRelMap: Record<string, string> = {};
     let layoutPath: string | undefined = undefined;
     let masterPath: string | undefined = undefined;
 
@@ -593,6 +603,8 @@ export class PptxParser {
         if (id && target && type) {
           if (type.includes("image")) {
             relMap[id] = this.resolveRelativePath(baseDir, target);
+          } else if (type.endsWith("/chart")) {
+            chartRelMap[id] = this.resolveRelativePath(baseDir, target);
           } else if (type.includes("slideLayout")) {
             layoutPath = this.resolveRelativePath(baseDir, target);
           } else if (type.includes("slideMaster")) {
@@ -601,7 +613,7 @@ export class PptxParser {
         }
       }
     }
-    return { imgRelMap: relMap, layoutPath, masterPath };
+    return { imgRelMap: relMap, chartRelMap, layoutPath, masterPath };
   }
 
   private async parseSlide(slidePath: string, slideId: string, viewSize: PresentationSize): Promise<Slide> {
@@ -638,7 +650,8 @@ export class PptxParser {
     const slideDir = slidePath.substring(0, slidePath.lastIndexOf("/"));
     const slideFileName = slidePath.substring(slidePath.lastIndexOf("/") + 1);
     const slideRelsPath = `${slideDir}/_rels/${slideFileName}.rels`;
-    const { imgRelMap, layoutPath } = await this.loadRelationships(slideRelsPath, slideDir);
+    const { imgRelMap, chartRelMap, layoutPath } = await this.loadRelationships(slideRelsPath, slideDir);
+    this.currentChartRels = chartRelMap;
 
     let layoutImgRelMap: Record<string, string> = {};
     let masterImgRelMap: Record<string, string> = {};
@@ -1434,6 +1447,61 @@ export class PptxParser {
     }
   }
 
+  /** A graphicFrame that holds a chart becomes one chart element; returns false for any other frame. */
+  private async parseChartFrame(
+    node: Element,
+    transform: TransformState,
+    elements: SlideElement[],
+    isTemplate: boolean
+  ): Promise<boolean> {
+    const graphicData = querySelector(node, "a\\:graphicData, graphicData");
+    if (!graphicData || !(graphicData.getAttribute("uri") || "").endsWith("/chart")) return false;
+    const chartRef = getDirectChild(graphicData, "chart");
+    const relId = chartRef?.getAttributeNS("http://schemas.openxmlformats.org/officeDocument/2006/relationships", "id")
+      || chartRef?.getAttribute("r:id");
+    const xfrm = getDirectChild(node, "xfrm");
+    const off = xfrm && getDirectChild(xfrm, "off");
+    const ext = xfrm && getDirectChild(xfrm, "ext");
+    if (!relId || !off || !ext) return true;
+
+    const frame = querySelector(node, "p\\:cNvPr, cNvPr");
+    const frameId = frame?.getAttribute("id") || `${elements.length}`;
+    const rect = {
+      x: transform.offsetX + parseInt(off.getAttribute("x") || "0", 10) * transform.scaleX,
+      y: transform.offsetY + parseInt(off.getAttribute("y") || "0", 10) * transform.scaleY,
+      w: parseInt(ext.getAttribute("cx") || "0", 10) * transform.scaleX,
+      h: parseInt(ext.getAttribute("cy") || "0", 10) * transform.scaleY
+    };
+
+    const part = this.currentChartRels[relId];
+    const file = part ? this.zip?.file(part) : null;
+    const accents = ["accent1", "accent2", "accent3", "accent4", "accent5", "accent6"].map(name => this.themeColors[name]);
+    const context = {
+      solidFill: (target: Element) => this.styleResolver.extractDirectFillColor(target),
+      typeface: (name: string) => this.styleResolver.resolveThemeTypeface(name),
+      palette: accents,
+      defaultFont: {
+        family: this.themeFonts["+mn-lt"] || undefined,
+        eastAsianFamily: this.themeFonts["+mn-ea"] || undefined
+      }
+    };
+    let chart;
+    try {
+      chart = parseChartXml(file ? await file.async("string") : "", part || "", context);
+    } catch (error) {
+      chart = parseChartXml("<c:chartSpace xmlns:c=\"http://schemas.openxmlformats.org/drawingml/2006/chart\"/>", part || "", context);
+    }
+    elements.push({
+      type: "chart",
+      id: `chart_${frameId}`,
+      source: this.makeSource(isTemplate, frameId, transform, frame?.getAttribute("name")),
+      rect,
+      chart,
+      pxPerPt: 12700 * transform.scaleX
+    });
+    return true;
+  }
+
   private async parseGraphicFrameNode(
     node: Element,
     transform: TransformState,
@@ -1447,6 +1515,8 @@ export class PptxParser {
     if (isTemplate && ph) {
       return;
     }
+
+    if (await this.parseChartFrame(node, transform, elements, isTemplate)) return;
 
     const tbl = querySelector(node, "a\\:tbl, tbl");
     if (!tbl) return;

@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { expandForRender } from "../charts/layout";
 import { PptVirtualDocument } from "../pptx-virtual-dom";
 
 export interface FontRequest {
@@ -22,7 +23,7 @@ export function collectFontRequests(doc: PptVirtualDocument): FontRequest[] {
     add(style.eastAsianFontFamily, true, !!style.bold, !!style.italic);
   };
   for (const slide of doc.slides) {
-    for (const element of slide.elements) {
+    for (const element of expandForRender(slide.elements)) {
       if (element.type !== "text") continue;
       addStyle(element.style);
       for (const paragraph of element.paragraphs || []) {

@@ -26,6 +26,8 @@ export const relationshipsXml = (rels: RelAdd[]): string =>
 const DROPPED = ["notesSlide", "tags", "comments", "slideUpdateInfo"];
 /** Targets that a copy can share with the original. */
 const SHARED = ["slideLayout", "image", "hyperlink", "audio", "video", "media"];
+/** Targets a copy must own: the caller gives each its own copy of the part. */
+const CLONED = ["chart"];
 
 export interface SlideCopy {
   xml: string;
@@ -35,16 +37,17 @@ export interface SlideCopy {
 /**
  * Turn a slide snapshot into the base of a duplicate. Parts that belong to a
  * single slide (its notes, tags) are left behind; pictures and the layout are
- * shared. Anything else (charts, diagrams, embedded objects) would end up
- * owned by two slides, so the copy is refused.
+ * shared; charts stay in the list for the caller to give each a part of its own.
+ * Anything else (diagrams, embedded objects) would end up owned by two slides,
+ * so the copy is refused.
  */
 export function prepareSlideCopy(snapshot: SlideCopy): SlideCopy {
   const kept: RelAdd[] = [];
   for (const rel of snapshot.relationships) {
     const kind = rel.type.replace(`${REL}/`, "").replace(/^.*\//, "");
     if (DROPPED.includes(kind)) continue;
-    if (!SHARED.includes(kind)) {
-      throw new Error("这一页包含图表、SmartArt 或嵌入对象，暂不支持复制。");
+    if (!SHARED.includes(kind) && !CLONED.includes(kind)) {
+      throw new Error("这一页包含 SmartArt 或嵌入对象，暂不支持复制。");
     }
     kept.push(rel);
   }

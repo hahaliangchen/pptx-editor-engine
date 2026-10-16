@@ -33,6 +33,18 @@ const target = {
   ]
 };
 
+const chartKind = { type: "string", enum: ["column", "bar", "line", "pie"], description: "column = vertical bars, bar = horizontal bars" };
+const chartCategories = { type: "array", minItems: 1, maxItems: 60, items: { type: "string" }, description: "one label per group on the axis (a pie: one per slice)" };
+const chartSeries = {
+  type: "array", minItems: 1, maxItems: 12,
+  description: "one series per bar colour or line; a pie has exactly one. Each needs one value per category.",
+  items: {
+    type: "object",
+    properties: { name: { type: "string" }, values: { type: "array", items: { type: ["number", "null"] } }, color },
+    required: ["name", "values"], additionalProperties: false
+  }
+};
+const legendPosition = { type: "string", enum: ["top", "bottom", "left", "right", "none"] };
 const align = { type: "string", enum: ["left", "center", "right"] };
 const dash = { type: "string", enum: ["solid", "dash", "dot"] };
 const lineStyle = {
@@ -86,6 +98,20 @@ const commands = [
     src: { type: "string", pattern: "^data:image/(png|jpeg|gif);base64,", description: "a data: URL of a PNG, JPEG or GIF" },
     rect, name: { type: "string" }, as: alias
   }, ["slide", "src"]),
+
+  command("addChart", {
+    slide: slideRef, type: chartKind, categories: chartCategories, series: chartSeries,
+    title: { type: "string" }, legend: legendPosition, dataLabels: { type: "boolean" },
+    stacked: { type: "boolean", description: "stack the series (not for pie)" },
+    rect, name: { type: "string" }, as: alias
+  }, ["slide", "type", "categories", "series"]),
+  command("setChart", {
+    target, type: chartKind, categories: chartCategories, series: chartSeries,
+    title: { type: ["string", "null"], description: "null removes the title" }, legend: legendPosition,
+    dataLabels: { type: "boolean" }, stacked: { type: "boolean" }
+  }, ["target"], {
+    anyOf: ["type", "categories", "series", "title", "legend", "dataLabels", "stacked"].map(field => ({ required: [field] }))
+  }),
 
   command("setText", { target, text: { type: "string" } }, ["target", "text"]),
   command("replaceText", {
