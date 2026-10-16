@@ -5,6 +5,7 @@ import { TextOp } from "./editor/text-ops";
 import { writeTextOps } from "./pptx-text-writer";
 import { ShapeStyleOp } from "./editor/shape-ops";
 import { writeShapeStyleOps } from "./pptx-style-writer";
+import { pruneDeletedReferences, shapeIdsOf } from "./pptx-references";
 
 const A_NS = "http://schemas.openxmlformats.org/drawingml/2006/main";
 const P_NS = "http://schemas.openxmlformats.org/presentationml/2006/main";
@@ -256,6 +257,7 @@ function applyPartEdits(doc: Document, part: string, slides: Slide[], edits: Edi
     spTree.appendChild(doc.importNode(fragment.documentElement, true));
   }
 
+  const deletedIds = new Set<string>();
   for (const shapeId of edits.dirty.get(part) || []) {
     const shape = findShapeNode(doc, shapeId);
     if (!shape) continue;
@@ -269,6 +271,7 @@ function applyPartEdits(doc: Document, part: string, slides: Slide[], edits: Edi
         ? candidate.source.groups?.some(group => group.shapeId === shapeId)
         : candidate.source.shapeId === shapeId));
     if (members.length === 0) {
+      shapeIdsOf(shape).forEach(id => deletedIds.add(id));
       shape.parentNode?.removeChild(shape);
       continue;
     }
@@ -289,6 +292,8 @@ function applyPartEdits(doc: Document, part: string, slides: Slide[], edits: Edi
       );
     }
   }
+
+  pruneDeletedReferences(doc, deletedIds);
 
   for (const [shapeId, ops] of edits.styleEdits.get(part) || []) {
     const shape = findShapeNode(doc, shapeId);
@@ -509,6 +514,46 @@ function updateSections(doc: Document, finalIds: string[]): void {
 }
 
 /**
+ * A "jump to slide" link on one slide is a relationship to another slide part.
+ * When that slide is deleted the link must go too, or the package points at
+ * nothing and PowerPoint asks to repair it.
+ */
+async function detachLinksToRemovedSlides(
+  zip: JSZip,
+  livingParts: string[],
+  removed: Set<string>,
+  originals: Map<string, string>
+): Promise<void> {
+  if (removed.size === 0) return;
+  const serializer = new XMLSerializer();
+  for (const part of livingParts) {
+    const relsPath = relsPathOf(part);
+    const rels = await readDocument(zip, relsPath);
+    if (!rels) continue;
+    const slideDir = part.slice(0, part.lastIndexOf("/"));
+    const dangling = Array.from(rels.doc.getElementsByTagNameNS(REL_NS, "Relationship")).filter(rel =>
+      (rel.getAttribute("Type") || "").endsWith("/slide")
+      && removed.has(resolveTarget(slideDir, rel.getAttribute("Target") || "")));
+    if (dangling.length === 0) continue;
+
+    const ids = new Set(dangling.map(rel => rel.getAttribute("Id") || ""));
+    dangling.forEach(rel => rel.parentNode?.removeChild(rel));
+    if (!originals.has(relsPath)) originals.set(relsPath, rels.xml);
+    zip.file(relsPath, serializer.serializeToString(rels.doc));
+
+    const slide = await readDocument(zip, part);
+    if (!slide) continue;
+    for (const node of Array.from(slide.doc.getElementsByTagName("*"))) {
+      if ((node.localName === "hlinkClick" || node.localName === "hlinkHover") && ids.has(node.getAttributeNS(R_NS, "id") || "")) {
+        node.parentNode?.removeChild(node);
+      }
+    }
+    if (!originals.has(part)) originals.set(part, slide.xml);
+    zip.file(part, serializer.serializeToString(slide.doc));
+  }
+}
+
+/**
  * Make the package's slide list match the editor's: new slides get an entry,
  * deleted ones lose theirs (and their files), and the order follows `slides`.
  * Slide parts that disappear are kept in memory so a later export can bring
@@ -599,6 +644,13 @@ async function syncSlideList(
       }
     }
   }
+
+  await detachLinksToRemovedSlides(
+    zip,
+    finalParts,
+    new Set(entries.filter(candidate => !finalParts.includes(candidate.part)).map(candidate => candidate.part)),
+    originals
+  );
 
   for (const node of Array.from(list.children)) list.removeChild(node);
   for (const node of finalNodes) list.appendChild(node);

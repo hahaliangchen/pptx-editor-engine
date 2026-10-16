@@ -18,3 +18,7 @@ Thumbs.db
 
 # Codex workspace runtime state
 .codex-workspace-mcp/
+
+# .NET build output of the PPTX validator
+tools/validate-pptx/bin/
+tools/validate-pptx/obj/

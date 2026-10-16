@@ -2,6 +2,7 @@ import JSZip from "jszip";
 import { describe, expect, it } from "vitest";
 import { emptyStructure, exportEditedPptx, materializeSlide, resolveTarget } from "../src/pptx-exporter";
 import { Slide } from "../src/pptx-virtual-dom";
+import { checkPackage } from "./helpers/package-check";
 
 const P = 'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"';
 const REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
@@ -30,14 +31,16 @@ async function makeDeck(sections = false): Promise<JSZip> {
   zip.file("ppt/_rels/presentation.xml.rels", `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">`
     + [1, 2, 3].map(n => `<Relationship Id="rId${n + 3}" Type="${REL}/slide" Target="slides/slide${n}.xml"/>`).join("")
     + `<Relationship Id="rId1" Type="${REL}/slideMaster" Target="slideMasters/slideMaster1.xml"/></Relationships>`);
-  zip.file("[Content_Types].xml", `<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/>`
+  zip.file("[Content_Types].xml", `<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>`
     + [1, 2, 3].map(n => `<Override PartName="/ppt/slides/slide${n}.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>`).join("")
     + [1, 2, 3].map(n => `<Override PartName="/ppt/notesSlides/notesSlide${n}.xml" ContentType="notes"/>`).join("") + `</Types>`);
+  zip.file("ppt/slideMasters/slideMaster1.xml", "<master/>");
+  zip.file("ppt/slideLayouts/slideLayout1.xml", "<layout/>");
   for (const n of [1, 2, 3]) {
     zip.file(`ppt/slides/slide${n}.xml`, slideXml(`slide ${n}`));
     zip.file(`ppt/slides/_rels/slide${n}.xml.rels`, slideRels(n));
     zip.file(`ppt/notesSlides/notesSlide${n}.xml`, `<notes/>`);
-    zip.file(`ppt/notesSlides/_rels/notesSlide${n}.xml.rels`, `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>`);
+    zip.file(`ppt/notesSlides/_rels/notesSlide${n}.xml.rels`, `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${REL}/slide" Target="../slides/slide${n}.xml"/></Relationships>`);
   }
   return zip;
 }
@@ -132,5 +135,44 @@ describe("materializeSlide", () => {
     const copy = await materializeSlide(zip, "ppt/slides/slide1.xml", [], edits);
     expect(copy!.xml).toContain("slide 1");
     expect(copy!.relationships.map(rel => rel.id).sort()).toEqual(["rId1", "rId2"]);
+  });
+});
+
+describe("package consistency after slide edits", () => {
+  it("leaves no dangling relationships, undeclared parts or orphan notes after reorder, delete and add", async () => {
+    const structure = emptyStructure();
+    structure.virtual.set("ppt/slides/slide4.xml", slideXml("copy"));
+    structure.virtual.set("ppt/slides/_rels/slide4.xml.rels", slideRels(9).replace(/<Relationship Id="rId2"[^>]*>/, ""));
+    const cases: Array<[string, Slide[], ReturnType<typeof emptyStructure>?]> = [
+      ["untouched", [1, 2, 3].map(deckSlide)],
+      ["reordered", [3, 1, 2].map(deckSlide)],
+      ["deleted", [1, 3].map(deckSlide)],
+      ["added", [deckSlide(1), deckSlide(4), deckSlide(2), deckSlide(3)], structure]
+    ];
+    for (const [name, slides, edits] of cases) {
+      const zip = await makeDeck();
+      const blob = await run(zip, slides, edits);
+      expect({ name, problems: await checkPackage(await toBuffer(blob)) }).toEqual({ name, problems: [] });
+    }
+  });
+});
+
+describe("links to deleted slides", () => {
+  it("drops the relationship and the hyperlink that used it, and keeps links to slides that remain", async () => {
+    const zip = await makeDeck();
+    const link = (id: string) => `<a:r><a:rPr><a:hlinkClick xmlns:r="${REL}" r:id="${id}" action="ppaction://hlinksldjump"/></a:rPr><a:t>go</a:t></a:r>`;
+    zip.file("ppt/slides/slide1.xml", slideXml("one").replace("<a:r>", link("rId7") + link("rId8") + "<a:r>"));
+    zip.file("ppt/slides/_rels/slide1.xml.rels", slideRels(1).replace("</Relationships>",
+      `<Relationship Id="rId7" Type="${REL}/slide" Target="slide2.xml"/><Relationship Id="rId8" Type="${REL}/slide" Target="slide3.xml"/></Relationships>`));
+    const out = await open(await run(zip, [1, 3].map(deckSlide)));
+    const xml = await out.file("ppt/slides/slide1.xml")!.async("string");
+    const rels = await out.file("ppt/slides/_rels/slide1.xml.rels")!.async("string");
+    expect(xml).not.toContain('r:id="rId7"');
+    expect(xml).toContain('r:id="rId8"');
+    expect(rels).not.toContain("slide2.xml");
+    expect(rels).toContain("slide3.xml");
+    expect(await checkPackage(await toBuffer(await run(zip, [1, 3].map(deckSlide))))).toEqual([]);
+    // the live package keeps the link, so undoing the delete works
+    expect(await zip.file("ppt/slides/_rels/slide1.xml.rels")!.async("string")).toContain("slide2.xml");
   });
 });

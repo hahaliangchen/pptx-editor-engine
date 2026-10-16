@@ -14,7 +14,8 @@
     "dev": "concurrently \"npm run start:backend\" \"npm run dev:frontend\"",
     "build": "npm run build:wasm && rspack build",
     "start:backend": "cargo run --manifest-path rust-backend/Cargo.toml",
-    "test": "vitest run"
+    "test": "vitest run",
+    "validate:pptx": "tools/validate-pptx/check.sh"
   },
   "dependencies": {
     "jszip": "^3.10.1"

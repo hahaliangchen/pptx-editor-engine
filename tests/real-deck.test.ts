@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import JSZip from "jszip";
 import { beforeAll, describe, expect, it } from "vitest";
@@ -62,6 +62,31 @@ describe.skipIf(!hasDeck)("real deck roundtrip", () => {
     for (const name of Object.keys(before.files)) {
       if (name === target.source!.part || before.files[name].dir) continue;
       expect(await after.file(name)!.async("uint8array")).toEqual(await before.file(name)!.async("uint8array"));
+    }
+  }, 120_000);
+
+  it("deleting an animated shape leaves no animation target behind", async () => {
+    const slide = doc.slides.find(candidate => candidate.part && /<p:spTgt spid="\d+"/.test(candidate.rawXml));
+    if (!slide) return; // the deck has no animated slide
+    const targeted = Array.from(slide.rawXml.matchAll(/<p:spTgt spid="(\d+)"/g)).map(match => match[1]);
+    const victim = targeted[0];
+    const kept = slide.elements;
+    slide.elements = kept.filter(element => element.source?.shapeId !== victim);
+    try {
+      const dirty = new Map();
+      markDirty(dirty, kept.find(element => element.source?.shapeId === victim)?.source);
+      const blob = await exportEditedPptx(parser.getZip()!, doc.slides, dirty);
+      const buffer = await new Promise<ArrayBuffer>(resolveBuffer => {
+        const reader = new FileReader();
+        reader.onload = () => resolveBuffer(reader.result as ArrayBuffer);
+        reader.readAsArrayBuffer(blob);
+      });
+      const xml = await (await JSZip.loadAsync(buffer)).file(slide.part!)!.async("string");
+      expect(xml).not.toContain(`spid="${victim}"`);
+      for (const other of targeted.filter(id => id !== victim)) expect(xml).toContain(`spid="${other}"`);
+      if (process.env.KEEP_EXPORT) writeFileSync(process.env.KEEP_EXPORT, Buffer.from(buffer));
+    } finally {
+      slide.elements = kept;
     }
   }, 120_000);
 });
