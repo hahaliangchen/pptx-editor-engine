@@ -522,3 +522,26 @@ npm run agent -- --base http://主机:端口/v1 --model 模型名 --mode oneshot
 实测：配置流生成的几份稿（两个主题、开关思考）检查后都没有问题，不用修；
 故意留着"品牌名被缩到 9.5 磅"的一份交给 Qwen 修，它读 `get_outline`、一次 `apply_edits`（放大字号并向左加宽文本框）、
 `check_layout` 确认，共 5 轮 47 秒，其余页没动。
+
+## 渲染服务：存一份 PPTX，换回一张缩略图
+
+后端保存用户的 PPTX 时，在后台调这个 HTTP 服务取第一页做缩略图，前端不参与。
+
+```sh
+npm run render-server -- --port 8787          # 默认只监听 127.0.0.1，不做鉴权；--host 0.0.0.0 要自己加防护
+curl --data-binary @稿.pptx "http://127.0.0.1:8787/thumbnail?width=480" -o 缩略图.png
+curl --data-binary @稿.pptx "http://127.0.0.1:8787/render?page=3&width=1280" -o 第三页.png
+```
+
+| 接口 | 说明 |
+| --- | --- |
+| `POST /thumbnail?width=480` | 请求体是 .pptx，返回第 1 页的 PNG |
+| `POST /render?page=3&width=1280` | 返回指定页 |
+| `GET /health` | `{ "ok": true }` |
+
+- 成功时响应头 `X-Slide-Count` 是总页数。失败是 JSON `{ "error": { "code", "message" } }`：
+  400（`INVALID_PPTX`、`BAD_PARAMETER`、`EMPTY_BODY`）、404、413（超过 `--max-mb`，默认 50）、503（排队的请求超过 `--queue`，默认 16；调用方稍后重试）。
+- 一个进程里一次只画一份文稿（每份在 jsdom 全局上有自己的文档），请求排队执行。一份 5 页的稿约 0.35 秒；并发要更高就多起几个进程，前面放负载均衡。
+- 调用方建议：保存先返回成功，缩略图异步取；记下缩略图对应的保存版本号，连续保存时丢弃过期的结果；失败不影响保存，列表页显示占位图。
+- 服务器需要装中文字体（Noto Sans CJK）和 fontconfig，缩略图才不会出现方框。
+- 代码在 `src/headless/render-server.ts`，也可以在自己的进程里 `createRenderServer(options)` 后 `listen`。

@@ -6,3 +6,5 @@ export {
   callAnthropicTool, callMcpTool, callOpenAITool, toAnthropic, toAnthropicResult,
   toMcp, toMcpResult, toOpenAI, toOpenAIMessages
 } from "../api/adapters";
+export { createRenderServer } from "./render-server";
+export type { RenderServerOptions } from "./render-server";

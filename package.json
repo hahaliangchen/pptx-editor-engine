@@ -18,7 +18,8 @@
     "validate:pptx": "tools/validate-pptx/check.sh",
     "build:wasm:node": "wasm-pack build rust-engine --target nodejs --out-dir pkg-node",
     "headless": "vite-node tools/headless-cli.ts --",
-    "agent": "vite-node tools/agent-demo.ts --"
+    "agent": "vite-node tools/agent-demo.ts --",
+    "render-server": "vite-node tools/render-server.ts --"
   },
   "dependencies": {
     "ajv": "^8.20.0",
