@@ -64,8 +64,8 @@ const png = await renderer.renderSlide(doc, 0, { width: 1280 });
 
 ## 阶段 C：工具与接入
 
-1. 中立的工具核心 `tools.ts`：`get_outline`、`apply_edits`、`render_slide` 的名字、说明、输入 schema，
-   以及 `callTool(name, args)`；再加薄适配层输出 Anthropic / OpenAI / MCP 格式。
+1. ~~中立的工具核心~~（**完成**）：`src/api/tools.ts`（三个工具的定义与 `callTool`）、`src/api/adapters.ts`
+   （Anthropic / OpenAI / MCP 的工具列表、结果转换和"收到调用就执行"的函数）；`TOOL_GUIDE` 是给系统提示用的使用指南。
 2. 注册到现有的远程插件协议，与 SVG 工具并存，对同一需求对比效果后再切换。
 3. 版本控制：用户手改与 Agent 修改并存时，沿用插件已有的 revision 思路，避免互相覆盖。
 4. 前端：用本引擎的编辑器替换只读 SVG 预览；模板制作页改为编辑真实 PPTX 版式。

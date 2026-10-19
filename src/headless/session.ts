@@ -4,6 +4,7 @@ import { OutlineOptions } from "../api/outline";
 import { DocumentSession } from "../document-session";
 import { PptVirtualDocument } from "../pptx-virtual-dom";
 import { HeadlessRenderOptions, HeadlessRenderer, RenderSlideOptions } from "./renderer";
+import { ToolResult, callTool } from "../api/tools";
 import { installNodeEnv } from "./node-env";
 
 /**
@@ -61,6 +62,11 @@ export class HeadlessSession {
 
   public apply(commands: unknown): Promise<ApplyResult> {
     return this.api.apply(commands);
+  }
+
+  /** Run one of the tools (`get_outline`, `apply_edits`, `render_slide`) on this deck. */
+  public callTool(name: string, args: unknown): Promise<ToolResult> {
+    return callTool(this, name, args);
   }
 
   public undo(): void {

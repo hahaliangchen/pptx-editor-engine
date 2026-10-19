@@ -98,6 +98,21 @@ describe("headless session", () => {
     expect((await pixelAt(png, 5 * pxPerCm, 4 * pxPerCm)).slice(0, 3)).toEqual([0xff, 0x6a, 0x00]);
   });
 
+  it("names new text boxes and shapes, so later commands can find them by name", async () => {
+    const session = await open();
+    const result = await session.apply([
+      { op: "addText", slide: 1, rect: { x: 1, y: 1, w: 5, h: 2 }, text: "说明", name: "说明文字" },
+      { op: "addShape", slide: 1, shape: "rect", rect: { x: 8, y: 1, w: 3, h: 2 }, name: "色块" },
+      { op: "setText", target: { slide: 1, name: "说明文字" }, text: "改过" }
+    ]);
+    expect(result.ok).toBe(true);
+    const reopened = await HeadlessSession.open(await session.export());
+    sessions.push(reopened);
+    const shapes = (await reopened.outline()).slides[0].shapes;
+    expect(shapes.find((shape: { name: string }) => shape.name === "说明文字")).toMatchObject({ text: "改过" });
+    expect(shapes.some((shape: { name: string }) => shape.name === "色块")).toBe(true);
+  });
+
   it("two sessions in one process stay independent", async () => {
     const first = await open();
     const second = await open();

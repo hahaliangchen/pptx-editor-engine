@@ -1175,13 +1175,14 @@ export class SlideEditor {
     kind: NewShapeKind,
     rect: Rect,
     flip: { flipH: boolean; flipV: boolean },
-    edit = true
+    edit = true,
+    nameOverride?: string
   ): CreatedShape | null {
     const part = slide.part;
     this.setTool(null);
     if (!part) return null;
     const id = this.host.allocateShapeId(part);
-    const name = displayName(kind, id);
+    const name = nameOverride || displayName(kind, id);
     const base = this.slideTransform(slide);
     const source: ElementSource = { part, shapeId: id, name, xform: base };
     const font = this.host.deckFont();
@@ -1192,7 +1193,7 @@ export class SlideEditor {
       cx: Math.round(rect.w / base.scaleX),
       cy: Math.round(rect.h / base.scaleY),
       ...flip
-    });
+    }, name);
     this.commitInserted(slide, part, [{ elements, inserted: { id, xml }, adds: [], owner: source }], "插入形状");
 
     // A new text box drawn by hand is for typing: go straight into it.
@@ -1205,10 +1206,11 @@ export class SlideEditor {
   public createShape(
     kind: NewShapeKind,
     rect: Rect,
-    flip: { flipH: boolean; flipV: boolean } = { flipH: false, flipV: false }
+    flip: { flipH: boolean; flipV: boolean } = { flipH: false, flipV: false },
+    name?: string
   ): CreatedShape | null {
     const slide = this.host.getSlide();
-    return slide ? this.insertShape(slide, kind, rect, flip, false) : null;
+    return slide ? this.insertShape(slide, kind, rect, flip, false, name) : null;
   }
 
   /** Add a picture file to the deck and place it on the slide. */

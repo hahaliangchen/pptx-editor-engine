@@ -78,6 +78,12 @@ const command = (op: string, properties: Record<string, unknown>, required: stri
   ...extra
 });
 
+/** Fragments used by many commands; a model gets them once, as definitions, instead of pasted into each. */
+export const sharedSchemas: Record<string, unknown> = {
+  slideRef, color, nullableColor: { oneOf: [color, { type: "null" }] }, rect, alias, shapeTarget, target,
+  align, dash, lineStyle, textStyle, chartKind, chartCategories, chartSeries, legendPosition, tableRows, position
+};
+
 const commands = [
   command("addSlide", { after: { type: "integer", minimum: 0 }, layout: { type: "string", minLength: 1 } }, []),
   command("duplicateSlide", { slide: slideRef, after: { type: "integer", minimum: 0 } }, ["slide"]),
@@ -91,13 +97,14 @@ const commands = [
       type: "array", minItems: 1,
       items: { type: "object", properties: { text: { type: "string" }, align }, required: ["text"], additionalProperties: false }
     },
-    style: textStyle, as: alias
+    style: textStyle, name: { type: "string", description: "name to find the text box by later" }, as: alias
   }, ["slide", "rect"], { oneOf: [{ required: ["text"] }, { required: ["paragraphs"] }] }),
   command("addShape", {
     slide: slideRef,
     shape: { type: "string", enum: ["rect", "roundRect", "ellipse", "triangle", "rightArrow", "line", "arrow"] },
     rect, fill: { oneOf: [color, { type: "null" }] }, line: lineStyle,
-    text: { type: "string" }, flipH: { type: "boolean" }, flipV: { type: "boolean" }, as: alias
+    text: { type: "string" }, flipH: { type: "boolean" }, flipV: { type: "boolean" },
+    name: { type: "string", description: "name to find the shape by later" }, as: alias
   }, ["slide", "shape", "rect"]),
   command("addImage", {
     slide: slideRef,

@@ -67,8 +67,8 @@ const xfrm = (box: EmuBox) =>
 const solid = (color: string) => `<a:solidFill><a:srgbClr val="${hex(color)}"/></a:solidFill>`;
 
 /** The p:sp / p:cxnSp node for a new shape. */
-export function buildShapeXml(kind: NewShapeKind, id: string, box: EmuBox): string {
-  const name = escapeXml(displayName(kind, id));
+export function buildShapeXml(kind: NewShapeKind, id: string, box: EmuBox, shapeName?: string): string {
+  const name = escapeXml(shapeName || displayName(kind, id));
   if (isLine(kind)) {
     const tail = kind === "arrow" ? '<a:tailEnd type="triangle"/>' : "";
     return `<p:cxnSp ${NS}><p:nvCxnSpPr><p:cNvPr id="${id}" name="${name}"/><p:cNvCxnSpPr/><p:nvPr/></p:nvCxnSpPr>`

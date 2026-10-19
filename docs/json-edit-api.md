@@ -230,10 +230,60 @@
 
 ## 工具定义（给模型用）
 
-同一份 schema 生成两样东西：
+三个工具，定义写在 `src/api/tools.ts`，与任何厂商无关：名称、说明、输入的 JSON Schema，加一个执行函数。
 
-1. **JSON Schema**：校验入参，出错时把位置原样返回给模型。
-2. **工具定义**：`apply_edits`、`get_outline`、`render_slide` 三个工具，直接用于 Claude 的 tool use。
+| 工具 | 输入 | 返回 |
+|---|---|---|
+| `get_outline` | `slides?`（页码数组）、`maxTextLength?` | 文稿结构的 JSON（见上文 `outline()`） |
+| `apply_edits` | 指令批（本文档上面的全部指令） | 执行结果 JSON；失败时 `ok: false`，带失败位置、`error.code`、`message`、`path` 和候选 |
+| `render_slide` | `slide`（页码）、`width?`（默认 1024） | 一张 PNG 图片 + 一句说明 |
+
+`callTool(host, name, args)` 执行一个工具，**从不抛异常**：参数不对或编辑失败都以 `ok: false` 的结果返回，
+文字里写明哪里错了，模型可以据此重试。`host` 只要有 `outline`、`apply`，要能出图再加 `render`；
+`HeadlessSession` 三样都有，可以直接传。
+
+`TOOL_GUIDE` 是一段给系统提示用的文字：先读结构、整页一批提交、用别名引用新对象、改完渲染检查、
+失败时读候选再改。把它放进系统提示，模型的用法会稳得多。
+
+### 接入各家（`src/api/adapters.ts`）
+
+三家的差别只在字段名和包装，适配层各有三样：**工具列表**、**工具结果的转换**、**一个"收到调用就执行并回复"的函数**。
+
+```ts
+import { HeadlessSession, TOOL_GUIDE, toAnthropic, callAnthropicTool } from "./src/headless";
+
+const deck = await HeadlessSession.open(pptxBytes);
+
+// Anthropic：tool_use 块进，tool_result 块出（图片会作为 image 块放进去）
+const response = await client.messages.create({
+  model, system: TOOL_GUIDE, tools: toAnthropic(), messages
+});
+const results = await Promise.all(
+  response.content.filter(block => block.type === "tool_use").map(block => callAnthropicTool(deck, block))
+);
+messages.push({ role: "assistant", content: response.content }, { role: "user", content: results });
+```
+
+```ts
+// OpenAI：参数是 JSON 字符串；工具消息只能放文字，图片会放进紧跟其后的 user 消息里
+const reply = await openai.chat.completions.create({ model, tools: toOpenAI(), messages });
+for (const call of reply.choices[0].message.tool_calls ?? []) {
+  messages.push(...await callOpenAITool(deck, call));
+}
+```
+
+```ts
+// MCP：tools/list 返回 toMcp()；tools/call 的处理函数就是 callMcpTool
+server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: toMcp() }));
+server.setRequestHandler(CallToolRequestSchema, async req => callMcpTool(deck, req.params.name, req.params.arguments));
+```
+
+- 工具里的 `apply_edits` 用的 schema 把重复出现的片段（`target`、`rect`、`color` 等）提成 `$defs` 引用，
+  体积从约 28 KB 降到约 13 KB（每次请求都要带，越小越省）；含义与校验用的完整 schema 完全相同（有测试逐条对照）。
+- 适配层去掉了 `$schema` 字段（部分厂商不接受），每次返回的都是独立副本。
+- 不提供 OpenAI 的 `strict` 模式：编辑 schema 用了 `oneOf`，strict 模式不支持。
+- 命令行里可以看定义和直接试：`npm run headless -- tools anthropic|openai|mcp|guide`，
+  `npm run headless -- call 文稿.pptx apply_edits '{"commands":[...]}'`。
 
 ## 现在能做 / 暂时做不了
 
@@ -261,14 +311,17 @@
 ## 实现状态（第一版）
 
 已实现并有测试：寻址、`outline()`、`apply()`、JSON Schema 校验、整批撤销与回滚、结构化错误、
-测试页。代码在 `src/api/`：
+测试页、工具定义与三家适配。代码在 `src/api/`：
 
 | 文件 | 作用 |
 |---|---|
 | `scene.ts` | 把一页还原成选择窗格那样的形状树（组合内嵌套） |
 | `outline.ts` | `outline()`：厘米单位的结构描述 |
 | `resolve.ts` | `id` / `name` / `placeholder` / `text` / `$别名` / `@selection` 寻址，找不到或有歧义时返回候选 |
-| `schema.ts` | JSON Schema（21 个 op）与校验，错误指到具体字段 |
+| `schema.ts` | JSON Schema（30 个 op）与校验，错误指到具体字段 |
+| `charts.ts` | `addChart` / `setChart` 的字段合并与校验 |
+| `tools.ts` | 三个工具的定义、`TOOL_GUIDE`、`callTool`（与厂商无关） |
+| `adapters.ts` | Anthropic / OpenAI / MCP 的工具列表、结果转换与"收到调用就执行"函数 |
 | `engine.ts` | `EditApi`：`outline()` 与 `apply()`，走与鼠标键盘相同的编辑操作 |
 | `playground.ts` | 页面右上角「AI 接口」抽屉：贴 JSON、执行、看结果与结构 |
 
@@ -294,6 +347,6 @@
 
 ### 下一步
 
-1. 由 schema 生成 Claude 工具定义（`apply_edits`、`get_outline`、`render_slide`）。
-2. 无头渲染与 `renderSlide(n)`。
-3. 组合 / 取消组合、图表、表格进 schema。
+1. ~~工具定义~~：已完成，见上文"工具定义"。
+2. ~~无头渲染与 `renderSlide(n)`~~：已完成（`HeadlessSession.render`）。
+3. ~~图表、表格进 schema~~：已完成；组合 / 取消组合还没有。

@@ -33,7 +33,7 @@ export interface EditorPort {
   copy(): Promise<boolean>;
   paste(): Promise<void>;
   deleteSelection(): void;
-  createShape(kind: NewShapeKind, rect: Rect, flip?: { flipH: boolean; flipV: boolean }): CreatedShape | null;
+  createShape(kind: NewShapeKind, rect: Rect, flip?: { flipH: boolean; flipV: boolean }, name?: string): CreatedShape | null;
   insertImage(image: DecodedImage & { name: string }): Promise<CreatedShape | null>;
   createChart(spec: { chart: ChartModel; rect?: Rect; name?: string }): Promise<CreatedShape | null>;
   updateChart(element: ChartElement, next: ChartModel, label?: string): void;
@@ -276,7 +276,7 @@ export class EditApi {
       case "addText": {
         const scene = resolveSlide(context.scenes, command.slide, at("slide"));
         await this.deck.showSlide(scene.index - 1);
-        const created = this.editor.createShape("textbox", this.rectPx(scene, command.rect));
+        const created = this.editor.createShape("textbox", this.rectPx(scene, command.rect), undefined, command.name);
         if (!created?.text) throw new ApiError("FAILED", "无法创建文本框", path);
         const paragraphs: Array<{ text: string; align?: string }> = command.paragraphs ?? [{ text: command.text }];
         const text = paragraphs.map(paragraph => paragraph.text).join("\n");
@@ -291,7 +291,8 @@ export class EditApi {
         const created = this.editor.createShape(
           command.shape,
           this.rectPx(scene, command.rect),
-          { flipH: !!command.flipH, flipV: !!command.flipV }
+          { flipH: !!command.flipH, flipV: !!command.flipV },
+          command.name
         );
         if (!created) throw new ApiError("FAILED", "无法创建形状", path);
         this.editor.selectShapes([{ part: created.part, id: created.id }]);
