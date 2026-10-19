@@ -57,6 +57,20 @@ const EXAMPLES: Example[] = [
     }]
   },
   {
+    title: "渐变、半透明与阴影",
+    commands: {
+      label: "渐变阴影",
+      commands: [
+        { op: "addShape", slide: 1, shape: "roundRect", rect: { x: 2, y: 8, w: 10, h: 6 }, text: "渐变卡片", name: "渐变卡" },
+        { op: "setFill", target: { slide: 1, name: "渐变卡" }, gradient: { angle: 90, stops: [{ position: 0, color: "#1F4E9C" }, { position: 100, color: "#5EC8F0" }] } },
+        { op: "setLine", target: { slide: 1, name: "渐变卡" }, color: null },
+        { op: "setShadow", target: { slide: 1, name: "渐变卡" }, shadow: { blurPt: 10, distancePt: 6, opacity: 0.4 } },
+        { op: "addShape", slide: 1, shape: "ellipse", rect: { x: 8, y: 10, w: 8, h: 6 }, fill: "#C00000", text: "半透明", name: "半透明圆" },
+        { op: "setFill", target: { slide: 1, name: "半透明圆" }, opacity: 0.5 }
+      ]
+    }
+  },
+  {
     title: "加表格并改一个单元格",
     commands: {
       label: "加表格",

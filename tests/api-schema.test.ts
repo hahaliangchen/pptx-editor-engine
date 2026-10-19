@@ -38,11 +38,11 @@ describe("batch schema", () => {
   it("knows every operation in the design", () => {
     expect(OPS).toEqual(expect.arrayContaining([
       "addSlide", "duplicateSlide", "deleteSlide", "moveSlide", "addText", "addShape", "addImage",
-      "addChart", "setChart", "addTable", "setTable", "setCell", "insertRow", "deleteRow", "insertColumn", "deleteColumn", "setText", "replaceText", "formatText", "setParagraph", "setBounds", "setRotation", "setFill",
+      "addChart", "setChart", "addTable", "setTable", "setCell", "insertRow", "deleteRow", "insertColumn", "deleteColumn", "setShadow", "setText", "replaceText", "formatText", "setParagraph", "setBounds", "setRotation", "setFill",
       "setLine", "setAnchor", "align", "arrange", "duplicate", "copyTo", "delete"
     ]));
-    expect(OPS).toHaveLength(30);
-    expect(batchSchema.properties.commands.items.oneOf).toHaveLength(30);
+    expect(OPS).toHaveLength(31);
+    expect(batchSchema.properties.commands.items.oneOf).toHaveLength(31);
   });
 
   it("rejects an unknown op and lists the ones that exist", () => {
@@ -53,7 +53,7 @@ describe("batch schema", () => {
   });
 
   it("points at the exact field that is wrong", () => {
-    expect(fail([{ op: "setFill", target: "$a" }])).toMatchObject({ path: "commands[0]", message: expect.stringContaining('缺少字段 "color"') });
+    expect(fail([{ op: "setFill", target: "$a" }])).toMatchObject({ path: "commands[0]", message: expect.stringMatching(/至少要写出其中一个字段：color、opacity、gradient/) });
     expect(fail([{ op: "setFill", target: "$a", color: "red" }]).path).toBe("commands[0].color");
     expect(fail([{ op: "setFill", target: "$a", color: "#12345" }]).message).toContain("格式不对");
     expect(fail([{ op: "setBounds", target: "$a", x: "3" }]).path).toBe("commands[0].x");

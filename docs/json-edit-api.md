@@ -116,7 +116,8 @@
 |---|---|---|
 | `setBounds` | `target*`、`x?` `y?` `w?` `h?`、`keepRatio?` | 位置和大小，未写的字段不变 |
 | `setRotation` | `target*`、`degrees*` | |
-| `setFill` | `target*`、`color*`（颜色或 `null`） | |
+| `setFill` | `target*`，以及 `color`（颜色或 `null`）、`opacity`、`gradient`（至少一个，`color` 与 `gradient` 不能同时写） | 填充；`opacity` 单独写时保留现有颜色或渐变，只改透明度 |
+| `setShadow` | `target*`、`shadow*`（对象或 `null`） | 投影；图片也可以；`null` 去掉阴影 |
 | `setLine` | `target*`、`color?`（可为 `null`）、`widthPt?`、`dash?`（`solid` `dash` `dot`） | 只改写出的字段 |
 | `setAnchor` | `target*`、`anchor*`（`top` `middle` `bottom`） | 文字垂直对齐 |
 | `align` | `targets*`（数组）、`to*`（`slide`）、`edge*`（`left` `hcenter` `right` `top` `vcenter` `bottom`） | 对齐到页面 |
@@ -124,6 +125,26 @@
 | `duplicate` | `target*`、`offset?`（厘米，缺省 0.4）、`as?` | 同页创建副本 |
 | `copyTo` | `target*`、`slide*`、`as?` | 复制到另一页（图片等关系一并处理） |
 | `delete` | `target*` | |
+
+#### 渐变、透明度、阴影
+
+```json
+{ "op": "setFill", "target": { "slide": 1, "name": "卡片" },
+  "gradient": { "kind": "linear", "angle": 90,
+                "stops": [{ "position": 0, "color": "#1F4E9C" }, { "position": 100, "color": "#5EC8F0" }] } }
+{ "op": "setFill", "target": { "slide": 1, "name": "卡片" }, "opacity": 0.5 }
+{ "op": "setShadow", "target": { "slide": 1, "name": "卡片" }, "shadow": { "blurPt": 10, "distancePt": 6, "opacity": 0.4 } }
+```
+
+- `gradient.kind`：`linear`（默认）或 `radial`（从中心向外）。`angle` 是度数，和 PowerPoint 里一致：0 从左到右，90 从上到下，缺省 90。
+  `stops` 至少 2 个，最多 8 个，`position` 是 0–100 的百分比，每个停点可以单独带 `opacity`。
+- `opacity`：0 完全透明，1 不透明。和 `color` 一起写就是"这个颜色、这个透明度"；单独写只改现有填充（纯色或渐变）的透明度，
+  没有填充的形状会返回 `NOT_APPLICABLE`。
+- `shadow`：`color`（默认 `#000000`）、`opacity`（0.35）、`blurPt` 柔和程度（6）、`distancePt` 距离（4）、`angle`（45，0 向右、90 向下），
+  都可以省略。组合、表格、图表不能设阴影。
+- `outline()` 读出来时：渐变是 `fill: { gradient: { type, angle, stops } }`，透明的纯色有 `opacity`，阴影是 `shadow: { color, opacity, blurPt, distancePt, angle }`。
+- 文稿里已有的渐变、半透明、阴影都能读出和画出；改的时候只动被指定的那一项，形状的其他设置保持原样。
+  形状的填充如果来自主题样式（文件里没有写明），改透明度时会把当前画出来的填充写成明确的颜色。
 
 ## 批处理与撤销
 
@@ -294,7 +315,7 @@ server.setRequestHandler(CallToolRequestSchema, async req => callMcpTool(deck, r
 | 文本框、基本形状、直线箭头、图片 | 组合图、面积图、散点图等其他图表类型 |
 | 柱形图、条形图、折线图、饼图：读取、渲染、新建、改数据、导出 | 图表的自定义样式编辑、坐标轴设置 |
 | 改文字（保留格式）、局部格式、段落对齐 | 表格的边框与列宽单独设置 |
-| 位置、大小、旋转、填充、边框、垂直对齐 | 渐变填充、阴影、透明度 |
+| 位置、大小、旋转、填充（纯色、渐变、透明度）、边框、阴影、垂直对齐 | 发光、柔化边缘、倒影的编辑；边框的渐变与透明度 |
 | 对齐到页面、层级、副本、跨页复制 | 动画、切换效果、备注页 |
 
 ## 实现顺序（建议）
@@ -318,7 +339,7 @@ server.setRequestHandler(CallToolRequestSchema, async req => callMcpTool(deck, r
 | `scene.ts` | 把一页还原成选择窗格那样的形状树（组合内嵌套） |
 | `outline.ts` | `outline()`：厘米单位的结构描述 |
 | `resolve.ts` | `id` / `name` / `placeholder` / `text` / `$别名` / `@selection` 寻址，找不到或有歧义时返回候选 |
-| `schema.ts` | JSON Schema（30 个 op）与校验，错误指到具体字段 |
+| `schema.ts` | JSON Schema（31 个 op）与校验，错误指到具体字段 |
 | `charts.ts` | `addChart` / `setChart` 的字段合并与校验 |
 | `tools.ts` | 三个工具的定义、`TOOL_GUIDE`、`callTool`（与厂商无关） |
 | `adapters.ts` | Anthropic / OpenAI / MCP 的工具列表、结果转换与"收到调用就执行"函数 |

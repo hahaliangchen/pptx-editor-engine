@@ -51,6 +51,40 @@ const tableRows = {
   items: { type: "array", minItems: 1, maxItems: 20, items: { type: "string" } }
 };
 const position = { type: "integer", minimum: 1, description: "1 = first" };
+const opacity = { type: "number", minimum: 0, maximum: 1, description: "0 = invisible, 1 = solid" };
+const gradient = {
+  type: "object",
+  description: "a colour that changes along a direction",
+  properties: {
+    kind: { type: "string", enum: ["linear", "radial"], description: "linear (default) or radial from the centre" },
+    angle: { type: "number", description: "degrees for linear: 0 runs left to right, 90 top to bottom (default 90)" },
+    stops: {
+      type: "array", minItems: 2, maxItems: 8,
+      items: {
+        type: "object",
+        properties: {
+          position: { type: "number", minimum: 0, maximum: 100, description: "percent along the gradient" },
+          color,
+          opacity
+        },
+        required: ["position", "color"], additionalProperties: false
+      }
+    }
+  },
+  required: ["stops"], additionalProperties: false
+};
+const shadow = {
+  type: "object",
+  description: "a drop shadow; every field has a default",
+  properties: {
+    color: { ...color, description: "#RRGGBB, default #000000" },
+    opacity: { ...opacity, description: "default 0.35" },
+    blurPt: { type: "number", minimum: 0, description: "softness in points, default 6" },
+    distancePt: { type: "number", minimum: 0, description: "how far it falls, in points, default 4" },
+    angle: { type: "number", description: "degrees: 0 casts to the right, 90 downwards, default 45" }
+  },
+  additionalProperties: false
+};
 const align = { type: "string", enum: ["left", "center", "right"] };
 const dash = { type: "string", enum: ["solid", "dash", "dot"] };
 const lineStyle = {
@@ -81,7 +115,7 @@ const command = (op: string, properties: Record<string, unknown>, required: stri
 /** Fragments used by many commands; a model gets them once, as definitions, instead of pasted into each. */
 export const sharedSchemas: Record<string, unknown> = {
   slideRef, color, nullableColor: { oneOf: [color, { type: "null" }] }, rect, alias, shapeTarget, target,
-  align, dash, lineStyle, textStyle, chartKind, chartCategories, chartSeries, legendPosition, tableRows, position
+  align, dash, lineStyle, textStyle, opacity, gradient, shadow, chartKind, chartCategories, chartSeries, legendPosition, tableRows, position
 };
 
 const commands = [
@@ -165,7 +199,18 @@ const commands = [
     target, x: cm, y: cm, w: { type: "number", exclusiveMinimum: 0 }, h: { type: "number", exclusiveMinimum: 0 }, keepRatio: { type: "boolean" }
   }, ["target"], { anyOf: [{ required: ["x"] }, { required: ["y"] }, { required: ["w"] }, { required: ["h"] }] }),
   command("setRotation", { target, degrees: { type: "number" } }, ["target", "degrees"]),
-  command("setFill", { target, color: { oneOf: [color, { type: "null" }] } }, ["target", "color"]),
+  command("setFill", {
+    target,
+    color: { oneOf: [color, { type: "null" }], description: "a colour, or null for no fill" },
+    opacity: { ...opacity, description: "how see-through the fill is; alone it keeps the current colour or gradient" },
+    gradient
+  }, ["target"], {
+    anyOf: [{ required: ["color"] }, { required: ["opacity"] }, { required: ["gradient"] }],
+    not: { required: ["color", "gradient"] }
+  }),
+  command("setShadow", {
+    target, shadow: { oneOf: [shadow, { type: "null" }], description: "null removes the shadow" }
+  }, ["target", "shadow"]),
   command("setLine", { target, color: { oneOf: [color, { type: "null" }] }, widthPt: { type: "number", exclusiveMinimum: 0 }, dash }, ["target"],
     { anyOf: [{ required: ["color"] }, { required: ["widthPt"] }, { required: ["dash"] }] }),
   command("setAnchor", { target, anchor: { type: "string", enum: ["top", "middle", "bottom"] } }, ["target", "anchor"]),
@@ -226,7 +271,14 @@ function describe(error: ErrorObject, value: unknown): string {
     case "pattern": return `格式不对，应为 ${params.pattern}`;
     case "minimum": case "exclusiveMinimum": return `不能小于${error.keyword === "exclusiveMinimum" ? "或等于" : ""} ${params.limit}`;
     case "oneOf": return "必须且只能写出其中一种指向方式（id、name、placeholder、text 之一）";
-    case "anyOf": return "至少要写出一个要修改的字段";
+    case "anyOf": {
+      // The schema of an `anyOf` is its list of alternatives; when each asks for a field, say which.
+      const fields = Array.isArray(error.schema)
+        ? (error.schema as Array<{ required?: string[] }>).flatMap(option => option?.required ?? [])
+        : [];
+      return fields.length > 0 ? `至少要写出其中一个字段：${fields.join("、")}` : "至少要写出一个要修改的字段";
+    }
+    case "not": return "这几个字段不能同时写（例如 color 和 gradient）";
     case "discriminator":
       return params.error === "mapping" || params.error === "tag"
         ? `未知的 op，可用的有：${OPS.join("、")}`

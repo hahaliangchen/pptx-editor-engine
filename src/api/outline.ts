@@ -1,5 +1,6 @@
-import { LineStyle, PptVirtualDocument, ShapeElement, Slide, TextElement } from "../pptx-virtual-dom";
+import { ImageElement, LineStyle, PptVirtualDocument, ShadowStyle, ShapeElement, Slide, TextElement } from "../pptx-virtual-dom";
 import { ChartElement, ChartKind, LegendPosition } from "../charts/model";
+import { splitColor } from "../color";
 import { TableElement, tableText } from "../tables/model";
 import { SceneNode, SlideScene, buildScene, textOf } from "./scene";
 
@@ -8,6 +9,25 @@ export interface CmRect {
   y: number;
   w: number;
   h: number;
+}
+
+export interface OutlineGradient {
+  gradient: {
+    type: "linear" | "radial";
+    /** Degrees: 0 runs left to right, 90 top to bottom. */
+    angle: number;
+    /** Positions are percentages along the gradient. */
+    stops: Array<{ position: number; color: string; opacity?: number }>;
+  };
+}
+
+export interface OutlineShadow {
+  color: string;
+  opacity: number;
+  blurPt: number;
+  distancePt: number;
+  /** Degrees: 0 casts to the right, 90 downwards. */
+  angle: number;
 }
 
 export interface OutlineShape {
@@ -22,7 +42,12 @@ export interface OutlineShape {
   text?: string;
   textTruncated?: boolean;
   style?: { fontSizePt?: number; bold?: boolean; italic?: boolean; color?: string; align?: string };
-  fill?: string | null;
+  /** A colour, null for none, a gradient, or a pattern or picture the commands cannot describe. */
+  fill?: string | null | OutlineGradient | { other: "pattern" | "picture" };
+  /** Opacity of the fill when it is see-through (1 is left out). */
+  opacity?: number;
+  /** The drop shadow, when there is one. */
+  shadow?: OutlineShadow;
   line?: { color: string; widthPt: number; dash: string } | null;
   children?: OutlineShape[];
   /** The text of a table, row by row, and its grid; merged cells make `merged` true. */
@@ -70,6 +95,43 @@ const round = (value: number, digits = 2) => {
 };
 
 export const emuPerPxOf = (slide: Slide, widthPx: number): number => slide.emuPerPx || 12192000 / widthPx;
+
+function describeFill(shape: ShapeElement): { fill: NonNullable<OutlineShape["fill"]> | null; opacity?: number } {
+  const fill = shape.computedStyle?.fill;
+  const plain = (color: string) => {
+    const split = splitColor(color);
+    return { fill: split.hex, ...(split.opacity < 1 ? { opacity: round(split.opacity) } : {}) };
+  };
+  if (!fill) return shape.fill === "transparent" ? { fill: null } : plain(shape.fill);
+  if (fill.type === "none") return { fill: null };
+  if (fill.type === "solid") return plain(fill.color);
+  if (fill.type === "gradient") {
+    return {
+      fill: {
+        gradient: {
+          type: fill.kind,
+          angle: round(fill.angle ?? 0, 1),
+          stops: fill.stops.map(stop => {
+            const split = splitColor(stop.color);
+            return { position: round(stop.position * 100, 1), color: split.hex, ...(split.opacity < 1 ? { opacity: round(split.opacity) } : {}) };
+          })
+        }
+      }
+    };
+  }
+  return { fill: { other: fill.type } };
+}
+
+function describeShadow(shadow: ShadowStyle | undefined, emuPerPx: number): OutlineShadow | undefined {
+  if (!shadow) return undefined;
+  return {
+    color: lower(shadow.color),
+    opacity: round(shadow.opacity),
+    blurPt: round((shadow.blur * emuPerPx) / 12700, 1),
+    distancePt: round((shadow.distance * emuPerPx) / 12700, 1),
+    angle: round(shadow.direction, 1)
+  };
+}
 
 function describeNode(node: SceneNode, emuPerPx: number, maxText: number): OutlineShape {
   const cm = (px: number) => round((px * emuPerPx) / 360000);
@@ -124,11 +186,20 @@ function describeNode(node: SceneNode, emuPerPx: number, maxText: number): Outli
     return out;
   }
 
+  const picture = node.elements.find((element): element is ImageElement => element.type === "image");
+  if (picture) {
+    const shadow = describeShadow(picture.effects?.outerShadow, emuPerPx);
+    if (shadow) out.shadow = shadow;
+  }
+
   const shape = node.elements.find((element): element is ShapeElement => element.type === "shape");
   if (shape && node.kind !== "image") {
     out.shape = shape.shapeType;
-    const fill = shape.computedStyle?.fill;
-    out.fill = fill ? (fill.type === "solid" ? lower(fill.color) : null) : shape.fill === "transparent" ? null : lower(shape.fill);
+    const painted = describeFill(shape);
+    out.fill = painted.fill;
+    if (painted.opacity !== undefined) out.opacity = painted.opacity;
+    const shadow = describeShadow(shape.computedStyle?.effects?.outerShadow, emuPerPx);
+    if (shadow) out.shadow = shadow;
     const line: LineStyle | undefined = shape.computedStyle?.line;
     if (line && line.fill.type === "solid") {
       out.line = { color: lower(line.fill.color), widthPt: round((line.width * emuPerPx) / 12700), dash: line.dash || "solid" };

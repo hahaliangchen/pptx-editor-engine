@@ -4,7 +4,7 @@ import { ShapeStyleOp } from "../editor/shape-ops";
 import { TextOp } from "../editor/text-ops";
 import { paragraphsText } from "../editor/text-model-vdom";
 import { OrderOp } from "../pptx-exporter";
-import { PptVirtualDocument, Rect, TextElement } from "../pptx-virtual-dom";
+import { PptVirtualDocument, Rect, ShapeElement, TextElement } from "../pptx-virtual-dom";
 import { ChartElement, ChartKind, ChartModel } from "../charts/model";
 import { TableElement } from "../tables/model";
 import {
@@ -489,7 +489,53 @@ export class EditApi {
       case "setFill": {
         const { node: found } = await node(command.target);
         this.requirePaintable(found, at("target"));
-        this.editor.applyShapeStyle({ kind: "fill", color: command.color });
+        if (command.gradient) {
+          const gradient = command.gradient as { kind?: "linear" | "radial"; angle?: number; stops: Array<{ position: number; color: string; opacity?: number }> };
+          this.editor.applyShapeStyle({
+            kind: "gradient",
+            gradient: {
+              kind: gradient.kind ?? "linear",
+              angle: gradient.angle ?? 90,
+              stops: gradient.stops.map(stop => ({
+                position: stop.position / 100, color: stop.color, ...(stop.opacity !== undefined ? { opacity: stop.opacity } : {})
+              }))
+            }
+          });
+          if (command.opacity !== undefined) this.editor.applyShapeStyle({ kind: "opacity", opacity: command.opacity });
+        } else if (command.color !== undefined) {
+          this.editor.applyShapeStyle({
+            kind: "fill", color: command.color,
+            ...(command.opacity !== undefined && command.color !== null ? { opacity: command.opacity } : {})
+          });
+        } else {
+          const shape = found.elements.find((candidate): candidate is ShapeElement => candidate.type === "shape");
+          const fill = shape?.computedStyle?.fill;
+          const kind = fill ? fill.type : shape && shape.fill !== "transparent" ? "solid" : "none";
+          if (kind !== "solid" && kind !== "gradient") {
+            throw new ApiError(
+              "NOT_APPLICABLE",
+              `${found.name} ${kind === "none" ? "没有填充" : "的填充是图案或图片"}，不能只改透明度；请同时写 color 或 gradient`,
+              at("opacity")
+            );
+          }
+          this.editor.applyShapeStyle({ kind: "opacity", opacity: command.opacity });
+        }
+        return {};
+      }
+      case "setShadow": {
+        const { node: found } = await node(command.target);
+        if (found.kind === "group" || found.kind === "table" || found.kind === "chart") {
+          const what = found.kind === "group" ? "组合" : found.kind === "table" ? "表格" : "图表";
+          throw new ApiError("NOT_APPLICABLE", `${found.name} 是${what}，不能设置阴影${found.kind === "group" ? "，请指向组合里的形状" : ""}`, at("target"));
+        }
+        const given = command.shadow as { color?: string; opacity?: number; blurPt?: number; distancePt?: number; angle?: number } | null;
+        this.editor.applyShapeStyle({
+          kind: "shadow",
+          shadow: given === null ? null : {
+            color: given.color ?? "#000000", opacity: given.opacity ?? 0.35,
+            blurPt: given.blurPt ?? 6, distancePt: given.distancePt ?? 4, angle: given.angle ?? 45
+          }
+        });
         return {};
       }
       case "setLine": {

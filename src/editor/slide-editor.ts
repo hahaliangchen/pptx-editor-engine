@@ -22,6 +22,7 @@ import { placeholderPrompt } from "./slides";
 import {
   ShapeSnapshot,
   ShapeStyleOp,
+  Styled,
   applyAnchorOp,
   applyShapeStyleOp,
   restoreShape,
@@ -238,6 +239,9 @@ class DeleteCommand implements Command {
 class ShapeStyleCommand implements Command {
   get label(): string {
     if (this.op.kind === "fill") return "填充颜色";
+    if (this.op.kind === "gradient") return "渐变填充";
+    if (this.op.kind === "opacity") return "透明度";
+    if (this.op.kind === "shadow") return "阴影";
     if (this.op.kind === "line") {
       if (this.op.color !== undefined) return "边框颜色";
       return this.op.widthPt !== undefined ? "边框粗细" : "边框线型";
@@ -247,16 +251,16 @@ class ShapeStyleCommand implements Command {
 
   constructor(
     private slide: Slide,
-    private items: Array<{ shape: ShapeElement; before: ShapeSnapshot; after: ShapeSnapshot }>,
+    private items: Array<{ shape: Styled; before: ShapeSnapshot; after: ShapeSnapshot; op?: ShapeStyleOp }>,
     private op: ShapeStyleOp,
     private editor: SlideEditor,
     private host: EditorHost
   ) {}
 
   apply(): void {
-    for (const { shape, after } of this.items) {
+    for (const { shape, after, op } of this.items) {
       restoreShape(shape, after);
-      if (shape.source) this.host.recordStyleOp(shape.source, this.op);
+      if (shape.source) this.host.recordStyleOp(shape.source, op ?? this.op);
     }
     this.editor.afterCommand(this.slide, [], false);
   }
@@ -622,6 +626,12 @@ export class SlideEditor {
       .filter((element): element is ShapeElement => element.type === "shape" && !!element.source && !element.source.readOnlyText);
   }
 
+  private selectedStyled(slide: Slide): Styled[] {
+    return this.selectedObjects(slide).flatMap(object => object.elements)
+      .filter((element): element is Styled =>
+        (element.type === "shape" || element.type === "image") && !!element.source && !element.source.readOnlyText);
+  }
+
   private selectedTexts(slide: Slide): TextElement[] {
     return this.selectedObjects(slide).flatMap(object => object.elements)
       .filter((element): element is TextElement => element.type === "text" && !!element.source && !element.source.readOnlyText);
@@ -780,19 +790,25 @@ export class SlideEditor {
     }
 
     const emu = this.emuPerPx(slide);
-    const shapes = this.selectedShapes(slide);
+    // A drop shadow also suits a picture; every other look change is for shapes.
+    const shapes: Styled[] = op.kind === "shadow" ? this.selectedStyled(slide) : this.selectedShapes(slide);
     // Changing width or dash of a shape without a border should show one.
-    const hasBorder = (shape: ShapeElement) =>
-      shape.computedStyle?.line ? shape.computedStyle.line.fill.type !== "none" : !!shape.border;
+    const hasBorder = (shape: Styled) =>
+      shape.type === "image" ? false
+        : shape.computedStyle?.line ? shape.computedStyle.line.fill.type !== "none" : !!shape.border;
     if (op.kind === "line" && op.color === undefined && shapes.length > 0 && !shapes.some(hasBorder)) {
       op = { ...op, color: "#000000" };
     }
     const items = shapes.map(shape => {
+      // A fill that comes from a theme style is written out from what is drawn now.
+      const own: ShapeStyleOp = op.kind === "opacity" && shape.type === "shape"
+        ? { ...op, base: shape.computedStyle?.fill ? JSON.parse(JSON.stringify(shape.computedStyle.fill)) : undefined }
+        : op;
       const before = snapshotShape(shape);
-      applyShapeStyleOp(shape, op, emu);
+      applyShapeStyleOp(shape, own, emu);
       const after = snapshotShape(shape);
       restoreShape(shape, before);
-      return { shape, before, after };
+      return { shape, before, after, op: own };
     });
     if (items.length === 0) return;
     const command = new ShapeStyleCommand(slide, items, op, this, this.host);
