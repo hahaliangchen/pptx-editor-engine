@@ -1,0 +1,445 @@
+/*
+ * The editor overlay: selection, handles, guides, in-place text editing,
+ * the context menu and the format bar. A page that hosts PptViewer imports
+ * this file and gives the viewer's container the class "canvas-container".
+ */
+
+.canvas-container {
+  --edit-accent: #0a84ff;
+  --edit-guide: #ff2d78;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.canvas-container.is-over-selection {
+  cursor: move;
+}
+
+.edit-layer,
+.edit-guides {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.edit-layer {
+  z-index: 5;
+}
+
+.edit-hover,
+.edit-selection,
+.edit-marquee,
+.edit-badge {
+  position: absolute;
+  display: none;
+  pointer-events: none;
+}
+
+.edit-hover {
+  border: 1px solid color-mix(in srgb, var(--edit-accent) 60%, transparent);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.55);
+  border-radius: 1px;
+}
+
+.edit-selection {
+  border: 1.5px solid var(--edit-accent);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.7), 0 0 0 4px color-mix(in srgb, var(--edit-accent) 14%, transparent);
+  border-radius: 1px;
+}
+
+.edit-selection.is-multi {
+  border-style: dashed;
+}
+
+.edit-handle {
+  position: absolute;
+  width: 11px;
+  height: 11px;
+  margin: -5.5px 0 0 -5.5px;
+  background: #ffffff;
+  border: 1.5px solid var(--edit-accent);
+  border-radius: 50%;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.28);
+  pointer-events: auto;
+  transition: transform 100ms ease, background-color 100ms ease;
+}
+
+.edit-handle::after {
+  content: "";
+  position: absolute;
+  inset: -7px;
+}
+
+.edit-handle:hover {
+  background: var(--edit-accent);
+  transform: scale(1.18);
+}
+
+.edit-handle-nw { left: 0; top: 0; cursor: nwse-resize; }
+.edit-handle-n  { left: 50%; top: 0; cursor: ns-resize; }
+.edit-handle-ne { left: 100%; top: 0; cursor: nesw-resize; }
+.edit-handle-e  { left: 100%; top: 50%; cursor: ew-resize; }
+.edit-handle-se { left: 100%; top: 100%; cursor: nwse-resize; }
+.edit-handle-s  { left: 50%; top: 100%; cursor: ns-resize; }
+.edit-handle-sw { left: 0; top: 100%; cursor: nesw-resize; }
+.edit-handle-w  { left: 0; top: 50%; cursor: ew-resize; }
+
+.edit-selection.no-resize .edit-handle {
+  display: none;
+}
+
+.edit-selection.is-compact .edit-handle-n,
+.edit-selection.is-compact .edit-handle-e,
+.edit-selection.is-compact .edit-handle-s,
+.edit-selection.is-compact .edit-handle-w {
+  display: none;
+}
+
+.edit-marquee {
+  background: color-mix(in srgb, var(--edit-accent) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--edit-accent) 75%, transparent);
+  border-radius: 2px;
+}
+
+.edit-guide {
+  position: absolute;
+  background: var(--edit-guide);
+  opacity: 0.9;
+}
+
+.edit-guide-x { width: 1px; margin-left: -0.5px; }
+.edit-guide-y { height: 1px; margin-top: -0.5px; }
+
+.edit-badge {
+  z-index: 6;
+  padding: 4px 9px;
+  color: #ffffff;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2;
+  white-space: nowrap;
+  background: rgba(29, 29, 31, 0.86);
+  border-radius: 7px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.22);
+  transform: translateX(-50%);
+  backdrop-filter: blur(8px);
+}
+
+@media (max-width: 900px) {
+  .selection-hint {
+    display: none;
+  }
+}
+
+/* ---------- In-place text editing ---------- */
+
+.edit-text {
+  position: absolute;
+  z-index: 7;
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+  pointer-events: auto;
+  cursor: text;
+  outline: 1.5px solid var(--edit-accent);
+  outline-offset: 0;
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--edit-accent) 16%, transparent);
+  border-radius: 1px;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.edit-text-body {
+  width: 100%;
+  outline: none;
+  caret-color: var(--edit-accent);
+  word-break: break-word;
+  line-break: strict;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.edit-text-body ::selection,
+.edit-text-body::selection {
+  background: color-mix(in srgb, var(--edit-accent) 32%, transparent);
+}
+
+.edit-p {
+  min-height: 1em;
+}
+
+.edit-p[data-bullet]::before {
+  content: attr(data-bullet);
+  display: inline-block;
+  width: var(--bullet-width, 1em);
+  color: var(--bullet-color);
+  font-size: var(--bullet-size);
+  line-height: 1;
+  text-indent: 0;
+  user-select: none;
+  pointer-events: none;
+}
+
+.edit-selection.is-editing {
+  border-color: transparent;
+  box-shadow: none;
+}
+
+.edit-selection.is-editing .edit-handle {
+  display: none;
+}
+
+/* ---------- Floating format toolbar ---------- */
+
+.format-toolbar {
+  position: absolute;
+  z-index: 9;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  height: 38px;
+  padding: 0 5px;
+  color: #f5f5f7;
+  background: rgba(36, 36, 40, 0.94);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 11px;
+  box-shadow: 0 8px 26px rgba(0, 0, 0, 0.32), 0 2px 6px rgba(0, 0, 0, 0.2);
+  backdrop-filter: blur(16px);
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(4px) scale(0.98);
+  transition: opacity 120ms ease, transform 120ms ease;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.format-toolbar.is-visible {
+  opacity: 1;
+  pointer-events: auto;
+  transform: none;
+}
+
+.format-button {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  color: inherit;
+  background: transparent;
+  border: 0;
+  border-radius: 7px;
+  cursor: pointer;
+  transition: background-color 100ms ease;
+}
+
+.format-button svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2.2;
+}
+
+.format-button:hover {
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.format-button.is-active {
+  color: #ffffff;
+  background: var(--edit-accent, #0a84ff);
+}
+
+.format-size {
+  min-width: 30px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+.format-divider {
+  width: 1px;
+  height: 18px;
+  margin: 0 4px;
+  background: rgba(255, 255, 255, 0.16);
+}
+
+.format-a {
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 1;
+  margin-top: -3px;
+}
+
+.format-swatch {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: 5px;
+  height: 3px;
+  border-radius: 2px;
+  background: transparent;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.3);
+}
+
+.format-swatch.is-mixed {
+  background: linear-gradient(90deg, #e60012, #ffc000, #00b050, #0070c0) !important;
+}
+
+.format-palette {
+  position: absolute;
+  top: calc(100% + 10px);
+  left: 50%;
+  display: none;
+  grid-template-columns: repeat(8, 20px);
+  gap: 6px;
+  padding: 10px;
+  background: rgba(36, 36, 40, 0.97);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.34);
+  transform: translateX(-50%);
+}
+
+.format-toolbar.is-below .format-palette {
+  top: auto;
+  bottom: calc(100% + 10px);
+}
+
+.format-palette.is-open {
+  display: grid;
+}
+
+.format-chip {
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: 50%;
+  cursor: pointer;
+  transition: transform 100ms ease;
+}
+
+.format-chip:hover {
+  transform: scale(1.18);
+}
+
+.edit-group-frame {
+  position: absolute;
+  display: none;
+  pointer-events: none;
+  border: 1px dashed color-mix(in srgb, var(--edit-accent) 70%, transparent);
+  border-radius: 2px;
+}
+
+/* ---------- Rotation handle ---------- */
+
+.edit-rotate {
+  position: absolute;
+  left: 50%;
+  top: -30px;
+  width: 12px;
+  height: 12px;
+  margin-left: -6px;
+  background: #ffffff;
+  border: 1.5px solid var(--edit-accent);
+  border-radius: 50%;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.28);
+  cursor: grab;
+  pointer-events: auto;
+}
+
+.edit-rotate::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 100%;
+  width: 1.5px;
+  height: 17px;
+  margin-left: -0.75px;
+  background: var(--edit-accent);
+}
+
+.edit-rotate::after {
+  content: "";
+  position: absolute;
+  inset: -8px;
+}
+
+.edit-rotate:hover {
+  background: var(--edit-accent);
+}
+
+.edit-selection.no-rotate .edit-rotate,
+.edit-selection.is-editing .edit-rotate {
+  display: none;
+}
+
+.edit-menu {
+  position: absolute;
+  z-index: 20;
+  min-width: 216px;
+  padding: 5px;
+  color: #1d1d1f;
+  background: rgba(255, 255, 255, 0.94);
+  border: 1px solid rgba(60, 60, 67, 0.16);
+  border-radius: 11px;
+  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.22), 0 2px 8px rgba(0, 0, 0, 0.1);
+  backdrop-filter: blur(22px);
+  pointer-events: auto;
+  user-select: none;
+  -webkit-user-select: none;
+  animation: edit-menu-in 110ms ease-out;
+}
+
+@keyframes edit-menu-in {
+  from {
+    opacity: 0;
+    transform: scale(0.97);
+  }
+}
+
+.edit-menu-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  width: 100%;
+  padding: 6px 10px;
+  color: inherit;
+  font-size: 13px;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  border-radius: 7px;
+  cursor: default;
+}
+
+.edit-menu-item kbd {
+  color: #8e8e93;
+  font: inherit;
+  font-size: 11px;
+}
+
+.edit-menu-item:hover:not(:disabled) {
+  color: #ffffff;
+  background: var(--accent);
+}
+
+.edit-menu-item:hover:not(:disabled) kbd {
+  color: rgba(255, 255, 255, 0.8);
+}
+
+.edit-menu-item:disabled {
+  color: #b8b8bd;
+}
+
+.edit-menu-divider {
+  height: 1px;
+  margin: 5px 8px;
+  background: rgba(60, 60, 67, 0.12);
+}

@@ -13,6 +13,8 @@ import { EditorState, SlideEditor } from "./editor/slide-editor";
 import { EditApi } from "./api/engine";
 import { DocumentSession } from "./document-session";
 import { expandForRender } from "./render-elements";
+import { resolveOpenFamily } from "./page/font-map";
+import { WorkerRenderer } from "./page/worker-renderer";
 
 export interface ViewerOptions {
   container: HTMLElement;
@@ -56,6 +58,7 @@ export default class PptViewer {
   private session: DocumentSession;
   private imageCache: Record<string, HTMLImageElement> = {};
   private registeredFontBytes: Uint8Array[] = [];
+  private workerRenderer: WorkerRenderer | null = null;
   private slideJsonCache = new Map<string, string>();
   private renderedSlideCache = new Map<string, RenderedSlideSnapshot>();
   private fontBackendUrl: string;
@@ -230,22 +233,7 @@ export default class PptViewer {
   }
 
   private resolveBackendFamily(request: FontRequest, catalog: string[]): string {
-    const byLowerName = new Map(catalog.map(family => [family.toLowerCase(), family]));
-    const requested = request.family.trim();
-    const exact = requested ? byLowerName.get(requested.toLowerCase()) : undefined;
-    if (exact && !["sans-serif", "serif", "monospace"].includes(requested.toLowerCase())) {
-      return exact;
-    }
-
-    const candidates = request.eastAsian
-      ? ["Microsoft YaHei", "DengXian", "SimSun", "Noto Sans CJK SC", "Source Han Sans CN"]
-      : ["Aptos", "Calibri", "Arial", "Segoe UI", "Times New Roman"];
-    for (const candidate of candidates) {
-      const available = byLowerName.get(candidate.toLowerCase());
-      if (available) return available;
-    }
-    if (catalog[0]) return catalog[0];
-    throw new Error("Font backend returned an empty font catalog");
+    return resolveOpenFamily(request.family, request.eastAsian, catalog);
   }
 
   private collectPresentationFonts(document: PptVirtualDocument): FontRequest[] {
@@ -318,7 +306,8 @@ export default class PptViewer {
           weight: String(weight),
           style: italic ? "italic" : "normal"
         });
-        document.fonts.add(await face.load());
+        // `add` is typed in lib.dom.iterable, which a host app may not include.
+        (document.fonts as FontFaceSet & { add(face: FontFace): void }).add(await face.load());
       } catch (err) {
         console.warn(`[Font Manager] DOM font registration failed for ${family}`, err);
       }
@@ -533,6 +522,44 @@ export default class PptViewer {
     return thumbnails;
   }
 
+  /**
+   * Page `page` (1-based) as PNG, drawn in a worker so it neither blocks the
+   * editor nor stops while the tab is in the background. The visible canvas is
+   * untouched.
+   */
+  public async renderPagePng(page: number, width = 1024): Promise<Uint8Array> {
+    const presentation = this.presentation;
+    if (!presentation) throw new Error("还没有打开文稿");
+    const slide = presentation.slides[page - 1];
+    if (!slide) throw new Error(`没有第 ${page} 页，文稿共 ${presentation.slides.length} 页`);
+    await this.engineReady;
+    // Edits may have brought in fonts the page has not drawn yet.
+    await this.ensurePresentationFonts({ ...presentation, slides: [slide] });
+    this.workerRenderer ??= new WorkerRenderer();
+    this.workerRenderer.addFonts(this.registeredFontBytes);
+    const elements = expandForRender(slide.elements);
+    const images = new Set<string>();
+    for (const element of elements) {
+      if (element.type === "image") images.add(element.url);
+      else if (element.type === "shape" && element.computedStyle?.fill?.type === "picture" && element.computedStyle.fill.url) {
+        images.add(element.computedStyle.fill.url);
+      }
+    }
+    return this.workerRenderer.render({
+      slideJson: JSON.stringify({ id: slide.id, elements }),
+      slideSize: presentation.size,
+      width: Math.max(1, Math.round(width)),
+      images: [...images]
+    });
+  }
+
+  /** Stop the render worker and release the editor. The viewer cannot be used afterwards. */
+  public dispose(): void {
+    this.workerRenderer?.dispose();
+    this.workerRenderer = null;
+    this.session.dispose();
+  }
+
   /** @deprecated Use loadVirtualDocument. */
   public async loadAST(ast: PresentationAST): Promise<void> {
     await this.loadVirtualDocument({
@@ -744,6 +771,7 @@ export default class PptViewer {
   /** Drop what the view cached for the previous document. */
   private resetView(): void {
     this.hiddenElements.clear();
+    this.workerRenderer?.forgetImages();
     // Fonts differ per document, so the drag renderer is rebuilt on demand.
     this.dragRenderer = null;
     this.dragScratch = null;

@@ -26,3 +26,6 @@ tools/validate-pptx/obj/
 
 # Templates imported from other projects (their content is not ours to publish)
 tools/templates/imported/
+
+# Local runtime and model request logs
+logs/

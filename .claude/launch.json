@@ -7,6 +7,12 @@
       "runtimeArgs": ["rspack", "dev"],
       "port": 3000,
       "autoPort": true
+    },
+    {
+      "name": "font-backend",
+      "runtimeExecutable": "cargo",
+      "runtimeArgs": ["run", "--manifest-path", "rust-backend/Cargo.toml"],
+      "port": 8080
     }
   ]
 }

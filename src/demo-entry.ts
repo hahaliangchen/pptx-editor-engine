@@ -1,3 +1,4 @@
+import { runPageTool } from "./page/page-tools";
 import PptViewer from "./index";
 import { InspectorPanel } from "./editor/inspector-panel";
 import { InsertBar } from "./editor/insert-bar";
@@ -433,6 +434,9 @@ const initializeDemo = () => {
       btnNext.disabled = index === doc.slides.length - 1;
     }
   });
+  // Handle for browser tests and debugging (e.g. pptViewer.renderPagePng(1)).
+  (window as any).pptViewer = viewer;
+  (window as any).pptRunTool = (name: string, args: unknown) => runPageTool(viewer, name, args);
 
   const report = (err: unknown) => alert(err instanceof Error ? err.message : String(err));
   const filmstrip = new Filmstrip(slideList, sidebarCount, {

@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { expandForRender } from "../render-elements";
 import { PptVirtualDocument } from "../pptx-virtual-dom";
+import { OPEN_FONT_MAP } from "../page/font-map";
 
 export interface FontRequest {
   family: string;
@@ -48,8 +49,10 @@ export class FontResolver {
     const key = `${request.family.toLowerCase()}|${request.bold}|${request.italic}|${request.eastAsian}`;
     const cached = this.cache.get(key);
     if (cached) return cached;
+    // Same open-source stand-ins as the browser, so both draw the same glyphs.
+    const family = OPEN_FONT_MAP[request.family.trim().toLowerCase()] ?? request.family;
     const pattern = [
-      request.family,
+      family,
       `weight=${request.bold ? "bold" : "regular"}`,
       `slant=${request.italic ? "italic" : "roman"}`,
       ...(request.eastAsian ? ["lang=zh-cn"] : [])
