@@ -206,6 +206,8 @@ export interface StructureEdits {
   charts: ChartAdd[];
   /** Charts of the opened deck whose data or settings changed, by chart part. */
   chartEdits: Map<string, ChartModel>;
+  /** Whole shapes written anew (an edited table): slide part, then shape id, then the shape's XML. */
+  replaced: Map<string, Map<string, string>>;
 }
 
 export const emptyStructure = (): StructureEdits => ({
@@ -215,7 +217,8 @@ export const emptyStructure = (): StructureEdits => ({
   media: [],
   virtual: new Map(),
   charts: [],
-  chartEdits: new Map()
+  chartEdits: new Map(),
+  replaced: new Map()
 });
 
 export function pushItem<T>(log: Map<string, T[]>, part: string, item: T): void {
@@ -273,6 +276,14 @@ function applyPartEdits(doc: Document, part: string, slides: Slide[], edits: Edi
     const fragment = new DOMParser().parseFromString(inserted.xml, "application/xml");
     if (fragment.getElementsByTagName("parsererror").length > 0 || !spTree) continue;
     spTree.appendChild(doc.importNode(fragment.documentElement, true));
+  }
+
+  // A shape written anew takes the old one's place, before anything addresses it.
+  for (const [shapeId, xml] of edits.structure.replaced.get(part) || []) {
+    const old = findShapeNode(doc, shapeId);
+    const fragment = new DOMParser().parseFromString(xml, "application/xml");
+    if (!old || !old.parentNode || fragment.getElementsByTagName("parsererror").length > 0) continue;
+    old.parentNode.replaceChild(doc.importNode(fragment.documentElement, true), old);
   }
 
   const deletedIds = new Set<string>();
@@ -834,7 +845,7 @@ export async function exportEditedPptx(
     }
     const parts = new Set([
       ...dirty.keys(), ...textEdits.keys(), ...styleEdits.keys(),
-      ...structure.orders.keys(), ...structure.inserts.keys(), ...structure.relAdds.keys()
+      ...structure.orders.keys(), ...structure.inserts.keys(), ...structure.relAdds.keys(), ...structure.replaced.keys()
     ]);
     for (const part of parts) {
       if (listed && !livingParts.has(part)) continue;

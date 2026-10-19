@@ -1,4 +1,14 @@
 import { parseChartXml } from "./charts/parse";
+import { TableCell, TableElement, TableModel } from "./tables/model";
+import {
+  DEFAULT_TABLE_STYLE_ID,
+  StyleBorder,
+  TableStyleDef,
+  TableStylePart,
+  TableStylePartName,
+  builtinDefaultStyle,
+  resolveCellStyle
+} from "./tables/styles";
 import JSZip from "jszip";
 
 import {
@@ -50,6 +60,8 @@ export * from "./pptx-virtual-dom";
 export class PptxParser {
   private zip: JSZip | null = null;
   private currentSlidePart = "";
+  /** Table styles of the deck, by style id. */
+  private tableStyles = new Map<string, TableStyleDef>();
   /** Chart parts the slide being parsed refers to, by relationship id. */
   private currentChartRels: Record<string, string> = {};
   /** presentation.xml defaultTextStyle: the bottom of every placeholder's inheritance chain. */
@@ -172,6 +184,7 @@ export class PptxParser {
     await this.parseThemeColors();
     await this.parseThemeFonts();
     await this.parseThemeStyleMatrix();
+    await this.parseTableStyles();
 
     // 2. Parse Presentation Properties (slide size)
     const size = await this.parsePresentationSize();
@@ -1520,113 +1533,218 @@ export class PptxParser {
 
     const tbl = querySelector(node, "a\\:tbl, tbl");
     if (!tbl) return;
-    const firstCellElement = elements.length;
-    const frameId = querySelector(node, "p\\:cNvPr, cNvPr")?.getAttribute("id");
+    const frameId = querySelector(node, "p\\:cNvPr, cNvPr")?.getAttribute("id") || `${elements.length}`;
+    const source = this.makeSource(isTemplate, frameId, transform, querySelector(node, "p\\:cNvPr, cNvPr")?.getAttribute("name"));
+    const element = await this.parseTableElement(node, tbl, transform, frameId, source);
+    if (element) elements.push(element);
+  }
 
-    // Get position of the graphic frame
-    const xfrm = querySelector(node, "a\\:xfrm, xfrm");
-    if (!xfrm) return;
-    const off = querySelector(xfrm, "a\\:off, off");
-    const ext = querySelector(xfrm, "a\\:ext, ext");
-    if (!off || !ext) return null;
-
-    const ox = parseInt(off.getAttribute("x") || "0", 10);
-    const oy = parseInt(off.getAttribute("y") || "0", 10);
-    const cx = parseInt(ext.getAttribute("cx") || "0", 10);
-    const cy = parseInt(ext.getAttribute("cy") || "0", 10);
-
-    const fx = transform.offsetX + ox * transform.scaleX;
-    const fy = transform.offsetY + oy * transform.scaleY;
-    const fcx = cx * transform.scaleX;
-    const fcy = cy * transform.scaleY;
-
-    // Read column widths from tblGrid
-    const gridCols = querySelectorAll(tbl, "a\\:gridCol, gridCol");
-    const colWidths = gridCols.map(col => parseInt(col.getAttribute("w") || "0", 10) * transform.scaleX);
-
-    // Read rows
-    const rows = querySelectorAll(tbl, "a\\:tr, tr");
-    let currentY = fy;
-
-    for (let r = 0; r < rows.length; r++) {
-      const row = rows[r];
-      const hAttr = row.getAttribute("h");
-      const rowHeight = hAttr ? parseInt(hAttr, 10) * transform.scaleY : (fcy / rows.length);
-
-      const cells = querySelectorAll(row, "a\\:tc, tc");
-      let currentX = fx;
-
-      for (let c = 0; c < cells.length; c++) {
-        const cell = cells[c];
-        const cellWidth = colWidths[c] || (fcx / cells.length);
-
-        // Check merge (gridSpan)
-        const gridSpan = parseInt(cell.getAttribute("gridSpan") || "1", 10);
-        let actualWidth = 0;
-        for (let i = 0; i < gridSpan; i++) {
-          actualWidth += colWidths[c + i] || cellWidth;
+  /** The deck's table styles (ppt/tableStyles.xml), as plain data. */
+  private async parseTableStyles(): Promise<void> {
+    this.tableStyles = new Map();
+    const file = this.zip?.file("ppt/tableStyles.xml");
+    if (!file) return;
+    const doc = new DOMParser().parseFromString(await file.async("text"), "application/xml");
+    const colorOf = (holder: Element): string | null => {
+      // A colour written straight under the node (not inside a nested font reference).
+      const direct = Array.from(holder.childNodes).find((child): child is Element =>
+        child.nodeType === 1 && /^(schemeClr|srgbClr|sysClr|prstClr|scrgbClr)$/.test((child as Element).localName || ""));
+      if (!direct) return null;
+      const wrapper = doc.createElementNS("http://schemas.openxmlformats.org/drawingml/2006/main", "a:solidFill");
+      wrapper.appendChild(direct.cloneNode(true));
+      return this.styleResolver.extractHexColor(wrapper);
+    };
+    const names: TableStylePartName[] = [
+      "wholeTbl", "band1H", "band2H", "band1V", "band2V", "firstCol", "lastCol",
+      "firstRow", "lastRow", "nwCell", "neCell", "swCell", "seCell"
+    ];
+    for (const style of Array.from(doc.getElementsByTagNameNS("*", "tblStyle"))) {
+      const id = style.getAttribute("styleId");
+      if (!id) continue;
+      const def: TableStyleDef = {};
+      for (const name of names) {
+        const node = getDirectChild(style, name);
+        if (!node) continue;
+        const part: TableStylePart = {};
+        const text = getDirectChild(node, "tcTxStyle");
+        if (text) {
+          const color = colorOf(text);
+          if (color) part.textColor = color;
+          if (text.getAttribute("b")) part.bold = text.getAttribute("b") === "on";
+          if (text.getAttribute("i")) part.italic = text.getAttribute("i") === "on";
         }
-
-        // Cell background fill
-        const tcPr = querySelector(cell, "a\\:tcPr, tcPr");
-        let fill = "transparent";
-        let cellBorderColor = "#cccccc";
-
-        if (tcPr) {
-          const solidFill = querySelector(tcPr, "a\\:solidFill, solidFill");
-          if (solidFill) {
-            const color = this.styleResolver.extractHexColor(solidFill);
-            if (color) fill = color;
+        const cell = getDirectChild(node, "tcStyle");
+        if (cell) {
+          const fill = getDirectChild(cell, "fill");
+          if (fill) {
+            const solid = getDirectChild(fill, "solidFill");
+            if (solid) part.fill = this.styleResolver.extractHexColor(solid);
+            else if (getDirectChild(fill, "noFill")) part.fill = null;
           }
-          // Border color styling (accent-based or custom)
-          const lnL = querySelector(tcPr, "a\\:lnL, lnL");
-          if (lnL) {
-            const solidFillLn = querySelector(lnL, "a\\:solidFill, solidFill");
-            if (solidFillLn) {
-              const color = this.styleResolver.extractHexColor(solidFillLn);
-              if (color) cellBorderColor = color;
+          const borders = getDirectChild(cell, "tcBdr");
+          if (borders) {
+            part.borders = {};
+            for (const side of ["left", "right", "top", "bottom", "insideH", "insideV"] as const) {
+              const line = getDirectChild(borders, side);
+              const ln = line && getDirectChild(line, "ln");
+              if (!ln) continue;
+              const solid = getDirectChild(ln, "solidFill");
+              const color = solid ? this.styleResolver.extractHexColor(solid) : null;
+              part.borders[side] = color
+                ? { color, width: parseInt(ln.getAttribute("w") || "12700", 10) }
+                : null;
             }
           }
         }
+        def[name] = part;
+      }
+      this.tableStyles.set(id, def);
+    }
+  }
 
-        // Add cell shape
-        const cellId = `tbl_cell_${r}_${c}_${Math.random().toString(36).substr(2, 5)}`;
-        elements.push({
-          type: "shape",
-          id: `shape_${cellId}`,
-          rect: { x: currentX, y: currentY, w: actualWidth, h: rowHeight },
-          shapeType: "rect",
-          fill,
-          border: { color: cellBorderColor, width: 1 }
-        });
+  private tableStyleFor(id: string | undefined): TableStyleDef | undefined {
+    if (!id) return undefined;
+    const known = this.tableStyles.get(id);
+    if (known) return known;
+    if (id !== DEFAULT_TABLE_STYLE_ID) return undefined;
+    const tint = (hex: string, factor: number) => {
+      const channel = (offset: number) => Math.round(parseInt(hex.slice(offset, offset + 2), 16) * factor + 255 * (1 - factor));
+      return `#${[1, 3, 5].map(offset => channel(offset).toString(16).padStart(2, "0")).join("")}`;
+    };
+    return builtinDefaultStyle(this.themeColors.accent1, this.themeColors.dk1, this.themeColors.lt1, tint);
+  }
 
-        // Cell text content
-        const txBody = querySelector(cell, "a\\:txBody, txBody");
-        if (txBody) {
-          await this.parseTextBody(
-            txBody,
-            currentX,
-            currentY,
-            actualWidth,
-            rowHeight,
-            transform.absoluteUnitScale,
-            cellId,
-            elements,
-            "#333333"
-          );
+  /**
+   * A table frame as one element: its grid, merged cells, and for each cell the
+   * fill, borders and text as the table style and the cell itself give them.
+   */
+  private async parseTableElement(
+    frame: Element,
+    tbl: Element,
+    transform: TransformState,
+    frameId: string,
+    source: ElementSource | undefined
+  ): Promise<TableElement | null> {
+    const xfrm = getDirectChild(frame, "xfrm");
+    const off = xfrm && getDirectChild(xfrm, "off");
+    const ext = xfrm && getDirectChild(xfrm, "ext");
+    if (!off || !ext) return null;
+    const rect = {
+      x: transform.offsetX + parseInt(off.getAttribute("x") || "0", 10) * transform.scaleX,
+      y: transform.offsetY + parseInt(off.getAttribute("y") || "0", 10) * transform.scaleY,
+      w: parseInt(ext.getAttribute("cx") || "0", 10) * transform.scaleX,
+      h: parseInt(ext.getAttribute("cy") || "0", 10) * transform.scaleY
+    };
+    const scale = transform.absoluteUnitScale;
+
+    const properties = getDirectChild(tbl, "tblPr");
+    const on = (name: string) => ["1", "true"].includes(properties?.getAttribute(name) || "");
+    const flags = {
+      firstRow: on("firstRow"), lastRow: on("lastRow"), firstColumn: on("firstCol"),
+      lastColumn: on("lastCol"), bandRow: on("bandRow"), bandColumn: on("bandCol")
+    };
+    const style = this.tableStyleFor(getDirectChild(properties || tbl, "tableStyleId")?.textContent?.trim());
+
+    const grid = getDirectChild(tbl, "tblGrid");
+    const columns = (grid ? getDirectChildren(grid, "gridCol") : []).map(col => parseInt(col.getAttribute("w") || "0", 10) * transform.scaleX);
+    const rowNodes = getDirectChildren(tbl, "tr");
+    const family = this.styleResolver.resolveThemeTypeface("+mn-lt");
+    const eastAsian = this.themeFonts["+mn-Hans"] || this.styleResolver.resolveThemeTypeface("+mn-ea");
+    const toBorder = (border: StyleBorder | null | undefined) =>
+      border ? { color: border.color, width: Math.max(1, border.width * scale) } : null;
+
+    const rows: TableModel["rows"] = [];
+    let merged = false;
+    for (let r = 0; r < rowNodes.length; r++) {
+      const cells: TableCell[] = [];
+      const cellNodes = getDirectChildren(rowNodes[r], "tc");
+      for (let c = 0; c < columns.length; c++) {
+        const node = cellNodes[c];
+        const colSpan = parseInt(node?.getAttribute("gridSpan") || "1", 10) || 1;
+        const rowSpan = parseInt(node?.getAttribute("rowSpan") || "1", 10) || 1;
+        const covered = ["1", "true"].includes(node?.getAttribute("hMerge") || "") || ["1", "true"].includes(node?.getAttribute("vMerge") || "");
+        if (colSpan > 1 || rowSpan > 1 || covered) merged = true;
+
+        const resolved = resolveCellStyle(style, flags, { row: r, col: c, rowSpan, colSpan }, rowNodes.length, columns.length);
+        const tcPr = node && getDirectChild(node, "tcPr");
+        let fill = resolved.fill;
+        const borders = {
+          left: toBorder(resolved.borders.left), right: toBorder(resolved.borders.right),
+          top: toBorder(resolved.borders.top), bottom: toBorder(resolved.borders.bottom)
+        };
+        if (tcPr) {
+          if (getDirectChild(tcPr, "noFill")) fill = null;
+          else if (getDirectChild(tcPr, "solidFill")) fill = this.styleResolver.extractDirectFillColor(tcPr) ?? fill;
+          for (const [side, tag] of [["left", "lnL"], ["right", "lnR"], ["top", "lnT"], ["bottom", "lnB"]] as const) {
+            const line = getDirectChild(tcPr, tag);
+            if (!line) continue;
+            if (getDirectChild(line, "noFill")) {
+              borders[side] = null;
+              continue;
+            }
+            const color = this.styleResolver.extractDirectFillColor(line);
+            if (color) borders[side] = { color, width: Math.max(1, parseInt(line.getAttribute("w") || "12700", 10) * scale) };
+          }
         }
 
-        currentX += actualWidth;
+        const margin = (name: string, fallback: number) => parseInt(tcPr?.getAttribute(name) || String(fallback), 10) * scale;
+        const anchor = tcPr?.getAttribute("anchor");
+        const body = {
+          marginLeft: margin("marL", 91440), marginRight: margin("marR", 91440),
+          marginTop: margin("marT", 45720), marginBottom: margin("marB", 45720),
+          verticalAnchor: anchor === "ctr" ? "middle" as const : anchor === "b" ? "bottom" as const : "top" as const,
+          autoFit: "none" as const, wrap: "square" as const, verticalOverflow: "overflow" as const,
+          horizontalOverflow: "overflow" as const, fontScale: 1, textDirection: "horz" as const
+        };
+        const txBody = node && getDirectChild(node, "txBody");
+        const scratch: SlideElement[] = [];
+        if (txBody && !covered) {
+          await this.parseTextBody(
+            txBody, 0, 0, columns[c] || 1, 1, scale, `cell_${r}_${c}`, scratch,
+            resolved.textColor ?? this.themeColors.dk1,
+            Math.round(18 * 12700 * scale),
+            resolved.bold ?? false,
+            family, eastAsian, null, body
+          );
+        }
+        const text = scratch.find((element): element is TextElement => element.type === "text");
+        cells.push({
+          colSpan, rowSpan, covered, fill, borders,
+          paragraphs: text?.paragraphs ?? [],
+          style: text?.style ?? {
+            fontSize: Math.round(18 * 12700 * scale), color: resolved.textColor ?? this.themeColors.dk1,
+            bold: resolved.bold ?? false, align: "left", fontFamily: family, eastAsianFontFamily: eastAsian
+          },
+          body: text?.body ?? body,
+          text: text?.content ?? ""
+        });
       }
-      currentY += rowHeight;
+      rows.push({ height: parseInt(rowNodes[r].getAttribute("h") || "0", 10) * transform.scaleY, cells });
     }
+    if (columns.length === 0 || rows.length === 0) return null;
 
-    // Every cell belongs to one selectable object: the table frame.
-    const tableSource = this.makeSource(isTemplate, frameId, transform, querySelector(node, "p\\:cNvPr, cNvPr")?.getAttribute("name"));
-    if (tableSource) {
-      tableSource.readOnlyText = true;
-      for (const element of elements.slice(firstCellElement)) element.source = tableSource;
-    }
+    return {
+      type: "table",
+      id: `table_${frameId}`,
+      source,
+      rect,
+      table: { columns, rows, firstRow: flags.firstRow, bandRow: flags.bandRow, firstColumn: flags.firstColumn, merged },
+      pxPerPt: 12700 * scale
+    };
+  }
+
+  /**
+   * Read a table frame from its XML again (after an edit changed it), as it sits
+   * on the slide that `source` names.
+   */
+  public async parseTableXml(xml: string, source: ElementSource): Promise<TableElement | null> {
+    const doc = new DOMParser().parseFromString(xml, "application/xml");
+    const frame = doc.documentElement;
+    const tbl = Array.from(frame.getElementsByTagNameNS("*", "tbl"))[0];
+    if (!tbl) return null;
+    const transform: TransformState = { ...source.xform, absoluteUnitScale: source.xform.scaleX };
+    const element = await this.parseTableElement(frame, tbl, transform, source.shapeId, source);
+    return element;
   }
 
   /**

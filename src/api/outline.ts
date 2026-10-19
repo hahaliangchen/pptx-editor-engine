@@ -1,5 +1,6 @@
 import { LineStyle, PptVirtualDocument, ShapeElement, Slide, TextElement } from "../pptx-virtual-dom";
 import { ChartElement, ChartKind, LegendPosition } from "../charts/model";
+import { TableElement, tableText } from "../tables/model";
 import { SceneNode, SlideScene, buildScene, textOf } from "./scene";
 
 export interface CmRect {
@@ -24,6 +25,8 @@ export interface OutlineShape {
   fill?: string | null;
   line?: { color: string; widthPt: number; dash: string } | null;
   children?: OutlineShape[];
+  /** The text of a table, row by row, and its grid; merged cells make `merged` true. */
+  table?: { rows: string[][]; columns: number; columnWidths: number[]; rowHeights: number[]; merged?: boolean };
   /** The data and settings of a chart; `unsupported` names kinds that are only drawn as a placeholder. */
   chart?: {
     type: ChartKind;
@@ -104,8 +107,25 @@ function describeNode(node: SceneNode, emuPerPx: number, maxText: number): Outli
     return out;
   }
 
+  if (node.kind === "table") {
+    const table = node.elements.find((element): element is TableElement => element.type === "table");
+    if (table) {
+      const frame = table.table;
+      const scaleX = frame.columns.reduce((sum, width) => sum + width, 0) > 0 ? table.rect.w / frame.columns.reduce((sum, width) => sum + width, 0) : 1;
+      const scaleY = frame.rows.reduce((sum, row) => sum + row.height, 0) > 0 ? table.rect.h / frame.rows.reduce((sum, row) => sum + row.height, 0) : 1;
+      out.table = {
+        rows: tableText(frame),
+        columns: frame.columns.length,
+        columnWidths: frame.columns.map(width => cm(width * scaleX)),
+        rowHeights: frame.rows.map(row => cm(row.height * scaleY)),
+        ...(frame.merged ? { merged: true } : {})
+      };
+    }
+    return out;
+  }
+
   const shape = node.elements.find((element): element is ShapeElement => element.type === "shape");
-  if (shape && node.kind !== "image" && node.kind !== "table") {
+  if (shape && node.kind !== "image") {
     out.shape = shape.shapeType;
     const fill = shape.computedStyle?.fill;
     out.fill = fill ? (fill.type === "solid" ? lower(fill.color) : null) : shape.fill === "transparent" ? null : lower(shape.fill);

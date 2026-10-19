@@ -65,6 +65,7 @@ export async function openHarness(parts: DeckParts) {
     allocateRelationshipId: async () => "rId9",
     allocateMediaPath: extension => `ppt/media/image1.${extension}`,
     allocateChartParts: () => ({ part: "ppt/charts/chart1.xml", workbook: "ppt/embeddings/Microsoft_Excel_Sheet1.xlsx" }),
+    parseTable: async () => null,
     cloneChart: async model => ({ part: "ppt/charts/chart2.xml", add: { part: "ppt/charts/chart2.xml", workbook: "ppt/embeddings/Microsoft_Excel_Sheet2.xlsx", model } }),
     themePalette: () => ["#4472c4", "#ed7d31", "#a5a5a5", "#ffc000", "#5b9bd5", "#70ad47"],
     resolveRelationships: async () => ({ ids: new Map(), adds: [] })

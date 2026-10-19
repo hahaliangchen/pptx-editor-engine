@@ -1,4 +1,5 @@
 import type { ChartElement } from "./charts/model";
+import type { TableElement } from "./tables/model";
 
 export interface Rect {
   x: number;
@@ -342,7 +343,7 @@ export interface ImageCrop {
 /** The elements the renderer draws as they are. */
 export type RenderElement = TextElement | ShapeElement | ImageElement;
 
-export type SlideElement = RenderElement | ChartElement;
+export type SlideElement = RenderElement | ChartElement | TableElement;
 
 export interface Slide {
   id: string;

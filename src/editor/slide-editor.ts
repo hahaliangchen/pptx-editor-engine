@@ -1,5 +1,7 @@
 import { ChartAdd, ChartElement, ChartModel, cloneChart } from "../charts/model";
 import { CHART_REL_TYPE, graphicFrameXml } from "../charts/write";
+import { TableElement, TableModel } from "../tables/model";
+import { NewTable, buildTableXml } from "../tables/xml";
 import { ElementSource, GroupRef, Rect, ShapeElement, Slide, SlideElement, TextElement, TextParagraph } from "../pptx-virtual-dom";
 import { Command, History, HistoryEntry } from "./history";
 import { LINE_BREAK, TextFormat, TextOp, applyTextOp, diffText } from "./text-ops";
@@ -62,6 +64,8 @@ export interface EditorHost {
   allocateChartParts(): { part: string; workbook: string };
   /** The deck's six accent colours, for charts that name no colours. */
   themePalette(): string[];
+  /** Read a table frame's XML (after it was edited) into a table element placed like `source`. */
+  parseTable(xml: string, source: ElementSource): Promise<TableElement | null>;
   /** Give a copy of a chart element's model a chart part of its own (see `cloneChartParts`). */
   cloneChart(model: ChartModel): Promise<{ part: string; add?: ChartAdd }>;
   /** Relationship ids to use in `targetPart` for relationships that belong to `sourcePart`. */
@@ -394,6 +398,51 @@ class ChartCommand implements Command {
 
   apply(): void { this.write(this.after); }
   revert(): void { this.write(this.before); }
+}
+
+class TableCommand implements Command {
+  private previous: string | undefined;
+
+  constructor(
+    private slide: Slide,
+    private element: TableElement,
+    private before: { table: TableModel; rect: Rect },
+    private after: { table: TableModel; rect: Rect; xml: string },
+    private editor: SlideEditor,
+    private host: EditorHost,
+    public readonly label: string
+  ) {}
+
+  private replaced(): Map<string, string> {
+    const structure = this.host.structure();
+    const part = this.element.source!.part;
+    let shapes = structure.replaced.get(part);
+    if (!shapes) {
+      shapes = new Map();
+      structure.replaced.set(part, shapes);
+    }
+    return shapes;
+  }
+
+  apply(): void {
+    const shapes = this.replaced();
+    const id = this.element.source!.shapeId;
+    this.previous = shapes.get(id);
+    shapes.set(id, this.after.xml);
+    this.element.table = JSON.parse(JSON.stringify(this.after.table));
+    this.element.rect = { ...this.after.rect };
+    this.editor.afterCommand(this.slide, [this.element.source!], false);
+  }
+
+  revert(): void {
+    const shapes = this.replaced();
+    const id = this.element.source!.shapeId;
+    if (this.previous === undefined) shapes.delete(id);
+    else shapes.set(id, this.previous);
+    this.element.table = JSON.parse(JSON.stringify(this.before.table));
+    this.element.rect = { ...this.before.rect };
+    this.editor.afterCommand(this.slide, [this.element.source!], false);
+  }
 }
 
 class CompositeCommand implements Command {
@@ -1260,6 +1309,64 @@ export class SlideEditor {
     const slide = this.host.getSlide();
     if (!slide || !slide.elements.includes(element)) return;
     const command = new ChartCommand(slide, element, cloneChart(element.chart), cloneChart(next), this, this.host, label);
+    command.apply();
+    this.history.record(command);
+  }
+
+  /** Add a table to the current slide; `rect` is in slide pixels (height is a minimum), centred when absent. */
+  public async createTable(spec: {
+    rows: string[][];
+    header: boolean;
+    fontPt: number;
+    rect?: Rect;
+    columnWidthsPx?: number[];
+    name?: string;
+  }): Promise<CreatedShape | null> {
+    const slide = this.host.getSlide();
+    const size = this.host.getSlideSize();
+    const part = slide?.part;
+    if (!slide || !size || !part) return null;
+    if (this.textSession) this.endTextEdit();
+    this.setTool(null);
+
+    const id = this.host.allocateShapeId(part);
+    const base = this.slideTransform(slide);
+    const rect = spec.rect ?? { x: size.width * 0.1, y: size.height * 0.2, w: size.width * 0.8, h: 0 };
+    const name = spec.name || `表格 ${id}`;
+    const table: NewTable = {
+      rows: spec.rows,
+      header: spec.header,
+      width: Math.round(rect.w / base.scaleX),
+      ...(rect.h > 0 ? { height: Math.round(rect.h / base.scaleY) } : {}),
+      ...(spec.columnWidthsPx ? { columnWidths: spec.columnWidthsPx.map(width => Math.round(width / base.scaleX)) } : {}),
+      fontPt: spec.fontPt,
+      accent: this.host.themePalette()[0] || "#4472c4"
+    };
+    const xml = buildTableXml(id, name, { x: Math.round(rect.x / base.scaleX), y: Math.round(rect.y / base.scaleY) }, table);
+    const source: ElementSource = { part, shapeId: id, name, xform: base };
+    const element = await this.host.parseTable(xml, source);
+    if (!element) return null;
+    this.commitInserted(slide, part, [{ elements: [element], inserted: { id, xml }, adds: [], owner: source }], "插入表格");
+    return { id, name, part };
+  }
+
+  /** Change a table by rewriting its XML; the table is read again so it is drawn as the file will show it. */
+  public async updateTable(element: TableElement, edit: (xml: string) => string, label = "修改表格"): Promise<void> {
+    const slide = this.host.getSlide();
+    const source = element.source;
+    if (!slide || !source || !slide.elements.includes(element)) return;
+    if (source.groups?.length) throw new Error("暂不支持修改组合里的表格");
+    const snapshot = await this.host.materialize(source);
+    if (!snapshot) throw new Error("找不到这个表格");
+    const xml = edit(snapshot.xml);
+    const parsed = await this.host.parseTable(xml, source);
+    if (!parsed) throw new Error("表格改动后无法读取");
+    const command = new TableCommand(
+      slide, element,
+      { table: JSON.parse(JSON.stringify(element.table)), rect: { ...element.rect } },
+      { table: parsed.table, rect: parsed.rect, xml },
+      this, this.host, label
+    );
     command.apply();
     this.history.record(command);
   }

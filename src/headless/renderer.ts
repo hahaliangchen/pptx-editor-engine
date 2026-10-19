@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { resolveObjectURL } from "node:buffer";
 import { createCanvas, loadImage } from "@napi-rs/canvas";
-import { expandForRender } from "../charts/layout";
+import { expandForRender } from "../render-elements";
 import { PptVirtualDocument, Slide } from "../pptx-virtual-dom";
 import { FontResolver, collectFontRequests } from "./fonts";
 import { installNodeEnv } from "./node-env";

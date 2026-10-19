@@ -12,7 +12,7 @@ import * as wasm from "../rust-engine/pkg/ppt_engine";
 import { EditorState, SlideEditor } from "./editor/slide-editor";
 import { EditApi } from "./api/engine";
 import { DocumentSession } from "./document-session";
-import { expandForRender } from "./charts/layout";
+import { expandForRender } from "./render-elements";
 
 export interface ViewerOptions {
   container: HTMLElement;
@@ -365,6 +365,15 @@ export default class PptViewer {
           if (font.family) font.family = latinFallbacks.get(font.family.toLowerCase()) || font.family;
           if (font.eastAsianFamily) {
             font.eastAsianFamily = eastAsianFallbacks.get(font.eastAsianFamily.toLowerCase()) || font.eastAsianFamily;
+          }
+          continue;
+        }
+        if (element.type === "table") {
+          for (const row of element.table.rows) {
+            for (const cell of row.cells) {
+              applyBackendFamily(cell.style);
+              for (const paragraph of cell.paragraphs) for (const run of paragraph.runs) applyBackendFamily(run.style);
+            }
           }
           continue;
         }

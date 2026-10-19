@@ -6,6 +6,10 @@ import { paragraphsText } from "../editor/text-model-vdom";
 import { OrderOp } from "../pptx-exporter";
 import { PptVirtualDocument, Rect, TextElement } from "../pptx-virtual-dom";
 import { ChartElement, ChartKind, ChartModel } from "../charts/model";
+import { TableElement } from "../tables/model";
+import {
+  CellStyleChange, TableEditError, deleteColumn, deleteRow, insertColumn, insertRow, setCellStyle, setCellText, tableShape
+} from "../tables/xml";
 import { ApiError } from "./errors";
 import { ChartFields, applyChartFields, newChart } from "./charts";
 import { Outline, OutlineOptions, buildOutline, emuPerPxOf } from "./outline";
@@ -33,6 +37,10 @@ export interface EditorPort {
   insertImage(image: DecodedImage & { name: string }): Promise<CreatedShape | null>;
   createChart(spec: { chart: ChartModel; rect?: Rect; name?: string }): Promise<CreatedShape | null>;
   updateChart(element: ChartElement, next: ChartModel, label?: string): void;
+  createTable(spec: {
+    rows: string[][]; header: boolean; fontPt: number; rect?: Rect; columnWidthsPx?: number[]; name?: string;
+  }): Promise<CreatedShape | null>;
+  updateTable(element: TableElement, edit: (xml: string) => string, label?: string): Promise<void>;
 }
 
 export interface DecodedImage {
@@ -176,7 +184,7 @@ export class EditApi {
     if (node.kind === "group" || node.kind === "table" || node.kind === "chart" || !element) {
       const why = node.kind === "group" ? "组合本身没有文字，请指向组合里的具体形状"
         : node.kind === "chart" ? "图表的标题和数据请用 setChart 修改"
-        : node.kind === "table" ? "暂不支持修改表格里的文字"
+        : node.kind === "table" ? "表格里的文字请用 setCell 或 setTable 修改"
         : "这个对象没有文字框";
       throw new ApiError("NOT_APPLICABLE", `${node.name}：${why}`, path);
     }
@@ -187,6 +195,22 @@ export class EditApi {
     if (node.kind === "image" || node.kind === "table" || node.kind === "chart") {
       const what = node.kind === "image" ? "图片" : node.kind === "chart" ? "图表" : "表格";
       throw new ApiError("NOT_APPLICABLE", `${node.name} 是${what}，没有填充和边框可以设置`, path);
+    }
+  }
+
+  private tableElementOf(node: SceneNode, path: string): TableElement {
+    const element = node.elements.find((candidate): candidate is TableElement => candidate.type === "table");
+    if (!element) throw new ApiError("NOT_APPLICABLE", `${node.name} 不是表格`, path);
+    return element;
+  }
+
+  /** Run a table edit; what the table cannot take is reported as a command error, not a crash. */
+  private async editTable(element: TableElement, edit: (xml: string) => string, path: string): Promise<void> {
+    try {
+      await this.editor.updateTable(element, edit);
+    } catch (error) {
+      if (error instanceof TableEditError) throw new ApiError("NOT_APPLICABLE", error.message, path);
+      throw error;
     }
   }
 
@@ -324,6 +348,86 @@ export class EditApi {
         return {};
       }
 
+      // ---- tables
+      case "addTable": {
+        const scene = resolveSlide(context.scenes, command.slide, at("slide"));
+        await this.deck.showSlide(scene.index - 1);
+        const rows = (command.rows as string[][]).map(row => row.map(String));
+        const toPx = (value: number) => (value * CM) / this.emuPerPx(scene);
+        const created = await this.editor.createTable({
+          rows,
+          header: command.header !== false,
+          fontPt: command.fontSizePt ?? 14,
+          name: command.name,
+          ...(command.rect ? { rect: { x: toPx(command.rect.x), y: toPx(command.rect.y), w: toPx(command.rect.w), h: toPx(command.rect.h) } } : {}),
+          ...(command.columnWidths ? { columnWidthsPx: (command.columnWidths as number[]).map(toPx) } : {})
+        });
+        if (!created) throw new ApiError("FAILED", "无法插入表格", path);
+        this.register(aliases, command.as, created);
+        return this.createdResult(scene, created);
+      }
+      case "setCell": {
+        const { node: found } = await node(command.target);
+        const element = this.tableElementOf(found, at("target"));
+        const style: CellStyleChange = {};
+        for (const key of ["bold", "italic", "color", "fontSizePt", "align", "fill"] as const) {
+          if (command[key] !== undefined) (style as Record<string, unknown>)[key] = command[key];
+        }
+        await this.editTable(element, xml => {
+          let next = xml;
+          if (command.text !== undefined) next = setCellText(next, command.row - 1, command.col - 1, String(command.text));
+          if (Object.keys(style).length > 0) next = setCellStyle(next, command.row - 1, command.col - 1, style);
+          return next;
+        }, at("row"));
+        return {};
+      }
+      case "setTable": {
+        const { node: found } = await node(command.target);
+        const element = this.tableElementOf(found, at("target"));
+        const rows = (command.rows as string[][]).map(row => row.map(String));
+        await this.editTable(element, xml => {
+          let next = xml;
+          const wanted = { rows: rows.length, columns: rows.reduce((most, row) => Math.max(most, row.length), 1) };
+          let shape = tableShape(next);
+          if (shape.merged && (shape.rows !== wanted.rows || shape.columns !== wanted.columns)) {
+            throw new TableEditError("这个表格有合并单元格，行数和列数必须与现在一致才能整体替换");
+          }
+          while (shape.rows < wanted.rows) { next = insertRow(next, shape.rows); shape = tableShape(next); }
+          while (shape.rows > wanted.rows) { next = deleteRow(next, shape.rows - 1); shape = tableShape(next); }
+          while (shape.columns < wanted.columns) { next = insertColumn(next, shape.columns); shape = tableShape(next); }
+          while (shape.columns > wanted.columns) { next = deleteColumn(next, shape.columns - 1); shape = tableShape(next); }
+          rows.forEach((row, r) => {
+            for (let c = 0; c < wanted.columns; c++) {
+              try {
+                next = setCellText(next, r, c, row[c] ?? "");
+              } catch (error) {
+                // A cell covered by a merge has no text of its own.
+                if (!(error instanceof TableEditError) || !error.message.includes("盖住")) throw error;
+              }
+            }
+          });
+          return next;
+        }, path);
+        return {};
+      }
+      case "insertRow":
+      case "deleteRow":
+      case "insertColumn":
+      case "deleteColumn": {
+        const { node: found } = await node(command.target);
+        const element = this.tableElementOf(found, at("target"));
+        const op = command.op as string;
+        const index = (op === "insertRow" || op === "insertColumn" ? command.at : op === "deleteRow" ? command.row : command.col) - 1;
+        await this.editTable(element, xml => {
+          const text = command.text as string[] | undefined;
+          if (op === "insertRow") return insertRow(xml, index, text);
+          if (op === "deleteRow") return deleteRow(xml, index);
+          if (op === "insertColumn") return insertColumn(xml, index, text);
+          return deleteColumn(xml, index);
+        }, path);
+        return {};
+      }
+
       // ---- text
       case "setText": {
         const { node: found } = await node(command.target);
@@ -374,8 +478,9 @@ export class EditApi {
       }
       case "setRotation": {
         const { node: found } = await node(command.target);
-        if (found.kind === "group" || found.kind === "chart") {
-          throw new ApiError("NOT_APPLICABLE", `${found.name} 是${found.kind === "chart" ? "图表" : "组合"}，不能旋转`, at("target"));
+        if (found.kind === "group" || found.kind === "chart" || found.kind === "table") {
+          const what = found.kind === "chart" ? "图表" : found.kind === "table" ? "表格" : "组合";
+          throw new ApiError("NOT_APPLICABLE", `${found.name} 是${what}，不能旋转`, at("target"));
         }
         this.editor.setRotationDegrees(command.degrees);
         return {};

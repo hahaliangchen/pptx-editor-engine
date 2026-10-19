@@ -41,7 +41,7 @@ const unionRect = (rects: Rect[]): Rect => {
 function leafKind(elements: SlideElement[]): NodeKind {
   if (elements.some(element => element.type === "image")) return "image";
   if (elements.some(element => element.type === "chart")) return "chart";
-  if (elements.some(element => element.source?.readOnlyText)) return "table";
+  if (elements.some(element => element.type === "table" || element.source?.readOnlyText)) return "table";
   const shape = elements.find((element): element is ShapeElement => element.type === "shape");
   if (shape && LINES.has(shape.shapeType)) return "line";
   const painted = shape && (shape.fill !== "transparent" || !!shape.border);

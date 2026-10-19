@@ -115,6 +115,7 @@ export class DocumentSession {
       allocateMediaPath: extension => this.allocateMediaPath(extension),
       allocateChartParts: () => this.allocateChartParts(),
       cloneChart: model => this.cloneChart(model),
+      parseTable: (xml, source) => this.parser.parseTableXml(xml, source),
       themePalette: () => this.parser.themeAccents(),
       resolveRelationships: (target, source, relationships) => this.resolveRelationships(target, source, relationships),
       recordStyleOp: (source, op) => pushOp(this.styleEdits, source, op),

@@ -1,4 +1,4 @@
-import { FillStyle, Rect, RenderElement, ShapeElement, SlideElement, TextElement } from "../pptx-virtual-dom";
+import { FillStyle, Rect, RenderElement, ShapeElement, TextElement } from "../pptx-virtual-dom";
 import { ChartElement, ChartModel, formatNumber, seriesColor, sliceColor } from "./model";
 
 const AXIS_LINE = "#bfbfbf";
@@ -508,14 +508,4 @@ function drawCartesian(out: Builder, chart: ChartModel, region: Region, u: numbe
     });
   }
   void zero;
-}
-
-/** Replace every chart in `elements` by the shapes and text that draw it. */
-export function expandForRender(elements: SlideElement[]): RenderElement[] {
-  const out: RenderElement[] = [];
-  for (const element of elements) {
-    if (element.type === "chart") out.push(...expandChart(element));
-    else out.push(element);
-  }
-  return out;
 }

@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { expandForRender } from "../charts/layout";
+import { expandForRender } from "../render-elements";
 import { PptVirtualDocument } from "../pptx-virtual-dom";
 
 export interface FontRequest {

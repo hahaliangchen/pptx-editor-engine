@@ -45,6 +45,12 @@ const chartSeries = {
   }
 };
 const legendPosition = { type: "string", enum: ["top", "bottom", "left", "right", "none"] };
+const tableRows = {
+  type: "array", minItems: 1, maxItems: 60,
+  description: "the text of the table row by row; the first row is the header",
+  items: { type: "array", minItems: 1, maxItems: 20, items: { type: "string" } }
+};
+const position = { type: "integer", minimum: 1, description: "1 = first" };
 const align = { type: "string", enum: ["left", "center", "right"] };
 const dash = { type: "string", enum: ["solid", "dash", "dot"] };
 const lineStyle = {
@@ -112,6 +118,26 @@ const commands = [
   }, ["target"], {
     anyOf: ["type", "categories", "series", "title", "legend", "dataLabels", "stacked"].map(field => ({ required: [field] }))
   }),
+
+  command("addTable", {
+    slide: slideRef, rows: tableRows,
+    header: { type: "boolean", description: "style the first row as a header (default true)" },
+    columnWidths: { type: "array", minItems: 1, items: { type: "number", exclusiveMinimum: 0 }, description: "centimetres, one per column; equal when absent" },
+    fontSizePt: { type: "number", exclusiveMinimum: 0 },
+    rect, name: { type: "string" }, as: alias
+  }, ["slide", "rows"]),
+  command("setTable", { target, rows: tableRows }, ["target", "rows"]),
+  command("setCell", {
+    target, row: position, col: position, text: { type: "string" },
+    bold: { type: "boolean" }, italic: { type: "boolean" }, color, fontSizePt: { type: "number", exclusiveMinimum: 0 },
+    align, fill: { oneOf: [color, { type: "null" }], description: "background colour; null for none" }
+  }, ["target", "row", "col"], {
+    anyOf: ["text", "bold", "italic", "color", "fontSizePt", "align", "fill"].map(field => ({ required: [field] }))
+  }),
+  command("insertRow", { target, at: position, text: { type: "array", items: { type: "string" } } }, ["target", "at"]),
+  command("deleteRow", { target, row: position }, ["target", "row"]),
+  command("insertColumn", { target, at: position, text: { type: "array", items: { type: "string" } } }, ["target", "at"]),
+  command("deleteColumn", { target, col: position }, ["target", "col"]),
 
   command("setText", { target, text: { type: "string" } }, ["target", "text"]),
   command("replaceText", {

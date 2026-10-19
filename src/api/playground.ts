@@ -57,6 +57,28 @@ const EXAMPLES: Example[] = [
     }]
   },
   {
+    title: "加表格并改一个单元格",
+    commands: {
+      label: "加表格",
+      commands: [
+        {
+          op: "addTable", slide: 1, name: "销售表",
+          rows: [["产品", "销量", "占比"], ["甲", "120", "40%"], ["乙", "90", "30%"], ["丙", "90", "30%"]],
+          rect: { x: 2, y: 8, w: 20, h: 6 }
+        },
+        { op: "setCell", target: { slide: 1, name: "销售表" }, row: 2, col: 2, text: "135", bold: true, color: "#C00000" },
+        { op: "insertRow", target: { slide: 1, name: "销售表" }, at: 3, text: ["新增", "1", "0%"] }
+      ]
+    }
+  },
+  {
+    title: "整体替换表格内容",
+    commands: [{
+      op: "setTable", target: { slide: 1, name: "销售表" },
+      rows: [["月份", "收入"], ["1 月", "10"], ["2 月", "20"], ["3 月", "30"], ["4 月", "40"]]
+    }]
+  },
+  {
     title: "复制本页并在新页改字",
     commands: [{ op: "duplicateSlide", slide: 1 }, { op: "setText", target: { slide: 2, placeholder: "title" }, text: "第二页标题" }]
   },
