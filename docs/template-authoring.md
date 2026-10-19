@@ -127,27 +127,34 @@ ai-ppt-view 已经有一个"模板制作"页（路由 `/template-authoring`，`s
 
 ### 4.3 私有模板放在哪
 
-模板目录正在从本地文件夹迁到数据库 + 对象存储（`ppt_deck_templates` / `ppt_deck_template_versions`，
-`object_templates.go`，这部分是别人还没提交的改动，**实现前要和做迁移的人对齐**）。私有模板直接放进这套目录：
+私有模板和公共模板放在同一套模板目录里（数据库表 `ppt_deck_templates` / `ppt_deck_template_versions` + 对象存储，
+`object_templates.go`），在 `ppt_deck_templates` 上加"所属"和"谁可以使用"（2026-10-19 定）：
 
-| 表 | 新增的列 | 说明 |
+| 新增的列 | 类型 | 说明 |
 |---|---|---|
-| `ppt_deck_templates` | `owner_id`（0 = 公共） | 私有模板的主人 |
+| `owner_id` | 整数，默认 0 | 模板属于谁。0 = 系统模板（现有的 25 个） |
+| `visibility` | 字符串，默认 `public` | 谁可以使用：`private` 只有主人；`public` 所有人；`shared` 主人加上 `shared_with` 里的人 |
+| `shared_with` | JSON，可空 | `visibility = shared` 时用：`{"users": [用户ID…], "authorities": [角色ID…]}` |
 
-- 私有模板的 id 用 `u<用户ID>-<随机串>`，不会和公共模板重名；显示名放在 `label` 里，可以重复、可以改。
+- 现有模板：`owner_id = 0`、`visibility = public`，行为不变。
+- 第一版做出来的模板：`owner_id = 当前用户`、`visibility = private`。
+- 以后"发布给所有人"改成 `public`，"分享给某些人或某个角色"改成 `shared` 并写 `shared_with`，都不需要再改表。
+- 能不能用只在一个函数里判断：`canUseTemplate(template, userID, authorityIDs)`。主人永远能用；
+  只有主人能改名、删除、改 `visibility`。
+- 列表按"主人是我，或 `public`，或 `shared` 且包含我或我的角色"取。模板总数不多，`shared_with` 的判断可以在 Go 里做，不依赖 MySQL 的 JSON 查询。
+- 私有模板的 id 用 `u<用户ID>-<随机串>`，不会和系统模板重名；显示名放在 `label` 里，可以重复、可以改。
 - 对象存储路径照常用 `TemplatePrefix(id, version)`。
-- 以后"发布给所有人"：把 `owner_id` 改成 0（或复制一份公共模板），不需要改结构。
 
 需要改的地方：
 
 | 位置 | 改动 |
 |---|---|
-| `ListObjectTemplates` / `Templates()` | 加上用户参数：返回公共模板 + 这个用户的模板 |
-| `objectTemplate(ctx, id, version)` | 加上用户参数：私有模板只有主人能取到 |
+| `ListObjectTemplates` / `Templates()` | 加上用户参数：只返回 `canUseTemplate` 通过的模板 |
+| `objectTemplate(ctx, id, version)` | 加上用户参数：`canUseTemplate` 不通过时当作没有这个模板 |
 | `templateDeck(id)`（本地模式） | 同上；本地模式下私有模板放在 `ProjectRoot/templates/<id>/` |
 | `list_templates` 工具 | 自己的模板标出 `"mine": true`，Agent 可以告诉用户"这是你的模板" |
-| `skill:pptx_templates/<id>/design_spec.md` | 私有模板的说明用另一个前缀（如 `template:<id>/design_spec.md`），读取时检查主人 |
-| `init_project`、`use_template` | 传入当前用户，取模板时检查主人 |
+| `skill:pptx_templates/<id>/design_spec.md` | 私有模板的说明用另一个前缀（如 `template:<id>/design_spec.md`），读取时用 `canUseTemplate` 检查 |
+| `init_project`、`use_template` | 传入当前用户，取模板时用 `canUseTemplate` 检查 |
 
 ### 4.4 Agent 怎么知道在做模板
 
@@ -284,24 +291,24 @@ Agent 那边不受影响：`list_templates` 工具带着用户身份，直接返
 | 步骤 | 仓库 | 内容 | 完成的标准 |
 |---|---|---|---|
 | 1 | pptx-editor-engine | `checkTemplate`、`suggestPlaceholders`、`copySlideAsRole`、`templateDesignFacts`、`check_template` 工具 | vitest：用元景那份 PPT 做出 4 页模板，`checkTemplate` 没有问题，`build_deck` 能生成 |
-| 2 | ai-ppt-server | `kind` 列、模板草稿接口、`publish`、`owner_id` 和按用户过滤的模板目录 | Go 测试：别的用户看不到、用不了私有模板；复查拦得住缺角色的模板 |
+| 2 | ai-ppt-server | `kind` 列、模板草稿接口、`publish`、`owner_id` 和按用户过滤的模板目录 | Go 测试：`private` 的模板别人看不到、用不了，`public` 所有人能用，`shared` 只有名单里的人能用；复查拦得住缺角色的模板 |
 | 3 | ai-ppt-view、ai-ppt-server | 草稿列表、制作页、试生成、保存为模板、新建页显示"我的"；删掉旧的 SVG 模板制作代码 | `npm run test:ppt-agent` 里加一条：上传 → 自动写入 → 保存 → 新建时能选到 |
 | 4 | ai-ppt-server | SKILL.md"模板制作"一节、新的 `get_project` 工具 | 用真模型对元景那份 PPT 走一遍 AI 标注 |
 | 5 | 全部 | 用元景那份 PPT 在真实页面里完整走一遍 | 做出的模板能生成一份 10 页左右的稿子，`check_layout` 没有严重问题 |
 
 步骤 1 和 2 互不依赖，可以同时做；3 依赖 1 和 2；4 依赖 1。
 
-## 9. 已定和待定的问题
+## 9. 已定的问题
 
 已定（2026-10-19）：
 
-- 模板先只给制作者自己用；以后再加发布给所有人（结构已预留）。
+- 模板先只给制作者自己用；表上加"所属"和"谁可以使用"两项，以后发布给所有人或分享给某些人不用再改表（见 4.3）。
 - 旧的 SVG 模板制作代码直接删掉，表由你手动删（见第 2 节）。
 - 每个用户最多 50 个私有模板，每个最大 64 MB；草稿也算在 50 个里。超过时上传和保存都提示先删掉旧的。
 - "历史会话"里模板制作产生的对话保留，标成"模板制作"，点开回到模板制作页（见 4.1）。
 - 上传的 PPT 用了非开源字体时，**保存为模板前提醒用户**：列出这些字体和页面上实际显示用的替代字体，说明生成的文件里保留原字体名，
   在装了这些字体的电脑上打开效果更准；用户确认后继续保存。
 
-待定：
+- 模板目录的新表（`ppt_deck_templates` 等）现在没有别人在用，直接在上面加列，不需要和别人对齐。
 
-1. 模板目录的数据库 + 对象存储迁移还没提交，私有模板要建在它上面。实现前要确认这套表结构不会再变。
+没有待定的问题了。
