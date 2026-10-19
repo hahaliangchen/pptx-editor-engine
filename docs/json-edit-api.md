@@ -417,3 +417,30 @@ npm run agent -- --base http://主机:端口/v1 --model 模型名 --task "做一
 
 模型的版面判断仍有小毛病：卡片偏高、下半部分留白，表格有时不居中。这些靠 `render_slide` 的自检发现不了，
 属于需要在使用指南或模板里给更具体规则的地方。
+
+## 真实 PPTX 能直接当模板吗：试过了，可以
+
+ai-ppt-server 的页面模板是 SVG（`resource/ai_skills/ppt-master/templates/layouts/<模板名>/`：封面、目录、章节、内容、结尾 5 张 SVG，
+加一份描述页面类型、占位符、配色的 `design_spec.md`）。把其中的"科技蓝商务"转成真实 PPTX，再让 Qwen 用它做 5 页：
+
+```sh
+tools/svg-template-to-pptx.sh 科技蓝商务          # 输出 tools/templates/imported/科技蓝商务/{template.pptx,design_spec.md}
+npm run agent -- --base http://主机:端口/v1 --model 模型名 \
+  --deck tools/templates/imported/科技蓝商务/template.pptx --spec tools/templates/imported/科技蓝商务/design_spec.md \
+  --task "用这个模板做一份 5 页的……"
+```
+
+- 转换用的是 ai-ppt-server 自己的 `svg_to_pptx.py`（只读使用，那个项目里什么都没改）；输出的 PPTX 是原生形状，不是图片。
+  `tools/templates/imported/` 已加入 `.gitignore`：那是别的项目的模板内容，不随本仓库发布。
+- 模板描述 `design_spec.md` 原样保留，放进系统提示（`--spec`）；PPTX 里的 `{{TITLE}}` 一类占位符就是普通文字，
+  模型用 `setText` / `replaceText` 或按文字找到后替换。
+- 结果：两个不同主题各做了一次，都是 5 页、没有残留任何 `{{ }}`、模板的背景、波浪、六边形、版式和配色完整保留；
+  模型自己复制内容页、删掉不需要的章节页和多余的目录项、按页数改页码。第一次 11 轮 204 秒，没有编辑失败；
+  第二次 16 轮 385 秒，2 次编辑失败（同一条指令指向了不存在的页脚文字），之后自己改正。开着思考比较慢，关掉（`--no-think`）快得多。
+
+这次试验顺带暴露并修好的渲染问题（对所有文稿都有效）：
+
+- 文字颜色带透明度时被画成不透明（章节页的大水印字）：cosmic-text 取字形像素时丢了颜色的 alpha，现在在 Rust 里乘回去。
+- 字体在服务器上只以别名存在（"微软雅黑"→ Noto Sans CJK，"Calibri"→ Carlito）时，按名字查字体库查不到，行高退化成一个字号：
+  现在退回到合适的后备字体（中文用 CJK 字体）的度量，行距和 PowerPoint、LibreOffice 一致。
+- 主题没有写明中文字体时，默认用微软雅黑（PowerPoint 简体中文环境的行为）。

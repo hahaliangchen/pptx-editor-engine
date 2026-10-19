@@ -75,6 +75,13 @@ export class PptxStyleResolver {
     return "sans-serif";
   }
 
+  /** Like `extractDirectFillColor`, but a see-through colour comes back as "rgba(...)" instead of losing its opacity. */
+  extractDirectFillColorWithOpacity(node: Element, placeholderColor?: string | null): string | null {
+    const solid = getDirectChild(node, "solidFill");
+    const color = solid ? this.extractHexColor(solid, placeholderColor) : null;
+    return color && solid ? this.applyColorOpacity(color, this.extractOpacity(solid)) : null;
+  }
+
   extractDirectFillColor(node: Element, placeholderColor?: string | null): string | null {
     const solidFill = getDirectChild(node, "solidFill");
     return solidFill ? this.extractHexColor(solidFill, placeholderColor) : null;
@@ -166,7 +173,7 @@ export class PptxStyleResolver {
     return value ? Math.max(0, Math.min(1, parseInt(value, 10) / 100000)) : 1;
   }
 
-  private applyColorOpacity(color: string, opacity: number): string {
+  applyColorOpacity(color: string, opacity: number): string {
     if (opacity >= 1 || !/^#[0-9a-f]{6}$/i.test(color)) return color;
     const r = parseInt(color.slice(1, 3), 16);
     const g = parseInt(color.slice(3, 5), 16);

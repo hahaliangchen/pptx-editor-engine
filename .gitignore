@@ -23,3 +23,6 @@ Thumbs.db
 # .NET build output of the PPTX validator
 tools/validate-pptx/bin/
 tools/validate-pptx/obj/
+
+# Templates imported from other projects (their content is not ours to publish)
+tools/templates/imported/

@@ -41,7 +41,7 @@ export interface OutlineShape {
   rotation: number;
   text?: string;
   textTruncated?: boolean;
-  style?: { fontSizePt?: number; bold?: boolean; italic?: boolean; color?: string; align?: string };
+  style?: { fontSizePt?: number; bold?: boolean; italic?: boolean; color?: string; opacity?: number; align?: string };
   /** A colour, null for none, a gradient, or a pattern or picture the commands cannot describe. */
   fill?: string | null | OutlineGradient | { other: "pattern" | "picture" };
   /** Opacity of the fill when it is see-through (1 is left out). */
@@ -237,7 +237,8 @@ function describeNode(node: SceneNode, emuPerPx: number, maxText: number): Outli
         fontSizePt: Math.round((run.style.fontSize * emuPerPx) / 12700 * 2) / 2,
         bold: run.style.bold,
         italic: !!run.style.italic,
-        color: lower(run.style.color),
+        color: splitColor(run.style.color).hex,
+        ...(splitColor(run.style.color).opacity < 1 ? { opacity: round(splitColor(run.style.color).opacity) } : {}),
         align: element?.paragraphs?.[0]?.style.align
       };
     }

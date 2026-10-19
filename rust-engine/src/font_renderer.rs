@@ -1,6 +1,14 @@
 use crate::text_layout::{is_vertical_rotated_char, FontMetricSample};
 use cosmic_text::{Buffer, Color, FontSystem, SwashCache};
 
+/// The colour of one glyph pixel. The font cache hands back the glyph's coverage
+/// as the pixel's alpha and drops the alpha of the text colour, so a see-through
+/// text colour is applied here by multiplying the two.
+pub fn pixel_with_text_alpha(pixel: Color, text_color: Color) -> Color {
+    let alpha = (pixel.a() as u32 * text_color.a() as u32 + 127) / 255;
+    Color::rgba(pixel.r(), pixel.g(), pixel.b(), alpha as u8)
+}
+
 pub fn blend_pixel(target: &mut [u8], index: usize, color: Color) {
     let source_alpha = color.a() as f32 / 255.0;
     if source_alpha <= 0.0 {
@@ -337,7 +345,7 @@ pub fn rasterize_buffer(
                         rotated_pixels.push((
                             physical.x + offset_x,
                             baseline_y + physical.y + offset_y,
-                            pixel_color,
+                            pixel_with_text_alpha(pixel_color, color),
                         ));
                     },
                 );
@@ -358,7 +366,7 @@ pub fn rasterize_buffer(
                             return;
                         }
                         let index = ((y as u32 * bitmap_width + x as u32) * 4) as usize;
-                        blend_pixel(pixels, index, pixel_color);
+                        blend_pixel(pixels, index, pixel_with_text_alpha(pixel_color, color));
                     },
                 );
             }

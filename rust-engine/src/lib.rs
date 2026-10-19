@@ -406,6 +406,21 @@ mod tests {
     }
 
     #[test]
+    fn a_see_through_text_colour_keeps_its_opacity_on_glyph_pixels() {
+        // The font cache reports full coverage; the colour says 5% opacity.
+        let text = text_layout::parse_text_color("rgba(255,255,255,0.05)");
+        let edge = font_renderer::pixel_with_text_alpha(cosmic_text::Color::rgba(255, 255, 255, 255), text);
+        assert!((12..=14).contains(&edge.a()));
+        // Half coverage of a solid colour stays half.
+        let solid = text_layout::parse_text_color("#ff0000");
+        let half = font_renderer::pixel_with_text_alpha(cosmic_text::Color::rgba(255, 0, 0, 128), solid);
+        assert_eq!(half.a(), 128);
+        // Fully see-through text draws nothing.
+        let none = text_layout::parse_text_color("rgba(0,0,0,0)");
+        assert_eq!(font_renderer::pixel_with_text_alpha(cosmic_text::Color::rgba(0, 0, 0, 255), none).a(), 0);
+    }
+
+    #[test]
     fn reflection_crops_after_sampling_the_full_glyph() {
         let mut source = vec![0_u8; 4 * 4 * 4];
         for row in 0..4 {

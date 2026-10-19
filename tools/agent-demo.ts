@@ -2,7 +2,7 @@
  * Lets a model build or change a deck through the tools, and records what it did.
  * Works with any OpenAI-compatible chat endpoint (vLLM, Ollama, OpenAI ...).
  *
- *   npm run agent -- --base http://host:port/v1 --model name --task "做一份……" [--deck 底稿.pptx] [--out 目录]
+ *   npm run agent -- --base http://host:port/v1 --model name --task "做一份……" [--deck 底稿.pptx] [--spec 模板说明.md] [--out 目录]
  *                    [--key 密钥] [--max-turns 16] [--max-tokens 32768] [--no-think] [--no-vision] [--temperature 0.3]
  */
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -28,15 +28,30 @@ const maxTokens = Number(option("max-tokens", "32768"));
 const thinking = !flag("no-think");
 const vision = !flag("no-vision");
 const task = option("task", "")!;
+const specFile = option("spec");
 
 if (!base || !model || !task) {
-  console.log('用法：npm run agent -- --base http://host:port/v1 --model 模型名 --task "要做什么" [--deck 底稿.pptx] [--out 目录] [--max-tokens 32768] [--no-think] [--no-vision]');
+  console.log('用法：npm run agent -- --base http://host:port/v1 --model 模型名 --task "要做什么" [--deck 底稿.pptx] [--spec 模板说明.md] [--out 目录] [--max-tokens 32768] [--no-think] [--no-vision]');
   process.exit(1);
 }
 
 interface Usage { prompt_tokens?: number; completion_tokens?: number; completion_tokens_details?: { reasoning_tokens?: number } }
 
 async function chat(messages: unknown[], tools: unknown[]): Promise<{ message: any; usage: Usage; finish: string }> {
+  // A busy or restarting server drops the odd connection; try again a few times before giving up.
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await chatOnce(messages, tools);
+    } catch (error) {
+      const dropped = error instanceof TypeError || (error instanceof Error && /fetch failed|timed out|aborted/i.test(error.message));
+      if (!dropped || attempt >= 4) throw error;
+      console.log(`  连接模型失败（${error instanceof Error ? error.message : error}），${attempt * 5} 秒后重试（第 ${attempt} 次）`);
+      await new Promise(resolve => setTimeout(resolve, attempt * 5000));
+    }
+  }
+}
+
+async function chatOnce(messages: unknown[], tools: unknown[]): Promise<{ message: any; usage: Usage; finish: string }> {
   const response = await fetch(`${base}/chat/completions`, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...(key ? { Authorization: `Bearer ${key}` } : {}) },
@@ -57,7 +72,9 @@ async function main(): Promise<void> {
   mkdirSync(out, { recursive: true });
   const session = await HeadlessSession.open(readFileSync(deck), { quiet: true });
   const tools = toOpenAI(vision ? TOOLS : TOOLS.filter(tool => tool.name !== "render_slide"));
-  const messages: any[] = [{ role: "system", content: TOOL_GUIDE }, { role: "user", content: task }];
+  // A template comes with a description of its pages, placeholders and colours; the model is given it too.
+  const system = specFile ? `${TOOL_GUIDE}\n\n## 模板说明（设计规范）\n\n${readFileSync(specFile, "utf8")}` : TOOL_GUIDE;
+  const messages: any[] = [{ role: "system", content: system }, { role: "user", content: task }];
   const stats = { turns: 0, calls: {} as Record<string, number>, editFailures: 0, promptTokens: 0, completionTokens: 0, reasoningTokens: 0, images: 0 };
   const started = Date.now();
   let answer = "";

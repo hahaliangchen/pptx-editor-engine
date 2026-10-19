@@ -155,6 +155,33 @@ pub fn cosmic_attrs<'a>(
     attrs
 }
 
+/// Family names that mark a face as one that has Chinese, Japanese or Korean glyphs.
+const EAST_ASIAN_FACE_HINTS: [&str; 12] = [
+    "cjk", "hei", "song", "ming", "yahei", "simsun", "simhei", "gothic", "mincho", "kai", "fang", "noto sans sc",
+];
+
+/// A face to take line metrics from when the requested family is not installed.
+fn fallback_face(db: &fontdb::Database, east_asian: bool, attrs: &Attrs) -> Option<fontdb::ID> {
+    if east_asian {
+        let named = db.faces().find(|face| {
+            face.families.iter().any(|(name, _)| {
+                let lower = name.to_lowercase();
+                EAST_ASIAN_FACE_HINTS.iter().any(|hint| lower.contains(hint))
+            })
+        });
+        if let Some(face) = named {
+            let name = face.families.first().map(|(name, _)| name.clone())?;
+            let families = [fontdb::Family::Name(&name)];
+            return db
+                .query(&Query { families: &families, weight: attrs.weight, stretch: attrs.stretch, style: attrs.style })
+                .or(Some(face.id));
+        }
+    }
+    let families = [fontdb::Family::SansSerif];
+    db.query(&Query { families: &families, weight: attrs.weight, stretch: attrs.stretch, style: attrs.style })
+        .or_else(|| db.faces().next().map(|face| face.id))
+}
+
 pub fn font_metric_line_height(
     font_system: &mut FontSystem,
     style: &TextStyle,
@@ -172,12 +199,20 @@ pub fn font_metric_line_height(
         Family::Monospace => fontdb::Family::Monospace,
     };
     let families = [family];
-    let id = font_system.db().query(&Query {
+    let query = Query {
         families: &families,
         weight: attrs.weight,
         stretch: attrs.stretch,
         style: attrs.style,
-    })?;
+    };
+    // A font that is only installed under another name (Calibri -> Carlito,
+    // Microsoft YaHei -> Noto Sans CJK) is not in the database by the name the
+    // file asks for. Its line height then comes from a fallback face that suits
+    // the script, instead of collapsing to one em.
+    let id = font_system
+        .db()
+        .query(&query)
+        .or_else(|| fallback_face(font_system.db(), is_east_asian_text(text), &attrs))?;
     let font = font_system.get_font(id, attrs.weight)?;
     let metrics = font.metrics();
     if metrics.units_per_em == 0 {

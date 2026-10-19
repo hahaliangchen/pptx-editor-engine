@@ -57,6 +57,9 @@ import { parseCustomGeometry } from "./pptx-custom-geometry";
 
 export * from "./pptx-virtual-dom";
 
+/** What East Asian text is set in when neither the theme nor the run names a font. */
+export const DEFAULT_EAST_ASIAN_FONT = "Microsoft YaHei";
+
 export class PptxParser {
   private zip: JSZip | null = null;
   private currentSlidePart = "";
@@ -1185,7 +1188,7 @@ export class PptxParser {
     // A run's fill and its effect list are siblings. Reading the first color
     // anywhere below rPr can accidentally select outerShdw's color instead of
     // the text fill.
-    const runColor = this.styleResolver.extractDirectFillColor(rPr);
+    const runColor = this.styleResolver.extractDirectFillColorWithOpacity(rPr);
     if (runColor) {
       res.color = runColor;
     }
@@ -1751,7 +1754,7 @@ export class PptxParser {
         };
         if (tcPr) {
           if (getDirectChild(tcPr, "noFill")) fill = null;
-          else if (getDirectChild(tcPr, "solidFill")) fill = this.styleResolver.extractDirectFillColor(tcPr) ?? fill;
+          else if (getDirectChild(tcPr, "solidFill")) fill = this.styleResolver.extractDirectFillColorWithOpacity(tcPr) ?? fill;
           for (const [side, tag] of [["left", "lnL"], ["right", "lnR"], ["top", "lnT"], ["bottom", "lnB"]] as const) {
             const line = getDirectChild(tcPr, tag);
             if (!line) continue;
@@ -1759,7 +1762,7 @@ export class PptxParser {
               borders[side] = null;
               continue;
             }
-            const color = this.styleResolver.extractDirectFillColor(line);
+            const color = this.styleResolver.extractDirectFillColorWithOpacity(line);
             if (color) borders[side] = { color, width: Math.max(1, parseInt(line.getAttribute("w") || "12700", 10) * scale) };
           }
         }
@@ -1903,7 +1906,9 @@ export class PptxParser {
         color: defaultTextColor,
         bold: defaultBold,
         fontFamily: defaultFontFamily,
-        eastAsianFontFamily: defaultEastAsianFontFamily,
+        // A theme that names no East Asian font leaves it to the application: PowerPoint in a Chinese locale
+        // uses Microsoft YaHei, whose tall line height is what Chinese text is laid out with.
+        eastAsianFontFamily: defaultEastAsianFontFamily || DEFAULT_EAST_ASIAN_FONT,
         italic: false,
         letterSpacing: 0,
         shadow: undefined
@@ -2095,7 +2100,7 @@ export class PptxParser {
         let runStyle = pDefaults;
         const rPr = querySelector(run, "a\\:rPr, rPr");
         if (rPr) runStyle = this.parseRunProperties(rPr, absoluteUnitScale, pDefaults);
-        const directRunColor = rPr ? this.styleResolver.extractDirectFillColor(rPr) : null;
+        const directRunColor = rPr ? this.styleResolver.extractDirectFillColorWithOpacity(rPr) : null;
         if (
           bulletChar
           && !directRunColor
