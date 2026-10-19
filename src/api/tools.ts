@@ -5,6 +5,7 @@ import type { Outline, OutlineOptions } from "./outline";
 import { compileDeck } from "./deck-spec";
 import { describeTemplate, inferTemplate } from "./template";
 import { checkLayout } from "./layout-check";
+import { checkTemplate, slideRoles } from "./template-authoring";
 
 /**
  * The tools a model is given to read and change a deck. Nothing here belongs to
@@ -138,6 +139,14 @@ export const TOOLS: ToolDefinition[] = [
     }
   },
   {
+    name: "check_template",
+    description:
+      "检查一份正在制作的模板：封面、目录、内容页、结束页各有一页（章节页可选），每页有角色必须的 {{关键字}}，"
+      + "关键字放在无填充的纯文本框里、写法在清单里，目录项编号连续且有“目录”标题，内容区够大。"
+      + "每个问题带页码、对象 id 和说明，severity 为 error 的必须改好才能保存为模板；roles 是引擎认出的每页角色。",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false }
+  },
+  {
     name: "get_template",
     description:
       "文稿是一份模板（里面是封面、目录、章节、内容、结尾等页面，文字里写着 {{TOKEN}} 占位符）时，"
@@ -180,6 +189,7 @@ export const TOOLS: ToolDefinition[] = [
 /** Text to add to a model's system prompt: how to work with these tools. */
 export const TOOL_GUIDE = [
   "你可以用三个工具读取和修改一份 PPTX 演示文稿：get_outline、apply_edits、render_slide。",
+  "在制作模板（给页面写 {{关键字}}）时，改完用 check_template 检查，修到没有 error。",
   "check_layout 用测量检查版面（溢出、越界、重叠、大片空白），比看图快，改完可以再调用确认。",
   "文稿是一份模板（页面文字里有 {{TOKEN}} 占位符）时，先 get_template 看有哪些页面类型，再用 build_deck 一次生成整份：你只写内容，排版由引擎完成。之后再用 render_slide 看效果、用 apply_edits 精修有问题的页。",
   "",
@@ -287,6 +297,15 @@ export async function callTool(host: ToolHost, name: string, args: unknown): Pro
         }
         const issues = checkLayout(await host.outline(), { slides });
         return { ok: true, content: [text({ ok: true, issues })] };
+      }
+
+      case "check_template": {
+        const outline = await host.outline();
+        const issues = checkTemplate(outline);
+        return {
+          ok: true,
+          content: [text({ ok: !issues.some(issue => issue.severity === "error"), roles: slideRoles(outline), issues })]
+        };
       }
 
       case "get_template": {

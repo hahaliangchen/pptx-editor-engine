@@ -101,6 +101,12 @@ export class EditApi {
     return buildOutline(doc, { ...options, layouts: options.layouts ?? (await this.deck.layouts()) });
   }
 
+  /** Focus an object without changing the deck or adding an undo step. */
+  public async select(target: Target): Promise<void> {
+    const { scene, node } = resolveNode(this.context(new Map()), target, "target");
+    await this.focus(scene, node, "target");
+  }
+
   public async apply(input: unknown): Promise<ApplyResult> {
     let batch: CommandBatch;
     try {

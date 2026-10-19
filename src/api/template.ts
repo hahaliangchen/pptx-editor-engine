@@ -80,10 +80,10 @@ export function slotName(token: string): string {
   return words[0] + words.slice(1).map(word => word[0].toUpperCase() + word.slice(1)).join("");
 }
 
-const flatten = (shapes: OutlineShape[]): OutlineShape[] =>
+export const flatten = (shapes: OutlineShape[]): OutlineShape[] =>
   shapes.flatMap(shape => (shape.children ? flatten(shape.children) : [shape]));
 
-function kindOf(tokens: Set<string>): PageKind | undefined {
+export function kindOf(tokens: Set<string>): PageKind | undefined {
   const has = (prefix: string) => [...tokens].some(token => token.startsWith(prefix));
   if (has("TOC_ITEM")) return "toc";
   if (tokens.has("CONTENT_AREA")) return "content";
@@ -94,7 +94,7 @@ function kindOf(tokens: Set<string>): PageKind | undefined {
 }
 
 /** Most of a colour's weight goes by how much it is used and how far it is from grey. */
-function accentOf(slides: OutlineSlide[]): string {
+export function accentOf(slides: OutlineSlide[]): string {
   const weight = new Map<string, number>();
   const add = (color: string | undefined, amount: number) => {
     if (!color || !/^#[0-9a-f]{6}$/i.test(color)) return;
@@ -114,14 +114,14 @@ function accentOf(slides: OutlineSlide[]): string {
   return [...weight.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? "#2f5597";
 }
 
-function isDark(background: OutlineSlide["background"]): boolean {
+export function isDark(background: OutlineSlide["background"]): boolean {
   const color = typeof background === "string" ? background : background?.gradient.stops[0]?.color;
   if (!color || !/^#[0-9a-f]{6}$/i.test(color)) return false;
   const [r, g, b] = [1, 3, 5].map(i => parseInt(color.slice(i, i + 2), 16));
   return 0.299 * r + 0.587 * g + 0.114 * b < 110;
 }
 
-const isNumber = (text: string | undefined) => !!text && /^\d{1,2}$/.test(text.trim());
+export const isNumber = (text: string | undefined) => !!text && /^\d{1,2}$/.test(text.trim());
 
 function tocEntries(shapes: OutlineShape[]): TocEntry[] {
   const titles = shapes
