@@ -23,8 +23,8 @@ const json = (result: { content: Array<{ type: string; text?: string }> }) =>
 const PNG = [0x89, 0x50, 0x4e, 0x47];
 
 describe("tool definitions", () => {
-  it("offers the three tools, each taking an object", () => {
-    expect(TOOLS.map(tool => tool.name)).toEqual(["get_outline", "apply_edits", "render_slide"]);
+  it("offers the tools, each taking an object", () => {
+    expect(TOOLS.map(tool => tool.name)).toEqual(["get_outline", "apply_edits", "render_slide", "get_template", "build_deck"]);
     for (const tool of TOOLS) {
       expect(tool.inputSchema.type).toBe("object");
       expect(tool.description.length).toBeGreaterThan(40);
@@ -41,7 +41,7 @@ describe("tool definitions", () => {
 describe("adapters", () => {
   it("gives Anthropic its input_schema", () => {
     const tools = toAnthropic();
-    expect(tools.map(tool => Object.keys(tool).sort())).toEqual(Array(3).fill(["description", "input_schema", "name"]));
+    expect(tools.map(tool => Object.keys(tool).sort())).toEqual(Array(TOOLS.length).fill(["description", "input_schema", "name"]));
   });
 
   it("wraps each tool as an OpenAI function", () => {
@@ -53,7 +53,7 @@ describe("adapters", () => {
   });
 
   it("gives MCP its inputSchema", () => {
-    expect(toMcp().map(tool => Object.keys(tool).sort())).toEqual(Array(3).fill(["description", "inputSchema", "name"]));
+    expect(toMcp().map(tool => Object.keys(tool).sort())).toEqual(Array(TOOLS.length).fill(["description", "inputSchema", "name"]));
   });
 
   it("hands out private copies without the $schema marker some providers reject", () => {

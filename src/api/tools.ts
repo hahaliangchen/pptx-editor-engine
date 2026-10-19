@@ -1,6 +1,9 @@
+import { ApiError } from "./errors";
 import { batchSchema } from "./schema";
 import type { ApplyResult } from "./engine";
 import type { Outline, OutlineOptions } from "./outline";
+import { compileDeck } from "./deck-spec";
+import { describeTemplate, inferTemplate } from "./template";
 
 /**
  * The tools a model is given to read and change a deck. Nothing here belongs to
@@ -121,12 +124,51 @@ export const TOOLS: ToolDefinition[] = [
       required: ["slide"],
       additionalProperties: false
     }
+  },
+  {
+    name: "get_template",
+    description:
+      "文稿是一份模板（里面是封面、目录、章节、内容、结尾等页面，文字里写着 {{TOKEN}} 占位符）时，"
+      + "读出它有哪几种页面、每种页面能填哪些字段、内容页有多大的位置放内容、哪些是示例文字。"
+      + "之后用 build_deck 一次生成整份。",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false }
+  },
+  {
+    name: "build_deck",
+    description:
+      "按模板一次生成整份演示文稿：只给每页的类型和内容，版面由引擎排好（缩放文字、对齐、均分），不需要写坐标。"
+      + "每页 {page: cover|toc|section|content|end, ...字段}；字段名见 get_template。"
+      + "toc 页写 items: [\"章节名\" 或 {title, desc}]；content 页写 title 和 blocks（最多 3 块），"
+      + "块有 5 种：{type:\"text\", text}、{type:\"bullets\", items:[...]}、{type:\"cards\", items:[{value, title, text}]}（2 到 4 张最好）、"
+      + "{type:\"chart\", kind:column|bar|line|pie, categories, series:[{name, values}], title?}、{type:\"table\", rows:[[...]]}；"
+      + "2 个块默认左右并排，也可写 layout: rows|columns。"
+      + "replace 把模板里的示例文字换成别的（写空字符串就删掉），可在整份或单页上写。"
+      + "只在文稿还是模板时调用一次；生成之后用 apply_edits 精修个别页。这一次是原子的：有一处不对就整份不生成，并告诉你哪里不对。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        slides: {
+          type: "array", minItems: 1, maxItems: 40,
+          items: {
+            type: "object",
+            properties: { page: { type: "string", enum: ["cover", "toc", "section", "content", "end"] } },
+            required: ["page"],
+            additionalProperties: true
+          },
+          description: "按顺序，每页一个对象"
+        },
+        replace: { type: "object", additionalProperties: { type: "string" }, description: "模板里的示例文字 → 新文字" }
+      },
+      required: ["slides"],
+      additionalProperties: false
+    }
   }
 ];
 
 /** Text to add to a model's system prompt: how to work with these tools. */
 export const TOOL_GUIDE = [
   "你可以用三个工具读取和修改一份 PPTX 演示文稿：get_outline、apply_edits、render_slide。",
+  "文稿是一份模板（页面文字里有 {{TOKEN}} 占位符）时，先 get_template 看有哪些页面类型，再用 build_deck 一次生成整份：你只写内容，排版由引擎完成。之后再用 render_slide 看效果、用 apply_edits 精修有问题的页。",
   "",
   "工作方式：",
   "1. 先 get_outline 看清现有内容，再动手；不要凭空猜对象的名称。页数很多时它先给概要，再用 slides 读你要改的那几页。",
@@ -223,10 +265,29 @@ export async function callTool(host: ToolHost, name: string, args: unknown): Pro
         };
       }
 
+      case "get_template": {
+        const template = inferTemplate(await host.outline());
+        if (Object.keys(template.pages).length === 0) return failure("这份文稿里没有模板页（文字里带 {{TOKEN}} 占位符的封面、目录、内容页等）");
+        return { ok: true, content: [text(describeTemplate(template))] };
+      }
+
+      case "build_deck": {
+        const template = inferTemplate(await host.outline());
+        if (Object.keys(template.pages).length === 0) {
+          return failure("这份文稿里没有模板页，不能用 build_deck；请用 apply_edits 修改现有页面");
+        }
+        const result = await host.apply(compileDeck(input, template));
+        if (!result.ok) return { ok: false, content: [text({ ok: false, failedAt: result.failedAt, error: result.error })] };
+        // Say how big the deck is, not what the dozens of commands were.
+        const pages = (await host.outline({ maxTextLength: 20 })).slides.length;
+        return { ok: true, content: [text({ ok: true, slides: pages, note: "已生成；用 render_slide 看每一页，有问题再用 apply_edits 精修" })] };
+      }
+
       default:
         return failure(`没有名为 "${name}" 的工具`, { available: TOOLS.map(tool => tool.name) });
     }
   } catch (error) {
+    if (error instanceof ApiError) return failure(error.message, { code: error.code, ...(error.path ? { path: error.path } : {}) });
     return failure(error instanceof Error ? error.message : String(error));
   }
 }

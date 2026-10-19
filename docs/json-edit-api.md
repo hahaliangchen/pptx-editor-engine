@@ -444,3 +444,61 @@ npm run agent -- --base http://主机:端口/v1 --model 模型名 \
 - 字体在服务器上只以别名存在（"微软雅黑"→ Noto Sans CJK，"Calibri"→ Carlito）时，按名字查字体库查不到，行高退化成一个字号：
   现在退回到合适的后备字体（中文用 CJK 字体）的度量，行距和 PowerPoint、LibreOffice 一致。
 - 主题没有写明中文字体时，默认用微软雅黑（PowerPoint 简体中文环境的行为）。
+
+## 配置流：模型只写内容，整份一次生成
+
+边读边改的循环（`get_outline` → `apply_edits` → `render_slide`）灵活，但每一步都要模型想一遍，5 页要 6 分多钟。
+有模板时可以换一种做法：模型一次输出整份内容的 JSON，引擎负责版面。
+
+模板用 `{{TOKEN}}` 标出要填的位置（ai-ppt-server 的 25 套模板都是这个约定）。`inferTemplate`（`src/api/template.ts`）读出：
+
+| 页面类型 | 认出它的占位符 | 字段 |
+| --- | --- | --- |
+| `cover` | `{{TITLE}}` | title、subtitle、author、date … |
+| `toc` | `{{TOC_ITEM_n_TITLE}}` | `items`: 章节名，或 `{title, desc}` |
+| `section` | `{{CHAPTER_*}}` | title、desc；章节号自动编 |
+| `content` | `{{CONTENT_AREA}}` | title、`blocks`；放内容的位置取占位符外面的虚线框 |
+| `end` | `{{THANK_YOU}}` | title、subtitle、message、contact … |
+
+字段名由占位符转来（`CLOSING_MESSAGE`→`message`，`STAT_1_LABEL`→`stat1Label`）；页码和总页数自动填。
+没填的字段，那个文本框会删掉；模板里的示例文字（品牌名、口号）用 `replace` 换掉或删掉。
+
+```json
+{"slides":[
+  {"page":"cover","title":"2025 新能源汽车市场分析","subtitle":"…","author":"市场研究部"},
+  {"page":"toc","items":["市场规模",{"title":"竞争格局","desc":"头部品牌"}]},
+  {"page":"content","title":"核心指标","blocks":[
+    {"type":"cards","items":[{"value":"1290万","title":"年销量","text":"同比 +35%"}]},
+    {"type":"chart","kind":"column","categories":["Q1","Q2"],"series":[{"name":"销量","values":[1,2]}]}]},
+  {"page":"end","title":"谢谢"}
+]}
+```
+
+内容块：`text`、`bullets`、`cards`、`chart`（图是原生图表，系列色取模板主色）、`table`；
+最多 3 块，2 块默认左右并排（带卡片则上下），`layout: "rows"|"columns"` 可改。
+
+`compileDeck`（`src/api/deck-spec.ts`）把它编译成一批普通指令（复制模板页、`setText`、`addChart` ……），
+所以原子性、撤销、导出都和手工编辑一致；出错时给出字段路径（`slides[1].titel`）。引擎做的版面：
+
+- 文字比模板的文本框长：先向对齐方向加宽（最多 1.8 倍），不够再缩小字号（最多缩到 70%），再不够用到页边距，最后继续缩小；
+- 卡片、图表、表格按内容区均分；字号按内容量估算后选最大的合适值；
+- 目录项少于模板的项数时，删掉多余项的全部形状，剩下的在原区域内居中。
+
+用法：工具 `get_template`（看模板有哪些页面和字段）、`build_deck`（生成；文稿里的模板页用完即删，只能调一次，之后用 `apply_edits` 精修）。
+联调脚本的一次出整份模式：
+
+```sh
+npm run agent -- --base http://主机:端口/v1 --model 模型名 --mode oneshot \
+  --deck tools/templates/imported/科技蓝商务/template.pptx --spec tools/templates/imported/科技蓝商务/design_spec.md --task "……"
+```
+
+同一个任务（科技蓝商务模板，5 页的《2025 年新能源汽车市场分析》，Qwen3.8-27B）：
+
+| 方式 | 用时 | 对话次数 | 输出 token |
+| --- | --- | --- | --- |
+| 工具循环（开思考） | 385 秒 | 16 | 28,645 |
+| 配置流（开思考） | 47 秒 | 1 | 5,008 |
+| 配置流（关思考） | 8 秒 | 1 | 928 |
+
+两种做法并存：配置流出初稿，需要时再用 `render_slide` 和 `apply_edits` 点对点修。
+目前配置流的短板：内容页下方常有留白（块高度按区域均分，不按内容量）。

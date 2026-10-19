@@ -3,12 +3,14 @@
  * Works with any OpenAI-compatible chat endpoint (vLLM, Ollama, OpenAI ...).
  *
  *   npm run agent -- --base http://host:port/v1 --model name --task "做一份……" [--deck 底稿.pptx] [--spec 模板说明.md] [--out 目录]
- *                    [--key 密钥] [--max-turns 16] [--max-tokens 32768] [--no-think] [--no-vision] [--temperature 0.3]
+ *                    [--mode tools|oneshot] [--key 密钥] [--max-turns 16] [--max-tokens 32768] [--no-think] [--no-vision] [--temperature 0.3]
  */
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { HeadlessSession } from "../src/headless/session";
 import { TOOL_GUIDE, TOOLS } from "../src/api/tools";
 import { OpenAIMessage, callOpenAITool, toOpenAI } from "../src/api/adapters";
+import { SPEC_GUIDE, compileDeck } from "../src/api/deck-spec";
+import { describeTemplate, inferTemplate } from "../src/api/template";
 
 function option(name: string, fallback?: string): string | undefined {
   const at = process.argv.indexOf(`--${name}`);
@@ -29,6 +31,8 @@ const thinking = !flag("no-think");
 const vision = !flag("no-vision");
 const task = option("task", "")!;
 const specFile = option("spec");
+/** tools: the model reads and edits through tool calls. oneshot: it writes the whole deck as one JSON and the engine lays it out. */
+const mode = option("mode", "tools")!;
 
 if (!base || !model || !task) {
   console.log('用法：npm run agent -- --base http://host:port/v1 --model 模型名 --task "要做什么" [--deck 底稿.pptx] [--spec 模板说明.md] [--out 目录] [--max-tokens 32768] [--no-think] [--no-vision]');
@@ -56,7 +60,7 @@ async function chatOnce(messages: unknown[], tools: unknown[]): Promise<{ messag
     method: "POST",
     headers: { "Content-Type": "application/json", ...(key ? { Authorization: `Bearer ${key}` } : {}) },
     body: JSON.stringify({
-      model, messages, tools, temperature, max_tokens: maxTokens,
+      model, messages, ...(tools.length ? { tools } : {}), temperature, max_tokens: maxTokens,
       ...(thinking ? {} : { chat_template_kwargs: { enable_thinking: false } })
     }),
     signal: AbortSignal.timeout(900_000)
@@ -68,9 +72,54 @@ async function chatOnce(messages: unknown[], tools: unknown[]): Promise<{ messag
 
 const brief = (text: string, n = 160) => (text.length > n ? `${text.slice(0, n)}…` : text);
 
+/** One answer with the whole deck as JSON; a bad spec is sent back once with what is wrong with it. */
+async function oneshot(session: HeadlessSession): Promise<void> {
+  const template = inferTemplate(await session.outline());
+  const system = [
+    SPEC_GUIDE,
+    "", "## 这份模板有的页面和字段", "", JSON.stringify(describeTemplate(template), null, 1),
+    ...(specFile ? ["", "## 模板说明（设计规范）", "", readFileSync(specFile, "utf8")] : [])
+  ].join("\n");
+  const messages: any[] = [{ role: "system", content: system }, { role: "user", content: task }];
+  const started = Date.now();
+  let promptTokens = 0, completionTokens = 0, error = "";
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const { message, usage, finish } = await chat(messages, []);
+    promptTokens += usage.prompt_tokens ?? 0;
+    completionTokens += usage.completion_tokens ?? 0;
+    console.log(`[第 ${attempt} 次] ${finish}，${usage.completion_tokens ?? "?"} token 输出，${Math.round((Date.now() - started) / 1000)} 秒`);
+    const reply: string = message.content ?? "";
+    messages.push({ role: "assistant", content: reply });
+    writeFileSync(`${out}/spec-${attempt}.json`, reply);
+    const from = reply.indexOf("{"), to = reply.lastIndexOf("}");
+    try {
+      if (from < 0 || to < from) throw new Error("回答里没有 JSON 对象");
+      const result = await session.apply(compileDeck(JSON.parse(reply.slice(from, to + 1)), template));
+      if (!result.ok) throw new Error(`第 ${(result.failedAt ?? 0) + 1} 条指令失败：${result.error?.message}`);
+      error = "";
+      break;
+    } catch (caught) {
+      error = caught instanceof Error ? caught.message : String(caught);
+      const path = (caught as { path?: string }).path;
+      console.log(`  不能用：${error}${path ? ` [${path}]` : ""}`);
+      messages.push({ role: "user", content: `这份 JSON 不能用：${error}${path ? `（位置 ${path}）` : ""}。请改正后重新输出完整的 JSON。` });
+    }
+  }
+  const pages = (await session.outline()).slides.length;
+  writeFileSync(`${out}/result.pptx`, await session.export());
+  for (let page = 1; page <= pages; page++) writeFileSync(`${out}/final-${page}.png`, await session.render(page, { width: 960 }));
+  writeFileSync(`${out}/transcript.json`, JSON.stringify({ model, task, deck, mode, promptTokens, completionTokens, error, messages }, null, 2));
+  console.log(`\n结果：${error ? `失败（${error}）` : `${pages} 页`}，${out}/result.pptx；用时 ${Math.round((Date.now() - started) / 1000)} 秒，输入 ${promptTokens} / 输出 ${completionTokens} token，1 次对话${messages.length > 3 ? "加 1 次改正" : ""}`);
+}
+
 async function main(): Promise<void> {
   mkdirSync(out, { recursive: true });
   const session = await HeadlessSession.open(readFileSync(deck), { quiet: true });
+  if (mode === "oneshot") {
+    await oneshot(session);
+    session.dispose();
+    return;
+  }
   const tools = toOpenAI(vision ? TOOLS : TOOLS.filter(tool => tool.name !== "render_slide"));
   // A template comes with a description of its pages, placeholders and colours; the model is given it too.
   const system = specFile ? `${TOOL_GUIDE}\n\n## 模板说明（设计规范）\n\n${readFileSync(specFile, "utf8")}` : TOOL_GUIDE;
