@@ -67,7 +67,7 @@ const png = await renderer.renderSlide(doc, 0, { width: 1280 });
 1. ~~中立的工具核心~~（**完成**）：`src/api/tools.ts`（三个工具的定义与 `callTool`）、`src/api/adapters.ts`
    （Anthropic / OpenAI / MCP 的工具列表、结果转换和"收到调用就执行"的函数）；`TOOL_GUIDE` 是给系统提示用的使用指南。
 1b. 配置流（**完成**）：`build_deck` / `get_template` 与联调脚本的 `--mode oneshot`，整份一次生成。
-    下一步：程序化的版面检查（溢出、越界、重叠、留白）→ 只把有问题的页交给模型点对点修。
+    版面检查（**完成**）：`check_layout` 量出溢出、越界、重叠、留白、字太小、图表太小；一次出整份之后只把有问题的页交给模型修。
 2. 注册到现有的远程插件协议，与 SVG 工具并存，对同一需求对比效果后再切换。
 3. 版本控制：用户手改与 Agent 修改并存时，沿用插件已有的 revision 思路，避免互相覆盖。
 4. 前端：用本引擎的编辑器替换只读 SVG 预览；模板制作页改为编辑真实 PPTX 版式。

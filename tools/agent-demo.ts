@@ -11,6 +11,7 @@ import { TOOL_GUIDE, TOOLS } from "../src/api/tools";
 import { OpenAIMessage, callOpenAITool, toOpenAI } from "../src/api/adapters";
 import { SPEC_GUIDE, compileDeck } from "../src/api/deck-spec";
 import { describeTemplate, inferTemplate } from "../src/api/template";
+import { checkLayout, describeIssues } from "../src/api/layout-check";
 
 function option(name: string, fallback?: string): string | undefined {
   const at = process.argv.indexOf(`--${name}`);
@@ -73,7 +74,7 @@ async function chatOnce(messages: unknown[], tools: unknown[]): Promise<{ messag
 const brief = (text: string, n = 160) => (text.length > n ? `${text.slice(0, n)}…` : text);
 
 /** One answer with the whole deck as JSON; a bad spec is sent back once with what is wrong with it. */
-async function oneshot(session: HeadlessSession): Promise<void> {
+async function oneshot(session: HeadlessSession): Promise<{ error: string; promptTokens: number; completionTokens: number; seconds: number }> {
   const template = inferTemplate(await session.outline());
   const system = [
     SPEC_GUIDE,
@@ -105,30 +106,44 @@ async function oneshot(session: HeadlessSession): Promise<void> {
       messages.push({ role: "user", content: `这份 JSON 不能用：${error}${path ? `（位置 ${path}）` : ""}。请改正后重新输出完整的 JSON。` });
     }
   }
-  const pages = (await session.outline()).slides.length;
-  writeFileSync(`${out}/result.pptx`, await session.export());
-  for (let page = 1; page <= pages; page++) writeFileSync(`${out}/final-${page}.png`, await session.render(page, { width: 960 }));
-  writeFileSync(`${out}/transcript.json`, JSON.stringify({ model, task, deck, mode, promptTokens, completionTokens, error, messages }, null, 2));
-  console.log(`\n结果：${error ? `失败（${error}）` : `${pages} 页`}，${out}/result.pptx；用时 ${Math.round((Date.now() - started) / 1000)} 秒，输入 ${promptTokens} / 输出 ${completionTokens} token，1 次对话${messages.length > 3 ? "加 1 次改正" : ""}`);
+  console.log(error ? `一次生成失败：${error}` : `一次生成完成，${Math.round((Date.now() - started) / 1000)} 秒`);
+  return { error, promptTokens, completionTokens, seconds: Math.round((Date.now() - started) / 1000) };
 }
 
 async function main(): Promise<void> {
   mkdirSync(out, { recursive: true });
   const session = await HeadlessSession.open(readFileSync(deck), { quiet: true });
-  if (mode === "oneshot") {
-    await oneshot(session);
-    session.dispose();
-    return;
-  }
-  const tools = toOpenAI(vision ? TOOLS : TOOLS.filter(tool => tool.name !== "render_slide"));
+  const first = mode === "oneshot" ? await oneshot(session) : undefined;
+  const hidden = new Set([...(vision ? [] : ["render_slide"]), ...(first ? ["get_template", "build_deck"] : [])]);
+  const tools = toOpenAI(TOOLS.filter(tool => !hidden.has(tool.name)));
   // A template comes with a description of its pages, placeholders and colours; the model is given it too.
   const system = specFile ? `${TOOL_GUIDE}\n\n## 模板说明（设计规范）\n\n${readFileSync(specFile, "utf8")}` : TOOL_GUIDE;
   const messages: any[] = [{ role: "system", content: system }, { role: "user", content: task }];
   const stats = { turns: 0, calls: {} as Record<string, number>, editFailures: 0, promptTokens: 0, completionTokens: 0, reasoningTokens: 0, images: 0 };
   const started = Date.now();
   let answer = "";
+  let turns = maxTurns;
+  if (first) {
+    // The engine looks for problems by measuring; only the pages that have some go back to the model.
+    const issues = checkLayout(await session.outline());
+    stats.promptTokens += first.promptTokens;
+    stats.completionTokens += first.completionTokens;
+    if (first.error || issues.length === 0) {
+      turns = 0;
+      console.log(first.error ? "不做修正（生成失败）" : "版面检查：没有发现问题，不需要修正");
+    } else {
+      const pages = [...new Set(issues.map(issue => issue.slide))];
+      console.log(`版面检查发现 ${issues.length} 处问题，在第 ${pages.join("、")} 页：\n${describeIssues(issues)}`);
+      messages[1] = {
+        role: "user",
+        content: `文稿已经按模板生成。版面检查发现这些问题，只修这些页，别的页不要动：\n${describeIssues(issues)}\n`
+          + "先用 get_outline（slides 指定这些页）看清对象，再用 apply_edits 改；改完用 render_slide 看一眼；没问题就结束。"
+      };
+      turns = Math.min(maxTurns, 8);
+    }
+  }
 
-  for (let turn = 1; turn <= maxTurns; turn++) {
+  for (let turn = 1; turn <= turns; turn++) {
     stats.turns = turn;
     const { message, usage, finish } = await chat(messages, tools);
     stats.promptTokens += usage.prompt_tokens ?? 0;
@@ -185,10 +200,12 @@ async function main(): Promise<void> {
   for (let page = 1; page <= pages; page++) writeFileSync(`${out}/final-${page}.png`, await session.render(page, { width: 960 }));
   const redacted = messages.map(message => JSON.parse(JSON.stringify(message, (field, value) =>
     typeof value === "string" && value.startsWith("data:image") ? "[图片]" : value)));
-  writeFileSync(`${out}/transcript.json`, JSON.stringify({ model, task, deck, stats, answer, messages: redacted }, null, 2));
+  writeFileSync(`${out}/transcript.json`, JSON.stringify({ model, task, deck, mode, stats, answer, messages: redacted }, null, 2));
   session.dispose();
 
-  console.log(`\n结果：${pages} 页，${out}/result.pptx；用时 ${Math.round((Date.now() - started) / 1000)} 秒`);
+  const remaining = checkLayout(await session.outline());
+  console.log(`\n结果：${pages} 页，${out}/result.pptx；用时 ${Math.round((Date.now() - started) / 1000) + (first?.seconds ?? 0)} 秒${first ? `（一次生成 ${first.seconds} 秒）` : ""}`);
+  console.log(`版面检查：${remaining.length === 0 ? "没有问题" : `还剩 ${remaining.length} 处\n${describeIssues(remaining)}`}`);
   console.log(`轮数 ${stats.turns}，工具调用 ${JSON.stringify(stats.calls)}，编辑失败 ${stats.editFailures} 次，`
     + `输入 ${stats.promptTokens} / 输出 ${stats.completionTokens}（其中推理 ${stats.reasoningTokens}）token，看了 ${stats.images} 张渲染图`);
   if (answer) console.log(`\n模型最后说：\n${brief(answer, 800)}`);

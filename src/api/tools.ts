@@ -4,6 +4,7 @@ import type { ApplyResult } from "./engine";
 import type { Outline, OutlineOptions } from "./outline";
 import { compileDeck } from "./deck-spec";
 import { describeTemplate, inferTemplate } from "./template";
+import { checkLayout } from "./layout-check";
 
 /**
  * The tools a model is given to read and change a deck. Nothing here belongs to
@@ -126,6 +127,17 @@ export const TOOLS: ToolDefinition[] = [
     }
   },
   {
+    name: "check_layout",
+    description:
+      "用测量的办法检查版面，不需要看图：文字放不下文本框、对象超出页面、对象互相重叠、内容只占页面上半部分。"
+      + "每个问题带页码、对象 id 和说明，直接据此用 apply_edits 修改；没有问题时 issues 是空数组。",
+    inputSchema: {
+      type: "object",
+      properties: { slides: { type: "array", items: { type: "integer", minimum: 1 }, minItems: 1, description: "只检查这些页；不写就检查全部" } },
+      additionalProperties: false
+    }
+  },
+  {
     name: "get_template",
     description:
       "文稿是一份模板（里面是封面、目录、章节、内容、结尾等页面，文字里写着 {{TOKEN}} 占位符）时，"
@@ -168,6 +180,7 @@ export const TOOLS: ToolDefinition[] = [
 /** Text to add to a model's system prompt: how to work with these tools. */
 export const TOOL_GUIDE = [
   "你可以用三个工具读取和修改一份 PPTX 演示文稿：get_outline、apply_edits、render_slide。",
+  "check_layout 用测量检查版面（溢出、越界、重叠、大片空白），比看图快，改完可以再调用确认。",
   "文稿是一份模板（页面文字里有 {{TOKEN}} 占位符）时，先 get_template 看有哪些页面类型，再用 build_deck 一次生成整份：你只写内容，排版由引擎完成。之后再用 render_slide 看效果、用 apply_edits 精修有问题的页。",
   "",
   "工作方式：",
@@ -265,6 +278,17 @@ export async function callTool(host: ToolHost, name: string, args: unknown): Pro
         };
       }
 
+      case "check_layout": {
+        let slides: number[] | undefined;
+        if (input.slides !== undefined) {
+          const parsed = integerList(input.slides, "slides");
+          if (typeof parsed === "string") return failure(parsed);
+          slides = parsed;
+        }
+        const issues = checkLayout(await host.outline(), { slides });
+        return { ok: true, content: [text({ ok: true, issues })] };
+      }
+
       case "get_template": {
         const template = inferTemplate(await host.outline());
         if (Object.keys(template.pages).length === 0) return failure("这份文稿里没有模板页（文字里带 {{TOKEN}} 占位符的封面、目录、内容页等）");
@@ -279,8 +303,15 @@ export async function callTool(host: ToolHost, name: string, args: unknown): Pro
         const result = await host.apply(compileDeck(input, template));
         if (!result.ok) return { ok: false, content: [text({ ok: false, failedAt: result.failedAt, error: result.error })] };
         // Say how big the deck is, not what the dozens of commands were.
-        const pages = (await host.outline({ maxTextLength: 20 })).slides.length;
-        return { ok: true, content: [text({ ok: true, slides: pages, note: "已生成；用 render_slide 看每一页，有问题再用 apply_edits 精修" })] };
+        const built = await host.outline();
+        const issues = checkLayout(built);
+        return {
+          ok: true,
+          content: [text({
+            ok: true, slides: built.slides.length, issues,
+            note: issues.length > 0 ? "已生成，版面检查发现 issues 里的问题：只修这些页" : "已生成，版面检查没有发现问题"
+          })]
+        };
       }
 
       default:

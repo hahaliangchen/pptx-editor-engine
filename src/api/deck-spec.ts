@@ -44,11 +44,11 @@ const fail = (message: string, path: string): never => {
 
 // ---------------------------------------------------------------- text fitting
 
-const CM_TO_PT = 28.3465;
-const INSET_CM = 0.25;
+export const CM_TO_PT = 28.3465;
+export const INSET_CM = 0.25;
 
 /** How wide a text is, in em: Chinese characters are one em wide, Latin ones about half. */
-const widthEm = (text: string) => [...text].reduce((sum, char) => sum + (/[⺀-鿿＀-￯]/.test(char) ? 1 : 0.55), 0);
+export const widthEm = (text: string) => [...text].reduce((sum, char) => sum + (/[⺀-鿿＀-￯]/.test(char) ? 1 : 0.55), 0);
 
 function linesOf(text: string, sizePt: number, widthCm: number): number {
   const perLine = Math.max(1, ((widthCm - 2 * INSET_CM) * CM_TO_PT) / sizePt);
@@ -265,14 +265,26 @@ function blockCommands(block: Block, rect: CmRect, slide: number, palette: Palet
   }
 }
 
+/** The height a block needs to look right, in cm: the share of the area each block gets follows it. */
+function neededHeight(block: Block, width: number): number {
+  switch (block.type) {
+    case "cards": return 5.5;
+    case "chart": return 7.5;
+    case "table": return Math.max(4, block.rows.length * 1.3);
+    case "text": return Math.max(2.5, linesOf(block.text, 20, width) * 0.95 + 0.6);
+    case "bullets": return Math.max(3, block.items.reduce((sum, item) => sum + linesOf(`• ${item}`, 18, width), 0) * 0.85 + block.items.length * 0.3 + 0.6);
+  }
+}
+
 function contentCommands(page: PageSpec, area: CmRect, slide: number, palette: Palette, path: string): Command[] {
   const blocks = (page.blocks ?? []).map((block, i) => validateBlock(block, `${path}.blocks[${i}]`));
   if (blocks.length === 0) return [];
   if (blocks.length > 3) fail("一页最多 3 个内容块；内容多就拆成两页", `${path}.blocks`);
   const direction = page.layout ?? (blocks.length === 2 && !blocks.some(block => block.type === "cards") ? "columns" : "rows");
-  // A row of cards needs less height than text or a chart.
-  const weights = blocks.map(block => (direction === "rows" && block.type === "cards" ? 0.7 : 1));
-  const parts = split(area, weights, direction, 0.6);
+  const gap = 0.6;
+  const width = direction === "columns" ? (area.w - gap * (blocks.length - 1)) / blocks.length : area.w;
+  const weights = blocks.map(block => (direction === "rows" ? neededHeight(block, width) : 1));
+  const parts = split(area, weights, direction, gap);
   return blocks.flatMap((block, i) => blockCommands(block, parts[i], slide, palette));
 }
 
