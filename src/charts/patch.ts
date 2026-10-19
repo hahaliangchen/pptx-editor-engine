@@ -152,6 +152,44 @@ function setDataLabels(doc: Document, typeNode: Element, chart: ChartModel): voi
   }
 }
 
+const FILL_TAGS = ["noFill", "solidFill", "gradFill", "blipFill", "pattFill", "grpFill"];
+
+function setRunProps(doc: Document, props: Element, sizePt: number, color: string): void {
+  props.setAttribute("sz", String(Math.round(sizePt * 100)));
+  for (const old of getDirectChildren(props, ...FILL_TAGS)) props.removeChild(old);
+  const fill = fragment(doc, `<a:solidFill><a:srgbClr val="${color.replace("#", "").toUpperCase()}"/></a:solidFill>`);
+  const after = getDirectChild(props, "ln");
+  props.insertBefore(fill, after ? after.nextSibling : props.firstChild);
+}
+
+/** The text colour and sizes the model now says, written over what the part had, but only where they changed. */
+function patchText(doc: Document, chartNode: Element, chart: ChartModel): void {
+  const was = chart.fileText;
+  if (!was) return;
+  const labelPt = chart.labelPt ?? was.labelPt;
+  const titlePt = chart.titlePt ?? was.titlePt;
+  const colorChanged = chart.font.color !== was.color;
+  if (!colorChanged && labelPt === was.labelPt && titlePt === was.titlePt) return;
+
+  const space = doc.documentElement;
+  const plotArea = getDirectChild(chartNode, "plotArea");
+  const holders = [
+    getDirectChild(space, "txPr"),
+    ...["catAx", "valAx"].map(name => plotArea && getDirectChild(plotArea, name)).map(axis => axis && getDirectChild(axis, "txPr")),
+    getDirectChild(getDirectChild(chartNode, "legend") ?? chartNode, "txPr"),
+    ...Array.from(doc.getElementsByTagNameNS(C_NS, "dLbls")).map(list => getDirectChild(list, "txPr"))
+  ].filter((node): node is Element => !!node);
+  for (const holder of holders) {
+    for (const props of Array.from(holder.getElementsByTagNameNS(A_NS, "defRPr"))) setRunProps(doc, props, labelPt, chart.font.color);
+  }
+  const title = getDirectChild(chartNode, "title");
+  if (title) {
+    for (const tag of ["defRPr", "rPr"]) {
+      for (const props of Array.from(title.getElementsByTagNameNS(A_NS, tag))) setRunProps(doc, props, titlePt, chart.font.color);
+    }
+  }
+}
+
 /**
  * Write the model's data and settings into a chart part, leaving everything else
  * about it (styles, fonts, axis formats) as the file had it.
@@ -188,6 +226,7 @@ export function patchChartXml(xml: string, chart: ChartModel): string {
   });
 
   setTitle(doc, chartNode, chart);
+  patchText(doc, chartNode, chart);
   setLegend(doc, chartNode, chart);
   setDataLabels(doc, typeNode, chart);
   const gap = getDirectChild(typeNode, "gapWidth");

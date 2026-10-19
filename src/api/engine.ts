@@ -1,6 +1,6 @@
 import { CreatedShape } from "../editor/slide-editor";
 import { NewShapeKind } from "../editor/new-shapes";
-import { ShapeStyleOp } from "../editor/shape-ops";
+import { BackgroundSpec, ShapeStyleOp } from "../editor/shape-ops";
 import { TextOp } from "../editor/text-ops";
 import { paragraphsText } from "../editor/text-model-vdom";
 import { OrderOp } from "../pptx-exporter";
@@ -41,6 +41,7 @@ export interface EditorPort {
     rows: string[][]; header: boolean; fontPt: number; rect?: Rect; columnWidthsPx?: number[]; name?: string;
   }): Promise<CreatedShape | null>;
   updateTable(element: TableElement, edit: (xml: string) => string, label?: string): Promise<void>;
+  setBackground(spec: BackgroundSpec): void;
 }
 
 export interface DecodedImage {
@@ -296,8 +297,18 @@ export class EditApi {
         );
         if (!created) throw new ApiError("FAILED", "无法创建形状", path);
         this.editor.selectShapes([{ part: created.part, id: created.id }]);
-        if (command.fill !== undefined) this.editor.applyShapeStyle({ kind: "fill", color: command.fill });
-        if (command.line) this.editor.applyShapeStyle(this.lineOp(command.line));
+        if (command.fill !== undefined) {
+          if (command.fill !== null && typeof command.fill === "object") this.editor.applyShapeStyle(this.gradientOp(command.fill.gradient));
+          else this.editor.applyShapeStyle({ kind: "fill", color: command.fill });
+        }
+        if (command.opacity !== undefined) {
+          if (command.fill === null) throw new ApiError("INVALID_SCHEMA", "没有填充（fill 为 null）时不能设 opacity", at("opacity"));
+          this.editor.applyShapeStyle({ kind: "opacity", opacity: command.opacity });
+        }
+        if (command.line !== undefined) {
+          this.editor.applyShapeStyle(this.lineOp(command.line === null ? { color: null } : command.line));
+        }
+        if (command.shadow) this.editor.applyShapeStyle(this.shadowOp(command.shadow));
         if (command.text) {
           if (!created.text) throw new ApiError("NOT_APPLICABLE", "直线和箭头没有文字", at("text"));
           this.setTextOn(created.text, command.text);
@@ -316,10 +327,9 @@ export class EditApi {
         }
         const created = await this.editor.insertImage({ ...image, name: command.name || "图片" });
         if (!created) throw new ApiError("FAILED", "无法插入图片", path);
-        if (command.rect) {
-          this.editor.selectShapes([{ part: created.part, id: created.id }]);
-          this.editor.setBounds(command.rect);
-        }
+        if (command.rect || command.shadow) this.editor.selectShapes([{ part: created.part, id: created.id }]);
+        if (command.rect) this.editor.setBounds(command.rect);
+        if (command.shadow) this.editor.applyShapeStyle(this.shadowOp(command.shadow));
         this.register(aliases, command.as, created);
         return this.createdResult(scene, created);
       }
@@ -490,17 +500,7 @@ export class EditApi {
         const { node: found } = await node(command.target);
         this.requirePaintable(found, at("target"));
         if (command.gradient) {
-          const gradient = command.gradient as { kind?: "linear" | "radial"; angle?: number; stops: Array<{ position: number; color: string; opacity?: number }> };
-          this.editor.applyShapeStyle({
-            kind: "gradient",
-            gradient: {
-              kind: gradient.kind ?? "linear",
-              angle: gradient.angle ?? 90,
-              stops: gradient.stops.map(stop => ({
-                position: stop.position / 100, color: stop.color, ...(stop.opacity !== undefined ? { opacity: stop.opacity } : {})
-              }))
-            }
-          });
+          this.editor.applyShapeStyle(this.gradientOp(command.gradient));
           if (command.opacity !== undefined) this.editor.applyShapeStyle({ kind: "opacity", opacity: command.opacity });
         } else if (command.color !== undefined) {
           this.editor.applyShapeStyle({
@@ -522,20 +522,22 @@ export class EditApi {
         }
         return {};
       }
+      case "setBackground": {
+        const scene = resolveSlide(context.scenes, command.slide, at("slide"));
+        await this.deck.showSlide(scene.index - 1);
+        const spec: BackgroundSpec = command.gradient
+          ? { gradient: (this.gradientOp(command.gradient) as Extract<ShapeStyleOp, { kind: "gradient" }>).gradient }
+          : { color: command.color };
+        this.editor.setBackground(spec);
+        return {};
+      }
       case "setShadow": {
         const { node: found } = await node(command.target);
         if (found.kind === "group" || found.kind === "table" || found.kind === "chart") {
           const what = found.kind === "group" ? "组合" : found.kind === "table" ? "表格" : "图表";
           throw new ApiError("NOT_APPLICABLE", `${found.name} 是${what}，不能设置阴影${found.kind === "group" ? "，请指向组合里的形状" : ""}`, at("target"));
         }
-        const given = command.shadow as { color?: string; opacity?: number; blurPt?: number; distancePt?: number; angle?: number } | null;
-        this.editor.applyShapeStyle({
-          kind: "shadow",
-          shadow: given === null ? null : {
-            color: given.color ?? "#000000", opacity: given.opacity ?? 0.35,
-            blurPt: given.blurPt ?? 6, distancePt: given.distancePt ?? 4, angle: given.angle ?? 45
-          }
-        });
+        this.editor.applyShapeStyle(this.shadowOp(command.shadow));
         return {};
       }
       case "setLine": {
@@ -600,6 +602,34 @@ export class EditApi {
   }
 
   // ------------------------------------------------------------------ helpers
+
+  /** A gradient as a command gives it (`kind` or `type`, positions in percent) in the editor's terms. */
+  private gradientOp(gradient: {
+    kind?: "linear" | "radial"; type?: "linear" | "radial"; angle?: number;
+    stops: Array<{ position: number; color: string; opacity?: number }>;
+  }): ShapeStyleOp {
+    return {
+      kind: "gradient",
+      gradient: {
+        kind: gradient.kind ?? gradient.type ?? "linear",
+        angle: gradient.angle ?? 90,
+        stops: gradient.stops.map(stop => ({
+          position: stop.position / 100, color: stop.color, ...(stop.opacity !== undefined ? { opacity: stop.opacity } : {})
+        }))
+      }
+    };
+  }
+
+  /** A shadow as a command gives it; what is left out takes the usual default. */
+  private shadowOp(given: { color?: string; opacity?: number; blurPt?: number; distancePt?: number; angle?: number } | null): ShapeStyleOp {
+    return {
+      kind: "shadow",
+      shadow: given === null ? null : {
+        color: given.color ?? "#000000", opacity: given.opacity ?? 0.35,
+        blurPt: given.blurPt ?? 6, distancePt: given.distancePt ?? 4, angle: given.angle ?? 45
+      }
+    };
+  }
 
   private lineOp(line: { color?: string | null; widthPt?: number; dash?: keyof typeof DASH }): ShapeStyleOp {
     return {

@@ -703,6 +703,8 @@ export class PptxParser {
       }
     }
 
+    this.applyColorMap(masterDoc, layoutDoc, doc);
+
     const elements: SlideElement[] = [];
     const placeholderContext: PlaceholderContext = {
       layoutShapes: layoutDoc ? this.collectPlaceholderShapes(layoutDoc) : [],
@@ -723,6 +725,21 @@ export class PptxParser {
       offsetX: 0,
       offsetY: 0
     };
+
+    // The page's own background, else the layout's, else the master's, lies under everything.
+    const background = await this.parseBackground(
+      [[doc, imgRelMap], [layoutDoc, layoutImgRelMap], [masterDoc, masterImgRelMap]]
+    );
+    if (background) {
+      elements.push({
+        type: "shape",
+        id: "slide_background",
+        rect: { x: 0, y: 0, w: viewSize.width, h: viewSize.height },
+        shapeType: "rect",
+        fill: background.type === "solid" ? background.color : background.type === "gradient" ? background.stops[0].color : "transparent",
+        computedStyle: { fill: background }
+      });
+    }
 
     // First: Parse Slide Master background elements
     if (masterDoc) {
@@ -763,6 +780,66 @@ export class PptxParser {
         : undefined,
       xform: { scaleX, scaleY }
     };
+  }
+
+  /**
+   * Which theme colour "bg1", "tx1", "bg2" and "tx2" stand for on this slide:
+   * the master's colour map, unless the layout or the slide overrides it. A
+   * dark master maps bg1 to the theme's dark colour and tx1 to its light one.
+   */
+  private applyColorMap(master: Document | null, layout: Document | null, slide: Document): void {
+    const identity: Record<string, string> = { bg1: "lt1", tx1: "dk1", bg2: "lt2", tx2: "dk2" };
+    const read = (doc: Document | null): Record<string, string> | null => {
+      const map = doc && querySelector(doc, "p\\:clrMap, clrMap");
+      if (!map) return null;
+      return Object.fromEntries(Object.keys(identity).map(name => [name, map.getAttribute(name) || identity[name]]));
+    };
+    const override = (doc: Document | null): Record<string, string> | null => {
+      const node = doc && querySelector(doc, "p\\:clrMapOvr, clrMapOvr");
+      const explicit = node && getDirectChild(node, "overrideClrMapping");
+      if (!explicit) return null;
+      return Object.fromEntries(Object.keys(identity).map(name => [name, explicit.getAttribute(name) || identity[name]]));
+    };
+    const map = override(slide) ?? override(layout) ?? read(master) ?? identity;
+    for (const [name, source] of Object.entries(map)) {
+      const color = this.themeColors[source];
+      if (color) this.themeColors[name] = color;
+    }
+  }
+
+  /** The fill of the first `p:bg` found, looking at the slide, then its layout, then its master. */
+  private async parseBackground(levels: Array<[Document | null, Record<string, string>]>): Promise<FillStyle | null> {
+    for (const [doc, relMap] of levels) {
+      const cSld = doc && querySelector(doc, "p\\:cSld, cSld");
+      const bg = cSld && getDirectChild(cSld, "bg");
+      if (!bg) continue;
+
+      const properties = getDirectChild(bg, "bgPr");
+      if (properties) {
+        let fill = this.styleResolver.parseFillStyle(properties);
+        if (fill?.type === "picture" && fill.embed && relMap[fill.embed]) {
+          const file = this.zip?.file(relMap[fill.embed]);
+          if (file) fill = { ...fill, url: URL.createObjectURL(await file.async("blob")) };
+        }
+        if (fill) return fill;
+        continue;
+      }
+
+      // A reference into the theme's background styles, painted with the colour given beside it.
+      const reference = getDirectChild(bg, "bgRef");
+      if (reference) {
+        const index = parseInt(reference.getAttribute("idx") || "0", 10);
+        const color = this.extractHexColor(reference);
+        const source = index >= 1000 ? this.themeStyleMatrix.backgroundFills[index - 1001] : this.themeStyleMatrix.fills[index - 1];
+        const fill = index <= 0
+          ? { type: "none" as const }
+          : source
+            ? this.parseFillStyle(source, color)
+            : (color ? { type: "solid" as const, color } : undefined);
+        if (fill) return fill;
+      }
+    }
+    return null;
   }
 
   private resolveRelativePath(baseDir: string, relativePath: string): string {

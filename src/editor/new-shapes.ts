@@ -101,6 +101,8 @@ export function buildPictureXml(id: string, name: string, relId: string, box: Em
 
 export interface NewShapeContext {
   emuPerPx: number;
+  /** Colour of the text in a new text box (the page's usual text colour). */
+  textColor?: string;
   fontFamily?: string;
   eastAsianFontFamily?: string;
 }
@@ -159,7 +161,7 @@ export function buildShapeElements(
   const align = isText ? "left" : "center";
   const style: TextRun["style"] = {
     fontSize: FONT_PT * PT_EMU / context.emuPerPx,
-    color: isText ? TEXTBOX_TEXT : SHAPE_TEXT,
+    color: isText ? context.textColor ?? TEXTBOX_TEXT : SHAPE_TEXT,
     bold: false,
     align,
     ...(context.fontFamily ? { fontFamily: context.fontFamily } : {}),

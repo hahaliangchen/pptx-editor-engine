@@ -71,6 +71,13 @@ const EXAMPLES: Example[] = [
     }
   },
   {
+    title: "深色背景页",
+    commands: [
+      { op: "setBackground", slide: 1, gradient: { angle: 90, stops: [{ position: 0, color: "#0B1026" }, { position: 100, color: "#1F2F6B" }] } },
+      { op: "addText", slide: 1, rect: { x: 3, y: 8, w: 20, h: 3 }, text: "深色背景上的白字", style: { fontSizePt: 32, bold: true } }
+    ]
+  },
+  {
     title: "加表格并改一个单元格",
     commands: {
       label: "加表格",

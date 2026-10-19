@@ -1,6 +1,7 @@
 import { ChartAdd, ChartElement, ChartModel, cloneChart } from "../charts/model";
 import { CHART_REL_TYPE, graphicFrameXml } from "../charts/write";
 import { TableElement, TableModel } from "../tables/model";
+import { defaultTextColor, isDarkSlide } from "./slide-tone";
 import { NewTable, buildTableXml } from "../tables/xml";
 import { ElementSource, GroupRef, Rect, ShapeElement, Slide, SlideElement, TextElement, TextParagraph } from "../pptx-virtual-dom";
 import { Command, History, HistoryEntry } from "./history";
@@ -20,9 +21,11 @@ import { FormatState, FormatToolbar } from "./format-toolbar";
 import { SelectionProperties, describeSelection } from "./properties";
 import { placeholderPrompt } from "./slides";
 import {
+  BackgroundSpec,
   ShapeSnapshot,
   ShapeStyleOp,
   Styled,
+  gradientFill,
   applyAnchorOp,
   applyShapeStyleOp,
   restoreShape,
@@ -446,6 +449,61 @@ class TableCommand implements Command {
     this.element.table = JSON.parse(JSON.stringify(this.before.table));
     this.element.rect = { ...this.before.rect };
     this.editor.afterCommand(this.slide, [this.element.source!], false);
+  }
+}
+
+class BackgroundCommand implements Command {
+  public readonly label = "页面背景";
+  private before: { element: ShapeElement; fill: string; computedStyle: ShapeElement["computedStyle"] } | null = null;
+  private previous: BackgroundSpec | undefined;
+  private created: ShapeElement | null = null;
+
+  constructor(
+    private slide: Slide,
+    private spec: BackgroundSpec,
+    private size: { width: number; height: number },
+    private editor: SlideEditor,
+    private host: EditorHost
+  ) {}
+
+  private fill(): NonNullable<ShapeElement["computedStyle"]>["fill"] {
+    return this.spec.gradient ? gradientFill(this.spec.gradient) : { type: "solid", color: this.spec.color ?? "#ffffff" };
+  }
+
+  apply(): void {
+    const fill = this.fill();
+    const paint = fill.type === "gradient" ? fill.stops[0].color : fill.type === "solid" ? fill.color : "transparent";
+    const existing = this.slide.elements.find((element): element is ShapeElement => element.type === "shape" && element.id === "slide_background");
+    if (existing) {
+      this.before = { element: existing, fill: existing.fill, computedStyle: JSON.parse(JSON.stringify(existing.computedStyle ?? null)) ?? undefined };
+      existing.fill = paint;
+      existing.computedStyle = { fill };
+    } else {
+      this.created = {
+        type: "shape", id: "slide_background", rect: { x: 0, y: 0, w: this.size.width, h: this.size.height },
+        shapeType: "rect", fill: paint, computedStyle: { fill }
+      };
+      this.slide.elements.unshift(this.created);
+    }
+    const structure = this.host.structure();
+    const part = this.slide.part!;
+    this.previous = structure.backgrounds.get(part);
+    structure.backgrounds.set(part, this.spec);
+    this.editor.afterCommand(this.slide, [], false);
+  }
+
+  revert(): void {
+    if (this.before) {
+      this.before.element.fill = this.before.fill;
+      this.before.element.computedStyle = this.before.computedStyle ?? undefined;
+    }
+    if (this.created) this.slide.elements = this.slide.elements.filter(element => element !== this.created);
+    this.created = null;
+    const structure = this.host.structure();
+    const part = this.slide.part!;
+    if (this.previous) structure.backgrounds.set(part, this.previous);
+    else structure.backgrounds.delete(part);
+    this.editor.afterCommand(this.slide, [], false);
   }
 }
 
@@ -1202,7 +1260,7 @@ export class SlideEditor {
     const base = this.slideTransform(slide);
     const source: ElementSource = { part, shapeId: id, name, xform: base };
     const font = this.host.deckFont();
-    const elements = buildShapeElements(kind, source, rect, { emuPerPx: this.emuPerPx(slide), ...font }, flip);
+    const elements = buildShapeElements(kind, source, rect, { emuPerPx: this.emuPerPx(slide), textColor: defaultTextColor(slide), ...font }, flip);
     const xml = buildShapeXml(kind, id, {
       x: Math.round(rect.x / base.scaleX),
       y: Math.round(rect.y / base.scaleY),
@@ -1300,7 +1358,13 @@ export class SlideEditor {
     const chart = cloneChart(spec.chart);
     chart.palette = this.host.themePalette();
     const font = this.host.deckFont();
-    chart.font = { ...chart.font, family: chart.font.family ?? font.fontFamily, eastAsianFamily: chart.font.eastAsianFamily ?? font.eastAsianFontFamily };
+    chart.font = {
+      ...chart.font,
+      // Grey text on a light page, light grey on a dark one.
+      color: isDarkSlide(slide) ? "#f2f2f2" : chart.font.color,
+      family: chart.font.family ?? font.fontFamily,
+      eastAsianFamily: chart.font.eastAsianFamily ?? font.eastAsianFontFamily
+    };
 
     const source: ElementSource = { part, shapeId: id, name, xform: base };
     const element: ChartElement = {
@@ -1385,6 +1449,17 @@ export class SlideEditor {
       { table: parsed.table, rect: parsed.rect, xml },
       this, this.host, label
     );
+    command.apply();
+    this.history.record(command);
+  }
+
+  /** Give the current slide its own background colour or gradient. */
+  public setBackground(spec: BackgroundSpec): void {
+    const slide = this.host.getSlide();
+    const size = this.host.getSlideSize();
+    if (!slide?.part || !size) return;
+    if (this.textSession) this.endTextEdit();
+    const command = new BackgroundCommand(slide, spec, size, this, this.host);
     command.apply();
     this.history.record(command);
   }

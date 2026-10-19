@@ -183,6 +183,62 @@ describe("shadows", () => {
   });
 });
 
+describe("what is natural to write when a shape is made", () => {
+  const rect = { x: 2, y: 10, w: 6, h: 4 };
+
+  it("takes the fill, opacity, border and shadow in one command", async () => {
+    const session = await open();
+    const result = await session.apply([{
+      op: "addShape", slide: 1, shape: "roundRect", rect, name: "一步到位",
+      fill: { gradient: { type: "linear", angle: 45, stops: [{ position: 0, color: "#112233" }, { position: 100, color: "#aabbcc" }] } },
+      opacity: 0.8, line: null, shadow: { blurPt: 9 }
+    }]);
+    expect(result.ok).toBe(true);
+    const shape = await shapeOf(session, "一步到位");
+    expect(shape.fill.gradient).toMatchObject({ type: "linear", angle: 45 });
+    expect(shape.fill.gradient.stops.map((stop: { opacity?: number }) => stop.opacity)).toEqual([0.8, 0.8]);
+    expect(shape.line).toBeNull();
+    expect(shape.shadow).toMatchObject({ blurPt: 9, distancePt: 4 });
+  });
+
+  it("takes a fill back exactly as outline() reported it", async () => {
+    const session = await open();
+    await session.apply([{ op: "setFill", target: card, gradient: { angle: 30, stops: [{ position: 0, color: "#ff0000" }, { position: 100, color: "#0000ff" }] } }]);
+    const reported = (await shapeOf(session)).fill;
+    expect((await session.apply([{ op: "addShape", slide: 1, shape: "rect", rect, name: "拷贝", fill: reported }])).ok).toBe(true);
+    expect((await shapeOf(session, "拷贝")).fill).toEqual(reported);
+  });
+
+  it("reads `type` and `kind` alike in a gradient", async () => {
+    const session = await open();
+    await session.apply([{ op: "setFill", target: card, gradient: { type: "radial", stops: [{ position: 0, color: "#ffffff" }, { position: 100, color: "#000000" }] } }]);
+    expect((await shapeOf(session)).fill.gradient.type).toBe("radial");
+  });
+
+  it("takes a shadow for a picture in the command that adds it", async () => {
+    const session = await open();
+    const canvas = createCanvas(20, 20);
+    canvas.getContext("2d").fillRect(0, 0, 20, 20);
+    const src = `data:image/png;base64,${canvas.toBuffer("image/png").toString("base64")}`;
+    await session.apply([{ op: "addImage", slide: 1, src, rect: { x: 20, y: 2, w: 3, h: 3 }, name: "带影图", shadow: { distancePt: 7 } }]);
+    expect((await shapeOf(session, "带影图")).shadow).toMatchObject({ distancePt: 7 });
+  });
+
+  it("will not set an opacity on a shape made without a fill", async () => {
+    const session = await open();
+    const result = await session.apply([{ op: "addShape", slide: 1, shape: "rect", rect, fill: null, opacity: 0.5 }]);
+    expect(result.error).toMatchObject({ code: "INVALID_SCHEMA", path: "commands[0].opacity" });
+  });
+
+  it("lists the fields a command has when it is given one it does not know", async () => {
+    const session = await open();
+    const result = await session.apply([{ op: "addShape", slide: 1, shape: "rect", rect, glow: 3 }]);
+    expect(result.error!.message).toContain('不认识的字段 "glow"');
+    expect(result.error!.message).toContain("这里可用的字段");
+    expect(result.error!.message).toContain("shadow");
+  });
+});
+
 describe("exporting looks", () => {
   it("writes gradient, opacity and shadow so they read back the same", async () => {
     const session = await open();

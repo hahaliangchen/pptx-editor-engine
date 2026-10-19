@@ -302,6 +302,32 @@ describe("writing a chart part", () => {
   });
 });
 
+describe("a chart's text colour and sizes", () => {
+  const parse = (xml: string) => parseChartXml(xml, "p", context);
+  const written = () => parse(chartXml(model({ title: "T", dataLabels: true, font: { color: "#595959", family: "Arial" }, labelPt: 12, titlePt: 18 })));
+
+  it("remembers what the file had", () => {
+    expect(written().fileText).toEqual({ color: "#595959", labelPt: 12, titlePt: 18 });
+  });
+
+  it("writes a new colour and sizes over the text of an opened chart", () => {
+    const chart = written();
+    const next = { ...chart, font: { ...chart.font, color: "#ff0000" }, labelPt: 16, titlePt: 24 };
+    const back = parse(patchChartXml(chartXml(model({ title: "T", dataLabels: true, font: { color: "#595959", family: "Arial" } })), next));
+    expect(back.font.color).toBe("#ff0000");
+    expect(back.labelPt).toBe(16);
+    expect(back.titlePt).toBe(24);
+  });
+
+  it("leaves the text alone when only the data changed", () => {
+    const xml = chartXml(model({ title: "T", dataLabels: true }));
+    const chart = parse(xml);
+    const out = patchChartXml(xml, { ...chart, series: [{ name: "新", values: [1, 2, 3] }] });
+    const props = (text: string) => (text.match(/<a:defRPr[^>]*>/g) ?? []).join("");
+    expect(props(out)).toBe(props(xml));
+  });
+});
+
 describe("patching a chart part", () => {
   const parse = (xml: string) => parseChartXml(xml, "p", context);
 

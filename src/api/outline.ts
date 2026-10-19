@@ -61,6 +61,9 @@ export interface OutlineShape {
     legend: LegendPosition;
     dataLabels: boolean;
     stacked: boolean;
+    textColor?: string;
+    fontSizePt?: number;
+    titleSizePt?: number;
     unsupported?: string;
   };
 }
@@ -69,6 +72,8 @@ export interface OutlineSlide {
   index: number;
   id: string;
   layout?: string;
+  /** The page's background (its own, or the layout's or master's): a colour, or a gradient. */
+  background?: string | OutlineGradient;
   shapes: OutlineShape[];
 }
 
@@ -122,6 +127,13 @@ function describeFill(shape: ShapeElement): { fill: NonNullable<OutlineShape["fi
   return { fill: { other: fill.type } };
 }
 
+function describeBackground(slide: Slide): { background?: string | OutlineGradient } {
+  const element = slide.elements.find((candidate): candidate is ShapeElement => candidate.type === "shape" && candidate.id === "slide_background");
+  if (!element) return {};
+  const { fill } = describeFill(element);
+  return typeof fill === "string" || (fill && "gradient" in fill) ? { background: fill as string | OutlineGradient } : {};
+}
+
 function describeShadow(shadow: ShadowStyle | undefined, emuPerPx: number): OutlineShadow | undefined {
   if (!shadow) return undefined;
   return {
@@ -164,7 +176,10 @@ function describeNode(node: SceneNode, emuPerPx: number, maxText: number): Outli
         })),
         legend: chart.legend,
         dataLabels: chart.dataLabels,
-        stacked: chart.stacked
+        stacked: chart.stacked,
+        textColor: lower(chart.font.color),
+        fontSizePt: chart.labelPt ?? 12,
+        titleSizePt: chart.titlePt ?? 18
       };
     return out;
   }
@@ -250,6 +265,7 @@ export function buildOutline(doc: PptVirtualDocument, options: OutlineOptions = 
           index: scene.index,
           id: scene.slide.id,
           ...(scene.slide.layout ? { layout: scene.slide.layout } : {}),
+          ...describeBackground(scene.slide),
           shapes: scene.roots.map(node => describeNode(node, emuPerPx, maxText))
         };
       })

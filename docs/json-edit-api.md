@@ -92,6 +92,8 @@
 - `categories`：坐标轴上每组的标签（饼图是每块的名称）；`series`：`[{ "name", "values", "color?" }]`，
   `values` 的个数必须等于 `categories` 的个数，缺的数据写 `null`（折线断开、柱子留空）。饼图只能有一个系列，且不能为负。
 - `legend`：`top` `bottom` `left` `right` `none`，缺省为饼图 `right`、其余 `bottom`；`dataLabels` 缺省为饼图 `true`、其余 `false`。
+- `textColor`、`fontSizePt`（坐标轴、图例、数值的字号，默认 12）、`titleSizePt`（标题，默认 18）控制整张图的文字；
+  不写 `textColor` 时跟随页面底色：浅色底用深灰，深色底用近白。已有图表也能改，只有真正改了的文字才会被重写。
 - 没写 `color` 的系列用文稿主题的强调色（accent1…accent6）依次取色；颜色不够时在同一色上变深或变浅。
 - 新建的图表带一个内嵌的 Excel 工作簿，在 PowerPoint 里"编辑数据"可以直接打开。
 - 文稿里**已有**的图表同样可以用 `setChart` 改数据：只改数据、标题、图例、数据标签，原有的样式、字体、坐标轴格式保持不变；
@@ -126,6 +128,16 @@
 | `copyTo` | `target*`、`slide*`、`as?` | 复制到另一页（图片等关系一并处理） |
 | `delete` | `target*` | |
 
+#### 页面背景
+
+| op | 参数 | 说明 |
+|---|---|---|
+| `setBackground` | `slide*`，以及 `color` 或 `gradient`（二选一） | 给这一页设背景；`gradient` 的写法和 `setFill` 一样 |
+
+- `outline()` 的每一页有 `background`（颜色或渐变）：页面自己的，没有就是版式的、母版的。深色底上的文字、图表、表格要用浅色。
+- 新建的文本框默认用页面"通常的文字色"：浅色底上是黑色，深色底上是白色；图表的文字同理（深灰 / 浅灰）。
+- 深色模板（母版把 `bg1` 映射到深色、`tx1` 映射到浅色）现在能正确画出：黑底白字，和 PowerPoint 一致。
+
 #### 渐变、透明度、阴影
 
 ```json
@@ -143,6 +155,8 @@
 - `shadow`：`color`（默认 `#000000`）、`opacity`（0.35）、`blurPt` 柔和程度（6）、`distancePt` 距离（4）、`angle`（45，0 向右、90 向下），
   都可以省略。组合、表格、图表不能设阴影。
 - `outline()` 读出来时：渐变是 `fill: { gradient: { type, angle, stops } }`，透明的纯色有 `opacity`，阴影是 `shadow: { color, opacity, blurPt, distancePt, angle }`。
+- `addShape` 也可以一步写全：`fill` 可以是颜色、`null` 或 `{ "gradient": {...} }`（就是 `outline()` 读出来的样子，可以原样写回去），
+  还可以带 `opacity`、`line`（`null` 表示无边框）、`shadow`；`addImage` 可以带 `shadow`。`gradient` 里 `kind` 和 `type` 两种写法都认。
 - 文稿里已有的渐变、半透明、阴影都能读出和画出；改的时候只动被指定的那一项，形状的其他设置保持原样。
   形状的填充如果来自主题样式（文件里没有写明），改透明度时会把当前画出来的填充写成明确的颜色。
 
@@ -315,7 +329,7 @@ server.setRequestHandler(CallToolRequestSchema, async req => callMcpTool(deck, r
 | 文本框、基本形状、直线箭头、图片 | 组合图、面积图、散点图等其他图表类型 |
 | 柱形图、条形图、折线图、饼图：读取、渲染、新建、改数据、导出 | 图表的自定义样式编辑、坐标轴设置 |
 | 改文字（保留格式）、局部格式、段落对齐 | 表格的边框与列宽单独设置 |
-| 位置、大小、旋转、填充（纯色、渐变、透明度）、边框、阴影、垂直对齐 | 发光、柔化边缘、倒影的编辑；边框的渐变与透明度 |
+| 位置、大小、旋转、填充（纯色、渐变、透明度）、边框、阴影、页面背景、垂直对齐 | 发光、柔化边缘、倒影的编辑；边框的渐变与透明度 |
 | 对齐到页面、层级、副本、跨页复制 | 动画、切换效果、备注页 |
 
 ## 实现顺序（建议）
@@ -339,7 +353,7 @@ server.setRequestHandler(CallToolRequestSchema, async req => callMcpTool(deck, r
 | `scene.ts` | 把一页还原成选择窗格那样的形状树（组合内嵌套） |
 | `outline.ts` | `outline()`：厘米单位的结构描述 |
 | `resolve.ts` | `id` / `name` / `placeholder` / `text` / `$别名` / `@selection` 寻址，找不到或有歧义时返回候选 |
-| `schema.ts` | JSON Schema（31 个 op）与校验，错误指到具体字段 |
+| `schema.ts` | JSON Schema（32 个 op）与校验，错误指到具体字段 |
 | `charts.ts` | `addChart` / `setChart` 的字段合并与校验 |
 | `tools.ts` | 三个工具的定义、`TOOL_GUIDE`、`callTool`（与厂商无关） |
 | `adapters.ts` | Anthropic / OpenAI / MCP 的工具列表、结果转换与"收到调用就执行"函数 |
@@ -371,3 +385,35 @@ server.setRequestHandler(CallToolRequestSchema, async req => callMcpTool(deck, r
 1. ~~工具定义~~：已完成，见上文"工具定义"。
 2. ~~无头渲染与 `renderSlide(n)`~~：已完成（`HeadlessSession.render`）。
 3. ~~图表、表格进 schema~~：已完成；组合 / 取消组合还没有。
+
+## 用真实模型试过的结果
+
+`npm run agent` 让任何 OpenAI 兼容的模型通过这三个工具做事，并逐轮记录（工具调用、渲染图、token）：
+
+```sh
+npm run agent -- --base http://主机:端口/v1 --model 模型名 --task "做一份……" [--deck 底稿.pptx] [--out 目录] [--no-think]
+```
+
+默认底稿是 `tools/templates/blank.pptx`（16:9，标题 / 标题和内容 / 仅标题 / 空白四个版式，用 `npx vite-node tools/make-template.ts` 生成）。
+在 vLLM 上的 Qwen3.8-27B 上试过六种任务，没有一次要人介入：
+
+| 任务 | 轮数 | 编辑失败 | 备注 |
+|---|---|---|---|
+| 4 页汇报：封面、要点、柱形图、表格 | 4 | 0 | 一次提交 11 条指令，24 秒 |
+| 改 31 页模板：留 3 页，换图表数据、填议程表、改说明文字 | 7–8 | 0 | 大文稿先看概要后，输入 token 从 28.6 万降到 9 万 |
+| 6 页发布会：渐变阴影卡片、对比表、折线图、饼图、数字卡片 | 10 | 0 | 设计感、版式都过关 |
+| 日历页里 6 个同名色块、只给 5 个名称 | 5 | 0 | 主动发现数量对不上并询问，没有乱填 |
+| 3 页深色风格产品介绍 | 10 | 0 | 17 秒 |
+| 关掉思考（`--no-think`）的 6 页发布会 | 7–18 | 1–3 | 失败都是写了接口没有的字段，补上之后降到 1 次 |
+
+试出来、并已经修掉的问题：
+
+- 完整结构太大（31 页 104 KB）：页数多时先给概要，再按页读（`get_outline` 的 `detail`）。
+- 模型会把 `outline()` 读出的格式原样写回去、会在 `addShape` 里直接写 `shadow` 和 `line: null`：接口现在都接受。
+- 模型想调图表文字的颜色和大小，没有字段，于是把同一条指令重复了 8 次：加了 `textColor`、`fontSizePt`、`titleSizePt`，
+  使用指南里也写明"做不到就换办法或如实说明，不要重复同样的指令"。
+- 深色模板被画成白底黑字（页面背景和母版的颜色映射没有处理）：已修，并加了 `setBackground`。
+- 报"不认识的字段"时只说字段名：现在会列出这条指令能用的字段。
+
+模型的版面判断仍有小毛病：卡片偏高、下半部分留白，表格有时不居中。这些靠 `render_slide` 的自检发现不了，
+属于需要在使用指南或模板里给更具体规则的地方。

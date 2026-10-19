@@ -208,6 +208,7 @@ export function parseChartXml(xml: string, part: string, ctx: ChartParseContext)
     if (latin || eastAsian) break;
   }
   if (chart.titlePt === undefined) chart.titlePt = Math.round(chart.labelPt * 1.55 * 10) / 10;
+  chart.fileText = { color: chart.font.color, labelPt: chart.labelPt, titlePt: chart.titlePt };
 
   // A filled chart area (dark slides often have one).
   const areaFill = getDirectChild(space, "spPr");

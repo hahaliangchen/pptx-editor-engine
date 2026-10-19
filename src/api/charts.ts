@@ -10,6 +10,11 @@ export interface ChartFields {
   legend?: LegendPosition;
   dataLabels?: boolean;
   stacked?: boolean;
+  /** Text colour of the whole chart. */
+  textColor?: string;
+  /** Size of axis, legend and value text. */
+  fontSizePt?: number;
+  titleSizePt?: number;
 }
 
 const KIND_NAMES: Record<ChartKind, string> = { column: "柱形图", bar: "条形图", line: "折线图", pie: "饼图" };
@@ -38,6 +43,9 @@ export function applyChartFields(base: ChartModel, fields: ChartFields, at: (fie
   if (fields.legend !== undefined) chart.legend = fields.legend;
   if (fields.dataLabels !== undefined) chart.dataLabels = fields.dataLabels;
   if (fields.stacked !== undefined) chart.stacked = fields.stacked;
+  if (fields.textColor !== undefined) chart.font = { ...chart.font, color: fields.textColor.toLowerCase() };
+  if (fields.fontSizePt !== undefined) chart.labelPt = fields.fontSizePt;
+  if (fields.titleSizePt !== undefined) chart.titlePt = fields.titleSizePt;
 
   const kindName = KIND_NAMES[chart.kind];
   if (chart.categories.length === 0) throw new ApiError("INVALID_SCHEMA", "categories 不能为空", at("categories"));

@@ -11,6 +11,20 @@ export interface GradientSpec {
   stops: Array<{ position: number; color: string; opacity?: number }>;
 }
 
+/** What a page's background can be set to: a colour or a gradient. */
+export interface BackgroundSpec {
+  color?: string;
+  gradient?: GradientSpec;
+}
+
+/** The fill the renderer draws for a gradient spec. */
+export function gradientFill(gradient: GradientSpec): FillStyle {
+  const stops = gradient.stops
+    .map(stop => ({ position: stop.position, color: withAlpha(stop.color, stop.opacity ?? 1) }))
+    .sort((a, b) => a.position - b.position);
+  return { type: "gradient", kind: gradient.kind, stops, angle: gradient.angle, rotateWithShape: true };
+}
+
 export interface ShadowSpec {
   color: string;
   /** 0..1 */
@@ -95,12 +109,8 @@ export function applyShapeStyleOp(shape: Styled, op: ShapeStyleOp, emuPerPx: num
     return;
   }
   if (op.kind === "gradient") {
-    const { gradient } = op;
-    const stops = gradient.stops
-      .map(stop => ({ position: stop.position, color: withAlpha(stop.color, stop.opacity ?? 1) }))
-      .sort((a, b) => a.position - b.position);
-    shape.fill = stops[0].color;
-    const fill: FillStyle = { type: "gradient", kind: gradient.kind, stops, angle: gradient.angle, rotateWithShape: true };
+    const fill = gradientFill(op.gradient);
+    shape.fill = fill.type === "gradient" ? fill.stops[0].color : "transparent";
     if (shape.computedStyle) shape.computedStyle.fill = fill;
     else shape.computedStyle = { fill };
     return;

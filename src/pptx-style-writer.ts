@@ -1,5 +1,5 @@
 import { splitColor } from "./color";
-import { GradientSpec, ShadowSpec, ShapeStyleOp } from "./editor/shape-ops";
+import { BackgroundSpec, GradientSpec, ShadowSpec, ShapeStyleOp } from "./editor/shape-ops";
 import { FillStyle } from "./pptx-virtual-dom";
 import { getDirectChild, getDirectChildren } from "./pptx-xml";
 
@@ -194,4 +194,22 @@ export function writeShapeStyleOps(shape: Element, ops: ShapeStyleOp[]): void {
       bodyPr?.setAttribute("anchor", ANCHOR[op.value]);
     }
   }
+}
+
+const P_NS = "http://schemas.openxmlformats.org/presentationml/2006/main";
+
+/** Give a slide its own background: `<p:bg>` is the first child of `<p:cSld>`. */
+export function writeBackground(doc: Document, spec: BackgroundSpec): void {
+  const cSld = doc.getElementsByTagNameNS(P_NS, "cSld")[0];
+  if (!cSld) return;
+  for (const old of getDirectChildren(cSld, "bg")) cSld.removeChild(old);
+  const fill = spec.gradient
+    ? gradientFill(doc, spec.gradient.kind, spec.gradient.angle, spec.gradient.stops)
+    : solidFill(doc, spec.color ?? "#ffffff");
+  const properties = doc.createElementNS(P_NS, "p:bgPr");
+  properties.appendChild(fill);
+  properties.appendChild(doc.createElementNS(A_NS, "a:effectLst"));
+  const bg = doc.createElementNS(P_NS, "p:bg");
+  bg.appendChild(properties);
+  cSld.insertBefore(bg, cSld.firstChild);
 }

@@ -137,6 +137,29 @@ describe("calling the tools", () => {
     expect(some.slides).toHaveLength(1);
   });
 
+  it("gives an overview of a big deck first, and the detail of the pages asked for", async () => {
+    const session = await open();
+    await session.apply([{ op: "duplicateSlide", slide: 1 }, ...Array.from({ length: 9 }, () => ({ op: "duplicateSlide", slide: 1 }))]);
+    const overview = json(await callTool(session, "get_outline", {}));
+    expect(overview.slides).toHaveLength(11);
+    expect(overview.note).toContain("slides");
+    expect(overview.slides[0]).toMatchObject({ index: 1, title: "市场分析", contents: { text: expect.any(Number), group: 1 } });
+    expect(overview.slides[0].shapes).toBeUndefined();
+
+    const some = json(await callTool(session, "get_outline", { slides: [2] }));
+    expect(some.slides).toHaveLength(1);
+    expect(some.slides[0].shapes.length).toBeGreaterThan(3);
+    expect(json(await callTool(session, "get_outline", { detail: "full" })).slides[0].shapes).toBeDefined();
+    expect(json(await callTool(session, "get_outline", { detail: "brief", slides: [1] })).slides[0].shapes).toBeUndefined();
+    expect((await callTool(session, "get_outline", { detail: "short" })).ok).toBe(false);
+  });
+
+  it("shows a small deck in full, unless an overview is asked for", async () => {
+    const session = await open();
+    expect(json(await callTool(session, "get_outline", {})).slides[0].shapes).toBeDefined();
+    expect(json(await callTool(session, "get_outline", { detail: "brief" })).slides[0].contents).toBeDefined();
+  });
+
   it("applies edits and reports the result as JSON", async () => {
     const session = await open();
     const result = await callTool(session, "apply_edits", {

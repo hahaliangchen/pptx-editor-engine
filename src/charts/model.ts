@@ -33,6 +33,8 @@ export interface ChartModel {
   titlePt?: number;
   /** Fill behind the whole chart; transparent when absent. */
   background?: string;
+  /** Text colour and sizes the file had, to tell later changes from untouched text. */
+  fileText?: { color: string; labelPt: number; titlePt: number };
   /** Colour each series had in the file, to tell later colour edits from untouched series. */
   fileColors?: Array<string | undefined>;
   /** Pie only: colour of each slice where the file names one. */

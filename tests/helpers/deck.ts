@@ -23,6 +23,14 @@ export interface DeckParts {
   slideShapes?: string;
   /** Children of p:defaultTextStyle in presentation.xml. */
   defaultTextStyle?: string;
+  /** The content of a p:bg on the master / layout / slide, e.g. "<p:bgPr>...</p:bgPr>". */
+  masterBackground?: string;
+  layoutBackground?: string;
+  slideBackground?: string;
+  /** Replaces attributes of the master's p:clrMap, e.g. { bg1: "dk1", tx1: "lt1" } for a dark master. */
+  clrMap?: Record<string, string>;
+  /** A layout's p:clrMapOvr, e.g. "<a:overrideClrMapping bg1=...>". */
+  layoutClrMapOvr?: string;
 }
 
 export const ph = (type: string | null, idx: number | null, lstStyle = "", extra = "") =>
@@ -59,15 +67,15 @@ export async function buildDeck(parts: DeckParts): Promise<Buffer> {
     + `<a:fontScheme name="f"><a:majorFont><a:latin typeface="Arial"/></a:majorFont><a:minorFont><a:latin typeface="Calibri"/></a:minorFont></a:fontScheme>`
     + `</a:themeElements></a:theme>`);
   zip.file("ppt/slideMasters/slideMaster1.xml",
-    `<p:sldMaster ${NS}><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>${parts.masterShapes ?? ""}</p:spTree></p:cSld>`
-    + `<p:clrMap bg1="lt1" tx1="dk1" bg2="lt2" tx2="dk2" accent1="accent1" accent2="accent2" accent3="accent3" accent4="accent4" accent5="accent5" accent6="accent6" hlink="hlink" folHlink="folHlink"/>`
+    `<p:sldMaster ${NS}><p:cSld>${parts.masterBackground ? `<p:bg>${parts.masterBackground}</p:bg>` : ""}<p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>${parts.masterShapes ?? ""}</p:spTree></p:cSld>`
+    + `<p:clrMap ${Object.entries({ bg1: "lt1", tx1: "dk1", bg2: "lt2", tx2: "dk2", ...parts.clrMap }).map(([k, v]) => `${k}="${v}"`).join(" ")} accent1="accent1" accent2="accent2" accent3="accent3" accent4="accent4" accent5="accent5" accent6="accent6" hlink="hlink" folHlink="folHlink"/>`
     + `<p:txStyles>${parts.txStyles ?? ""}</p:txStyles></p:sldMaster>`);
   zip.file("ppt/slideMasters/_rels/slideMaster1.xml.rels", RELS([["rId1", "theme", "../theme/theme1.xml"]]));
   zip.file("ppt/slideLayouts/slideLayout1.xml",
-    `<p:sldLayout ${NS}><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>${parts.layoutShapes ?? ""}</p:spTree></p:cSld></p:sldLayout>`);
+    `<p:sldLayout ${NS}><p:cSld>${parts.layoutBackground ? `<p:bg>${parts.layoutBackground}</p:bg>` : ""}<p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>${parts.layoutShapes ?? ""}</p:spTree></p:cSld>${parts.layoutClrMapOvr ? `<p:clrMapOvr>${parts.layoutClrMapOvr}</p:clrMapOvr>` : ""}</p:sldLayout>`);
   zip.file("ppt/slideLayouts/_rels/slideLayout1.xml.rels", RELS([["rId1", "slideMaster", "../slideMasters/slideMaster1.xml"]]));
   zip.file("ppt/slides/slide1.xml",
-    `<p:sld ${NS}><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>${parts.slideShapes ?? ""}</p:spTree></p:cSld></p:sld>`);
+    `<p:sld ${NS}><p:cSld>${parts.slideBackground ? `<p:bg>${parts.slideBackground}</p:bg>` : ""}<p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>${parts.slideShapes ?? ""}</p:spTree></p:cSld></p:sld>`);
   zip.file("ppt/slides/_rels/slide1.xml.rels", RELS([["rId1", "slideLayout", "../slideLayouts/slideLayout1.xml"]]));
   return Buffer.from(await zip.generateAsync({ type: "uint8array" }));
 }

@@ -56,7 +56,8 @@ const gradient = {
   type: "object",
   description: "a colour that changes along a direction",
   properties: {
-    kind: { type: "string", enum: ["linear", "radial"], description: "linear (default) or radial from the centre" },
+    kind: { type: "string", enum: ["linear", "radial"], description: "linear (default) or radial from the centre; `type` means the same" },
+    type: { type: "string", enum: ["linear", "radial"] },
     angle: { type: "number", description: "degrees for linear: 0 runs left to right, 90 top to bottom (default 90)" },
     stops: {
       type: "array", minItems: 2, maxItems: 8,
@@ -84,6 +85,11 @@ const shadow = {
     angle: { type: "number", description: "degrees: 0 casts to the right, 90 downwards, default 45" }
   },
   additionalProperties: false
+};
+/** What a shape's fill can be when it is made: as `outline()` reports it, so it can be sent back as it is. */
+const fillValue = {
+  oneOf: [color, { type: "null" }, { type: "object", properties: { gradient }, required: ["gradient"], additionalProperties: false }],
+  description: "#RRGGBB, null for none, or { gradient: {...} }"
 };
 const align = { type: "string", enum: ["left", "center", "right"] };
 const dash = { type: "string", enum: ["solid", "dash", "dot"] };
@@ -115,7 +121,7 @@ const command = (op: string, properties: Record<string, unknown>, required: stri
 /** Fragments used by many commands; a model gets them once, as definitions, instead of pasted into each. */
 export const sharedSchemas: Record<string, unknown> = {
   slideRef, color, nullableColor: { oneOf: [color, { type: "null" }] }, rect, alias, shapeTarget, target,
-  align, dash, lineStyle, textStyle, opacity, gradient, shadow, chartKind, chartCategories, chartSeries, legendPosition, tableRows, position
+  align, dash, lineStyle, textStyle, opacity, gradient, shadow, fillValue, chartKind, chartCategories, chartSeries, legendPosition, tableRows, position
 };
 
 const commands = [
@@ -136,28 +142,33 @@ const commands = [
   command("addShape", {
     slide: slideRef,
     shape: { type: "string", enum: ["rect", "roundRect", "ellipse", "triangle", "rightArrow", "line", "arrow"] },
-    rect, fill: { oneOf: [color, { type: "null" }] }, line: lineStyle,
+    rect, fill: fillValue, opacity: { ...opacity, description: "how see-through the fill is" },
+    line: { oneOf: [lineStyle, { type: "null" }], description: "the border; null for none" }, shadow: { oneOf: [shadow, { type: "null" }] },
     text: { type: "string" }, flipH: { type: "boolean" }, flipV: { type: "boolean" },
     name: { type: "string", description: "name to find the shape by later" }, as: alias
   }, ["slide", "shape", "rect"]),
   command("addImage", {
     slide: slideRef,
     src: { type: "string", pattern: "^data:image/(png|jpeg|gif);base64,", description: "a data: URL of a PNG, JPEG or GIF" },
-    rect, name: { type: "string" }, as: alias
+    rect, name: { type: "string" }, shadow: { oneOf: [shadow, { type: "null" }] }, as: alias
   }, ["slide", "src"]),
 
   command("addChart", {
     slide: slideRef, type: chartKind, categories: chartCategories, series: chartSeries,
     title: { type: "string" }, legend: legendPosition, dataLabels: { type: "boolean" },
     stacked: { type: "boolean", description: "stack the series (not for pie)" },
+    textColor: { ...color, description: "colour of every text in the chart; the default suits the page's background" },
+    fontSizePt: { type: "number", exclusiveMinimum: 0, description: "size of axis, legend and value text, default 12" },
+    titleSizePt: { type: "number", exclusiveMinimum: 0, description: "size of the chart title, default 18" },
     rect, name: { type: "string" }, as: alias
   }, ["slide", "type", "categories", "series"]),
   command("setChart", {
     target, type: chartKind, categories: chartCategories, series: chartSeries,
     title: { type: ["string", "null"], description: "null removes the title" }, legend: legendPosition,
-    dataLabels: { type: "boolean" }, stacked: { type: "boolean" }
+    dataLabels: { type: "boolean" }, stacked: { type: "boolean" },
+    textColor: color, fontSizePt: { type: "number", exclusiveMinimum: 0 }, titleSizePt: { type: "number", exclusiveMinimum: 0 }
   }, ["target"], {
-    anyOf: ["type", "categories", "series", "title", "legend", "dataLabels", "stacked"].map(field => ({ required: [field] }))
+    anyOf: ["type", "categories", "series", "title", "legend", "dataLabels", "stacked", "textColor", "fontSizePt", "titleSizePt"].map(field => ({ required: [field] }))
   }),
 
   command("addTable", {
@@ -206,6 +217,10 @@ const commands = [
     gradient
   }, ["target"], {
     anyOf: [{ required: ["color"] }, { required: ["opacity"] }, { required: ["gradient"] }],
+    not: { required: ["color", "gradient"] }
+  }),
+  command("setBackground", { slide: slideRef, color, gradient }, ["slide"], {
+    anyOf: [{ required: ["color"] }, { required: ["gradient"] }],
     not: { required: ["color", "gradient"] }
   }),
   command("setShadow", {
@@ -264,7 +279,10 @@ function describe(error: ErrorObject, value: unknown): string {
   const params = error.params as Record<string, unknown>;
   switch (error.keyword) {
     case "required": return `缺少字段 "${params.missingProperty}"`;
-    case "additionalProperties": return `不认识的字段 "${params.additionalProperty}"`;
+    case "additionalProperties": {
+      const known = Object.keys(((error.parentSchema as { properties?: Record<string, unknown> } | undefined)?.properties) ?? {});
+      return `不认识的字段 "${params.additionalProperty}"${known.length > 0 ? `（这里可用的字段：${known.join("、")}）` : ""}`;
+    }
     case "enum": return `取值必须是 ${JSON.stringify(params.allowedValues)} 之一`;
     case "const": return `取值必须是 ${JSON.stringify(params.allowedValue)}`;
     case "type": return `类型必须是 ${params.type}`;

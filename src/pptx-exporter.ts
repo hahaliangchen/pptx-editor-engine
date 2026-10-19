@@ -1,6 +1,7 @@
 import JSZip from "jszip";
 import { ElementSource, GroupRef, Rect, Slide } from "./pptx-virtual-dom";
 import { ChartAdd, ChartModel } from "./charts/model";
+import { BackgroundSpec } from "./editor/shape-ops";
 import { chartShapeOf, patchChartXml } from "./charts/patch";
 import {
   CHART_CONTENT_TYPE,
@@ -14,7 +15,7 @@ import { getDirectChild } from "./pptx-xml";
 import { TextOp } from "./editor/text-ops";
 import { writeTextOps } from "./pptx-text-writer";
 import { ShapeStyleOp } from "./editor/shape-ops";
-import { writeShapeStyleOps } from "./pptx-style-writer";
+import { writeBackground, writeShapeStyleOps } from "./pptx-style-writer";
 import { pruneDeletedReferences, shapeIdsOf } from "./pptx-references";
 
 const A_NS = "http://schemas.openxmlformats.org/drawingml/2006/main";
@@ -208,6 +209,8 @@ export interface StructureEdits {
   chartEdits: Map<string, ChartModel>;
   /** Whole shapes written anew (an edited table): slide part, then shape id, then the shape's XML. */
   replaced: Map<string, Map<string, string>>;
+  /** Backgrounds set on slides, by slide part. */
+  backgrounds: Map<string, BackgroundSpec>;
 }
 
 export const emptyStructure = (): StructureEdits => ({
@@ -218,7 +221,8 @@ export const emptyStructure = (): StructureEdits => ({
   virtual: new Map(),
   charts: [],
   chartEdits: new Map(),
-  replaced: new Map()
+  replaced: new Map(),
+  backgrounds: new Map()
 });
 
 export function pushItem<T>(log: Map<string, T[]>, part: string, item: T): void {
@@ -277,6 +281,9 @@ function applyPartEdits(doc: Document, part: string, slides: Slide[], edits: Edi
     if (fragment.getElementsByTagName("parsererror").length > 0 || !spTree) continue;
     spTree.appendChild(doc.importNode(fragment.documentElement, true));
   }
+
+  const background = edits.structure.backgrounds.get(part);
+  if (background) writeBackground(doc, background);
 
   // A shape written anew takes the old one's place, before anything addresses it.
   for (const [shapeId, xml] of edits.structure.replaced.get(part) || []) {
@@ -845,7 +852,7 @@ export async function exportEditedPptx(
     }
     const parts = new Set([
       ...dirty.keys(), ...textEdits.keys(), ...styleEdits.keys(),
-      ...structure.orders.keys(), ...structure.inserts.keys(), ...structure.relAdds.keys(), ...structure.replaced.keys()
+      ...structure.orders.keys(), ...structure.inserts.keys(), ...structure.relAdds.keys(), ...structure.replaced.keys(), ...structure.backgrounds.keys()
     ]);
     for (const part of parts) {
       if (listed && !livingParts.has(part)) continue;

@@ -35,6 +35,38 @@ export interface ToolResult {
 
 export const RENDER_WIDTH = { min: 160, max: 2560, default: 1024 };
 
+/** A deck with more pages than this gets an overview first, unless the model asks for pages or for the full outline. */
+export const BRIEF_ABOVE = 8;
+
+interface OutlineNode { type: string; text?: string; placeholder?: string; children?: OutlineNode[] }
+
+/** One line per page: layout, title and what is on it. The detail is a `slides` call away. */
+function briefOf(outline: Outline): unknown {
+  const count = (nodes: OutlineNode[], into: Record<string, number>) => {
+    for (const node of nodes) {
+      into[node.type] = (into[node.type] ?? 0) + 1;
+      if (node.children) count(node.children, into);
+    }
+    return into;
+  };
+  return {
+    slideSize: outline.slideSize,
+    layouts: outline.layouts,
+    note: `文稿共 ${outline.slides.length} 页，这里只给概要；要看某几页的对象、位置、文字和数据，请用 slides 指定页码再调用一次。`,
+    slides: outline.slides.map(slide => {
+      const shapes = slide.shapes as unknown as OutlineNode[];
+      const title = shapes.find(shape => shape.placeholder === "title" || shape.placeholder === "ctrTitle")
+        ?? shapes.find(shape => shape.type === "text" && shape.text);
+      return {
+        index: slide.index,
+        ...(slide.layout ? { layout: slide.layout } : {}),
+        ...(title?.text ? { title: title.text.length > 40 ? `${title.text.slice(0, 40)}…` : title.text } : {}),
+        contents: count(shapes, {})
+      };
+    })
+  };
+}
+
 export const TOOLS: ToolDefinition[] = [
   {
     name: "get_outline",
@@ -42,7 +74,7 @@ export const TOOLS: ToolDefinition[] = [
       "读取演示文稿现在的结构：版式名称列表，以及每一页上每个对象的 id、名称、类型"
       + "（text、shape、image、line、table、chart、group）、位置和大小（厘米）、文字、样式；"
       + "表格给出各行各列的文字，图表给出类型、分类和各系列的数据。"
-      + "修改之前先调用它，才知道要改的对象叫什么、在哪里。文稿很大时用 slides 只读需要的页。",
+      + "修改之前先调用它，才知道要改的对象叫什么、在哪里。页数很多的文稿先给概要，再用 slides 读需要的页。",
     inputSchema: {
       type: "object",
       properties: {
@@ -53,6 +85,10 @@ export const TOOLS: ToolDefinition[] = [
         maxTextLength: {
           type: "integer", minimum: 20,
           description: "每个对象的文字超过这个长度就截断（默认 500），被截断的对象带 textTruncated: true"
+        },
+        detail: {
+          type: "string", enum: ["brief", "full"],
+          description: `brief 只给每页的版式、标题和对象数量；full 给全部细节。不写时：指定了 slides 或不超过 ${BRIEF_ABOVE} 页给 full，页数更多给 brief`
         }
       },
       additionalProperties: false
@@ -93,13 +129,16 @@ export const TOOL_GUIDE = [
   "你可以用三个工具读取和修改一份 PPTX 演示文稿：get_outline、apply_edits、render_slide。",
   "",
   "工作方式：",
-  "1. 先 get_outline 看清现有内容，再动手；不要凭空猜对象的名称。",
+  "1. 先 get_outline 看清现有内容，再动手；不要凭空猜对象的名称。页数很多时它先给概要，再用 slides 读你要改的那几页。",
   "2. 用 apply_edits 一次提交一页（或几页）的全部改动，而不是一条一条地调用。",
   "3. 需要引用刚创建的对象时，给它写 as 别名，后面的指令用 \"$别名\" 指向它。",
   "4. 改完用 render_slide 看效果：文字是否溢出、对象是否重叠或超出页面、颜色是否清楚；有问题就再改。",
-  "5. apply_edits 失败时，读返回的 error.message、error.path 和 candidates，改正那一条后重新提交；失败的批次不会留下任何改动。",
+  "5. 如果现有字段做不到你想要的效果，不要把同样的指令重复提交（它不会有新结果）：换一种办法，或者直接告诉用户这一点做不到。没有直接改 XML 的办法。每页检查修正最多两轮，没有明显问题就结束。",
+  "6. apply_edits 失败时，读返回的 error.message、error.path 和 candidates，改正那一条后重新提交；失败的批次不会留下任何改动。",
   "",
   "约定：页码从 1 开始；长度单位是厘米；颜色是 #RRGGBB；字号是磅（fontSizePt）。",
+  "页面背景用 setBackground 设置（纯色或渐变），不要铺一个满页的矩形来冒充；get_outline 的 background 告诉你每页现在的底色：深色底上的文字、图表、表格要用浅色，别让文字和底色相近。",
+  "版面：新增内容的左边与标题的左边对齐，左右留相同的边距，不要超出页面；表格和图表居中或与标题对齐，不要偏向一边。",
   "数据用 addChart（柱形 column、条形 bar、折线 line、饼图 pie）；成行成列的内容用 addTable；",
   "已有的图表和表格用 setChart、setTable、setCell 改数据，它们会保留原来的样式。",
   "修改已有对象时尽量保留它原来的格式：改文字用 setText 或 replaceText，不要删掉重建。"
@@ -150,7 +189,13 @@ export async function callTool(host: ToolHost, name: string, args: unknown): Pro
           }
           options.maxTextLength = input.maxTextLength as number;
         }
-        return { ok: true, content: [text(await host.outline(options))] };
+        if (input.detail !== undefined && input.detail !== "brief" && input.detail !== "full") {
+          return failure('detail 必须是 "brief" 或 "full"');
+        }
+        const outline = await host.outline(options);
+        const brief = input.detail === "brief"
+          || (input.detail === undefined && options.slides === undefined && outline.slides.length > BRIEF_ABOVE);
+        return { ok: true, content: [text(brief ? briefOf(outline) : outline)] };
       }
 
       case "apply_edits": {

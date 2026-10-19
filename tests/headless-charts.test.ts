@@ -113,6 +113,36 @@ describe("adding a chart", () => {
   });
 });
 
+describe("a chart's text", () => {
+  it("takes a colour and sizes when it is made, reports them, and keeps them through a file", async () => {
+    const session = await open();
+    await session.apply([{ ...sales, textColor: "#FF0000", fontSizePt: 16, titleSizePt: 24 }]);
+    expect((await chartOf(session)).chart).toMatchObject({ textColor: "#ff0000", fontSizePt: 16, titleSizePt: 24 });
+    const bytes = await session.export();
+    const zip = await JSZip.loadAsync(bytes);
+    const xml = await zip.file("ppt/charts/chart1.xml")!.async("string");
+    expect(xml).toContain('sz="1600"');
+    expect(xml).toContain('sz="2400"');
+    expect(xml).toContain("FF0000");
+    expect((await chartOf(await open(bytes))).chart).toMatchObject({ textColor: "#ff0000", fontSizePt: 16, titleSizePt: 24 });
+  });
+
+  it("changes the text of a chart of an opened deck", async () => {
+    const first = await open();
+    await first.apply([sales]);
+    const second = await open(await first.export());
+    await second.apply([{ op: "setChart", target: { slide: 1, name: "营收图" }, textColor: "#00ff00", fontSizePt: 14 }]);
+    expect((await chartOf(second)).chart).toMatchObject({ textColor: "#00ff00", fontSizePt: 14 });
+    const third = await open(await second.export());
+    expect((await chartOf(third)).chart).toMatchObject({ textColor: "#00ff00", fontSizePt: 14 });
+  });
+
+  it("is told a size must be positive", async () => {
+    const session = await open();
+    expect((await session.apply([{ ...sales, fontSizePt: 0 }])).error).toMatchObject({ code: "INVALID_SCHEMA" });
+  });
+});
+
 describe("changing a chart", () => {
   it("replaces data and settings, and undo brings the old ones back", async () => {
     const session = await open();
@@ -122,7 +152,7 @@ describe("changing a chart", () => {
       categories: ["甲", "乙"], series: [{ name: "唯一", values: [3, 4] }]
     }]);
     expect(result.ok).toBe(true);
-    expect((await chartOf(session)).chart).toEqual({
+    expect((await chartOf(session)).chart).toMatchObject({
       type: "line", categories: ["甲", "乙"], series: [{ name: "唯一", values: [3, 4] }],
       legend: "right", dataLabels: true, stacked: false
     });
