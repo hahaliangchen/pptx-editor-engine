@@ -83,7 +83,7 @@ describe("open font policy", () => {
   });
 
   it("marks every deck tool as executed by the page", () => {
-    expect(PAGE_TOOLS.map(t => t.name)).toEqual(["get_outline", "apply_edits", "render_slide", "check_layout", "check_template", "get_template", "build_deck"]);
+    expect(PAGE_TOOLS.map(t => t.name)).toEqual(["get_outline", "apply_edits", "render_slide", "check_layout", "suggest_annotations", "check_template", "get_template", "build_deck"]);
     expect(PAGE_TOOLS.every(t => t.executor === "page")).toBe(true);
   });
 });

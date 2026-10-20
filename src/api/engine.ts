@@ -1,3 +1,4 @@
+import { fitImage, placeholderImage } from "./image-fit";
 import { CreatedShape } from "../editor/slide-editor";
 import { NewShapeKind } from "../editor/new-shapes";
 import { BackgroundSpec, ShapeStyleOp } from "../editor/shape-ops";
@@ -25,6 +26,7 @@ export interface EditorPort {
   clearSelection(): void;
   applyTextOps(element: TextElement, ops: TextOp[]): void;
   applyShapeStyle(op: ShapeStyleOp): void;
+  rename(value: string): void;
   setBounds(change: Partial<{ x: number; y: number; w: number; h: number }>, keepRatio?: boolean): void;
   setRotationDegrees(degrees: number): void;
   alignToSlide(edge: "left" | "hcenter" | "right" | "top" | "vcenter" | "bottom"): void;
@@ -327,7 +329,13 @@ export class EditApi {
         await this.deck.showSlide(scene.index - 1);
         let image: DecodedImage;
         try {
-          image = await this.deck.decodeImage(command.src);
+          let src: string = command.src;
+          if (command.fit) {
+            if (!command.rect) throw new Error("fit 需要同时给 rect");
+            const spec = { aspect: command.rect.w / command.rect.h, shape: command.fit.shape, radius: command.fit.radius };
+            src = src.startsWith("placeholder:") ? placeholderImage(spec) : await fitImage(src, spec);
+          }
+          image = await this.deck.decodeImage(src);
         } catch (error) {
           throw new ApiError("INVALID_SCHEMA", `图片无法读取：${error instanceof Error ? error.message : error}`, at("src"));
         }
@@ -550,6 +558,11 @@ export class EditApi {
         const { node: found } = await node(command.target);
         this.requirePaintable(found, at("target"));
         this.editor.applyShapeStyle(this.lineOp(command as { color?: string | null; widthPt?: number; dash?: keyof typeof DASH }));
+        return {};
+      }
+      case "setName": {
+        await node(command.target);
+        this.editor.rename(String(command.name));
         return {};
       }
       case "setAnchor": {

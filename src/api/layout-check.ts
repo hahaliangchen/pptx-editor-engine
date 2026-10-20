@@ -8,7 +8,7 @@ import type { CmRect, Outline, OutlineShape } from "./outline";
  * alone, so it costs nothing and misses nothing it can measure.
  */
 
-export type IssueKind = "text_overflow" | "out_of_bounds" | "overlap" | "empty_space" | "small_text" | "small_object";
+export type IssueKind = "text_overflow" | "out_of_bounds" | "overlap" | "empty_space" | "small_text" | "small_object" | "edge_margin" | "type_hierarchy" | "unbalanced";
 
 export interface LayoutIssue {
   slide: number;
@@ -52,7 +52,7 @@ const isContent = (shape: OutlineShape) =>
   shape.type === "chart" || shape.type === "table"
   || (!!shape.text && shape.text.trim() !== "" && (shape.style?.opacity ?? 1) >= 0.5);
 
-/** The part of a text box its text actually fills (top anchored, as far as the box is wide). */
+/** The part of a text box its text actually fills (as far as the box is wide; where it sits follows the anchor). */
 function inkOf(shape: OutlineShape): CmRect {
   if (!shape.text) return shape.rect;
   const need = measure(shape);
@@ -60,7 +60,9 @@ function inkOf(shape: OutlineShape): CmRect {
   const w = Math.min(shape.rect.w, need.oneLine);
   const align = shape.style?.align;
   const x = align === "center" ? shape.rect.x + (shape.rect.w - w) / 2 : align === "right" ? shape.rect.x + shape.rect.w - w : shape.rect.x;
-  return { x, y: shape.rect.y, w, h };
+  const anchor = shape.style?.anchor;
+  const y = anchor === "middle" ? shape.rect.y + (shape.rect.h - h) / 2 : anchor === "bottom" ? shape.rect.y + shape.rect.h - h : shape.rect.y;
+  return { x, y, w, h };
 }
 
 export function checkLayout(outline: Outline, options: { slides?: number[] } = {}): LayoutIssue[] {
@@ -96,6 +98,30 @@ export function checkLayout(outline: Outline, options: { slides?: number[] } = {
       }
     }
 
+    // The body of the page: below the header strip, clear of the footer.
+    const bodyShapes = content.filter(shape => shape.rect.y > pageH * 0.14 && shape.rect.y + shape.rect.h < pageH * 0.93 && shape.rect.w * shape.rect.h < pageW * pageH * 0.6);
+
+    // Content touching the page edge looks cramped and prints badly.
+    const edge = 1 * (pageW / 33.87);
+    // Large display text (a cover title) is the template's own layout, not content laid out by the deck.
+    const display = 32 * (pageW / 33.87);
+    const cramped = bodyShapes.filter(shape => (shape.style?.fontSizePt ?? 0) < display
+      && (shape.rect.x < edge - TOLERANCE || shape.rect.x + shape.rect.w > pageW - edge + TOLERANCE));
+    if (cramped.length > 0) {
+      add("edge_margin", cramped.map(shape => shape.id), `${cramped.map(shape => label(shape)).join("、")} 离页面左右边缘不到 ${round(edge)} 厘米，显得局促；向内收，左右各留出至少 ${round(1.2 * (pageW / 33.87))} 厘米`);
+    }
+
+    // Reading order: a paragraph set much larger than the text of the table, cards or text beside it.
+    const sized = bodyShapes.filter(shape => shape.text && shape.style?.fontSizePt);
+    if (sized.length >= 2) {
+      const sizes = sized.map(shape => shape.style!.fontSizePt as number).sort((a, b) => a - b);
+      const median = sizes[Math.floor(sizes.length / 2)];
+      const loud = sized.filter(shape => (shape.text ?? "").length >= 30 && (shape.style!.fontSizePt as number) > median * 1.5);
+      if (loud.length > 0) {
+        add("type_hierarchy", loud.map(shape => shape.id), `${loud.map(shape => label(shape)).join("、")} 的字号比同页其他文字大得多（${loud[0].style!.fontSizePt} 磅，同页多数是 ${median} 磅），主次颠倒；把它缩小到和同页文字相近，或放大同页的表格、卡片文字`);
+      }
+    }
+
     for (let i = 0; i < content.length; i++) {
       for (let j = i + 1; j < content.length; j++) {
         const a = inkOf(content[i]);
@@ -110,10 +136,23 @@ export function checkLayout(outline: Outline, options: { slides?: number[] } = {
     // A page with a chart, a table or several blocks that stops short of the page's lower part.
     const body = content.filter(shape => shape.rect.y > pageH * 0.14 && shape.rect.y + shape.rect.h < pageH * 0.93);
     const rich = body.length >= 3 || body.some(shape => shape.type === "chart" || shape.type === "table");
+    // Cards and panels hold their text: the room a page uses reaches their edges, not only the text inside.
+    const panels = shapes.filter(shape => shape.type === "shape" && shape.rect.w > 1 && shape.rect.h > 1 && shape.rect.y > pageH * 0.14
+      && shape.rect.y + shape.rect.h < pageH * 0.95 && shape.rect.w * shape.rect.h < pageW * pageH * 0.6);
     if (rich) {
-      const bottom = Math.max(...body.map(shape => inkOf(shape).y + inkOf(shape).h));
+      const extents = [...body.map(shape => inkOf(shape)), ...panels.map(shape => shape.rect)];
+      const bottom = Math.max(...extents.map(rect => rect.y + rect.h));
       if (bottom < pageH * 0.68) {
         add("empty_space", [], `内容只到页面的 ${Math.round((bottom / pageH) * 100)}% 处，下面大片空白；可以放大图表或文字、增加内容，或把内容垂直居中`);
+      } else {
+        // Not empty, but sitting at the top: a big gap below and none above.
+        const headerBottom = Math.max(0, ...content.filter(shape => shape.rect.y < pageH * 0.14).map(shape => shape.rect.y + shape.rect.h));
+        const top = Math.min(...extents.map(rect => rect.y));
+        const above = Math.max(0.1, top - headerBottom);
+        const below = pageH * 0.95 - bottom;
+        if (below > 3 && below > 2.2 * above + 1.5) {
+          add("unbalanced", [], `内容整体偏上：上面只留了约 ${round(above)} 厘米，下面空了约 ${round(below)} 厘米；把内容放大一些，或整体下移到垂直居中`);
+        }
       }
     }
   }

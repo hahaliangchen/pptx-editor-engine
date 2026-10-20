@@ -304,6 +304,35 @@ class AnchorCommand implements Command {
   }
 }
 
+/** Names a shape, or a group of shapes, as the template author wants it (PowerPoint's selection pane shows it). */
+class RenameCommand implements Command {
+  public readonly label = "重命名";
+
+  constructor(
+    private slide: Slide,
+    private items: Array<{ ref: { name?: string }; source: ElementSource; before: string | undefined }>,
+    private value: string,
+    private editor: SlideEditor,
+    private host: EditorHost
+  ) {}
+
+  apply(): void {
+    for (const { ref, source } of this.items) {
+      ref.name = this.value;
+      this.host.recordStyleOp(source, { kind: "name", value: this.value });
+    }
+    this.editor.afterCommand(this.slide, [], false);
+  }
+
+  revert(): void {
+    for (const { ref, source, before } of this.items) {
+      ref.name = before;
+      this.host.discardStyleOp(source);
+    }
+    this.editor.afterCommand(this.slide, [], false);
+  }
+}
+
 class ArrangeCommand implements Command {
   public readonly label = "调整层级";
 
@@ -1133,6 +1162,29 @@ export class SlideEditor {
     this.paintOverlay();
     this.emit();
     return true;
+  }
+
+  /** Give the selected shapes (a group counts as one) a name. */
+  public rename(value: string): void {
+    const slide = this.host.getSlide();
+    if (!slide || this.selection.size === 0) return;
+    if (this.textSession) this.endTextEdit();
+    const items: Array<{ ref: { name?: string }; source: ElementSource; before: string | undefined }> = [];
+    for (const { part, id } of this.selectionRefs()) {
+      const leaf = slide.elements.find(element => element.source?.part === part && element.source.shapeId === id);
+      if (leaf?.source) {
+        items.push({ ref: leaf.source, source: leaf.source, before: leaf.source.name });
+        continue;
+      }
+      for (const element of slide.elements) {
+        const group = element.source?.groups?.find(candidate => candidate.shapeId === id);
+        if (group && element.source && !items.some(item => item.ref === group)) items.push({ ref: group, source: { ...element.source, shapeId: id }, before: group.name });
+      }
+    }
+    if (items.length === 0) return;
+    const command = new RenameCommand(slide, items, value, this, this.host);
+    command.apply();
+    this.history.record(command);
   }
 
   public selectionRefs(): Array<{ part: string; id: string }> {

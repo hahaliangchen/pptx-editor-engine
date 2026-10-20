@@ -20,7 +20,7 @@ export function pageBatchSchema(): Record<string, unknown> {
     if (command.properties.op.const !== "addImage") continue;
     command.properties.src = {
       type: "string",
-      pattern: "^(data:image/(png|jpeg|gif);base64,|project:images/)",
+      pattern: "^(data:image/(png|jpeg|gif);base64,|project:images/|placeholder:)",
       description: "a data: URL of a PNG, JPEG or GIF, or a picture in the project: \"project:\" + its path (e.g. the remote_path of an attachment, project:images/....png)"
     };
   }

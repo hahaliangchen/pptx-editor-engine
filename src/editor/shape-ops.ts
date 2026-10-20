@@ -46,7 +46,9 @@ export type ShapeStyleOp =
   | { kind: "shadow"; shadow: ShadowSpec | null }
   /** Only the given fields change; `color` null removes the border. */
   | { kind: "line"; color?: string | null; widthPt?: number; dash?: LineDash }
-  | { kind: "anchor"; value: "top" | "middle" | "bottom" };
+  | { kind: "anchor"; value: "top" | "middle" | "bottom" }
+  /** The shape's name (p:cNvPr@name), which a template uses to say what a shape is for. */
+  | { kind: "name"; value: string };
 
 const PT_EMU = 12700;
 const DEFAULT_LINE_PT = 1;
@@ -82,6 +84,7 @@ export function restoreShape(shape: Styled, snapshot: ShapeSnapshot): void {
 
 /** Apply a fill/line op to the renderer's shape element. */
 export function applyShapeStyleOp(shape: Styled, op: ShapeStyleOp, emuPerPx: number): void {
+  if (op.kind === "name") return;
   if (op.kind === "shadow") {
     const holder = shape.type === "image" ? shape : (shape.computedStyle ??= { fill: { type: "none" } });
     const effects = { ...(shape.type === "image" ? shape.effects : shape.computedStyle?.effects) };

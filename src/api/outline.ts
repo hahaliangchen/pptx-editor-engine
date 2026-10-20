@@ -41,7 +41,7 @@ export interface OutlineShape {
   rotation: number;
   text?: string;
   textTruncated?: boolean;
-  style?: { fontSizePt?: number; bold?: boolean; italic?: boolean; color?: string; opacity?: number; align?: string };
+  style?: { fontSizePt?: number; bold?: boolean; italic?: boolean; color?: string; opacity?: number; align?: string; /** Where the text sits in its box when it is not the top. */ anchor?: "middle" | "bottom" };
   /** A colour, null for none, a gradient, or a pattern or picture the commands cannot describe. */
   fill?: string | null | OutlineGradient | { other: "pattern" | "picture" };
   /** Opacity of the fill when it is see-through (1 is left out). */
@@ -50,6 +50,8 @@ export interface OutlineShape {
   shadow?: OutlineShadow;
   line?: { color: string; widthPt: number; dash: string } | null;
   children?: OutlineShape[];
+  /** Set when the shape's name binds it to a template field (see `bindOutline`): its text is then the field's keyword, the real text is the sample. */
+  binding?: string;
   /** The text of a table, row by row, and its grid; merged cells make `merged` true. */
   table?: { rows: string[][]; columns: number; columnWidths: number[]; rowHeights: number[]; merged?: boolean };
   /** The data and settings of a chart; `unsupported` names kinds that are only drawn as a placeholder. */
@@ -239,7 +241,8 @@ function describeNode(node: SceneNode, emuPerPx: number, maxText: number): Outli
         italic: !!run.style.italic,
         color: splitColor(run.style.color).hex,
         ...(splitColor(run.style.color).opacity < 1 ? { opacity: round(splitColor(run.style.color).opacity) } : {}),
-        align: element?.paragraphs?.[0]?.style.align
+        align: element?.paragraphs?.[0]?.style.align,
+        ...(element?.body?.verticalAnchor === "middle" || element?.body?.verticalAnchor === "bottom" ? { anchor: element.body.verticalAnchor } : {})
       };
     }
   }

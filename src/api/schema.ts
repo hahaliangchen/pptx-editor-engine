@@ -149,8 +149,14 @@ const commands = [
   }, ["slide", "shape", "rect"]),
   command("addImage", {
     slide: slideRef,
-    src: { type: "string", pattern: "^data:image/(png|jpeg|gif);base64,", description: "a data: URL of a PNG, JPEG or GIF" },
-    rect, name: { type: "string" }, shadow: { oneOf: [shadow, { type: "null" }] }, as: alias
+    src: { type: "string", pattern: "^(data:image/(png|jpeg|gif);base64,|placeholder:)", description: "a data: URL of a PNG, JPEG or GIF; \"placeholder:\" draws a stand-in picture (with fit)" },
+    rect, name: { type: "string" }, shadow: { oneOf: [shadow, { type: "null" }] }, as: alias,
+    fit: {
+      type: "object",
+      description: "cut the picture to the rect's proportions (the middle of it) and, for a round or rounded slot, to its outline; needs rect",
+      properties: { shape: { type: "string", enum: ["rect", "ellipse", "roundRect"] }, radius: { type: "number", minimum: 0, maximum: 0.5 } },
+      additionalProperties: false
+    }
   }, ["slide", "src"]),
 
   command("addChart", {
@@ -229,6 +235,7 @@ const commands = [
   command("setLine", { target, color: { oneOf: [color, { type: "null" }] }, widthPt: { type: "number", exclusiveMinimum: 0 }, dash }, ["target"],
     { anyOf: [{ required: ["color"] }, { required: ["widthPt"] }, { required: ["dash"] }] }),
   command("setAnchor", { target, anchor: { type: "string", enum: ["top", "middle", "bottom"] } }, ["target", "anchor"]),
+  command("setName", { target, name: { type: "string", minLength: 1, maxLength: 200, description: "the shape's name, as the selection pane shows it" } }, ["target", "name"]),
   command("align", {
     targets: { type: "array", minItems: 1, items: target },
     to: { const: "slide" },

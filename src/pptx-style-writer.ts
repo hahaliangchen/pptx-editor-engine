@@ -189,7 +189,11 @@ export function writeShapeStyleOps(shape: Element, ops: ShapeStyleOp[]): void {
     else if (op.kind === "opacity") writeOpacity(shape, op.opacity, op.base);
     else if (op.kind === "shadow") writeShadow(shape, op.shadow);
     else if (op.kind === "line") writeLine(shape, op);
-    else {
+    else if (op.kind === "name") {
+      const holder = Array.from(shape.children).find(child => /^nv.*Pr$/.test(child.localName));
+      const properties = holder ? Array.from(holder.children).find(child => child.localName === "cNvPr") : undefined;
+      properties?.setAttribute("name", op.value);
+    } else {
       const bodyPr = getDirectChild(getDirectChild(shape, "txBody") || shape, "bodyPr");
       bodyPr?.setAttribute("anchor", ANCHOR[op.value]);
     }

@@ -1,6 +1,7 @@
 import type { CmRect, Outline, OutlineShape, OutlineSlide } from "./outline";
+import { findUnits, isImageShape } from "./units";
 import {
-  AUTO_TOKENS, PAGE_KINDS, PageKind, accentOf, flatten, inferTemplate, isDark, isNumber, kindOf, tokensIn
+  AUTO_TOKENS, PAGE_KINDS, PageKind, accentOf, bindOutline, declaredKind, declaredVariant, parseBinding, flatten, inferTemplate, isDark, isNumber, kindOf, tokensIn
 } from "./template";
 
 /**
@@ -20,7 +21,7 @@ export interface TemplateIssue {
   kind:
     | "missing_role" | "duplicate_role" | "unassigned" | "role_order" | "missing_token" | "role_conflict"
     | "token_in_shape" | "unknown_token" | "renamed_token" | "bad_token" | "multiple_fields"
-    | "toc_header" | "toc_numbering" | "toc_order" | "content_area";
+    | "toc_header" | "toc_numbering" | "toc_order" | "content_area" | "unit" | "image_slot";
   /** Objects concerned (ids on that slide). */
   ids: string[];
   message: string;
@@ -53,10 +54,12 @@ const round = (value: number) => Math.round(value * 10) / 10;
 const area = (rect: CmRect) => rect.w * rect.h;
 
 /** The role of every page, from its keywords; undefined when it has none. */
-export function slideRoles(outline: Outline): Array<{ slide: number; role?: PageKind }> {
+export function slideRoles(source: Outline): Array<{ slide: number; role?: PageKind }> {
+  const { outline } = bindOutline(source);
   return outline.slides.map(slide => {
-    const tokens = new Set(flatten(slide.shapes).flatMap(shape => (shape.text ? tokensIn(shape.text) : [])));
-    return { slide: slide.index, role: kindOf(tokens) };
+    const shapes = flatten(slide.shapes);
+    const tokens = new Set(shapes.flatMap(shape => (shape.text ? tokensIn(shape.text) : [])));
+    return { slide: slide.index, role: declaredKind(shapes) ?? kindOf(tokens) };
   });
 }
 
@@ -74,7 +77,8 @@ const REQUIRED_TOKENS: Record<PageKind, string[]> = {
 };
 
 /** What is wrong with a template deck, page by page. An empty list means it can be saved. */
-export function checkTemplate(outline: Outline): TemplateIssue[] {
+export function checkTemplate(source: Outline): TemplateIssue[] {
+  const { outline } = bindOutline(source);
   const issues: TemplateIssue[] = [];
   const add = (slide: number, severity: TemplateIssue["severity"], kind: TemplateIssue["kind"], ids: string[], message: string) =>
     issues.push({ slide, severity, kind, ids, message });
@@ -87,7 +91,18 @@ export function checkTemplate(outline: Outline): TemplateIssue[] {
       add(0, "error", "missing_role", [], `缺少${ROLE_NAMES[kind]}：需要一页带 ${REQUIRED_TOKENS[kind].map(token => `{{${token}}}`).join("、")} 的页面`);
     }
     if (pages.length > 1) {
-      add(pages[1], "error", "duplicate_role", [], `${ROLE_NAMES[kind]}有 ${pages.length} 页（第 ${pages.join("、")} 页），每种角色只能有一页，引擎只用第一页`);
+      // Several pages of a role are layouts, and each one after the first must name itself (`@内容:三圆图.标题`), once.
+      const names = pages.map(page => declaredVariant(flatten(outline.slides.find(slide => slide.index === page)!.shapes)).variant);
+      const unnamed = pages.filter((_, i) => i > 0 && !names[i]);
+      if (unnamed.length > 0) {
+        add(unnamed[0], "error", "duplicate_role", [], `${ROLE_NAMES[kind]}有 ${pages.length} 页（第 ${pages.join("、")} 页）；多页同一种角色时，每个版式都要在形状名字里写版式名，例如 @${kind === "content" ? "内容" : ROLE_NAMES[kind]}:版式名.标题；第 ${unnamed.join("、")} 页没有写，引擎不会用它`);
+      }
+      const seenNames = new Set<string>();
+      names.forEach((name, i) => {
+        if (!name) return;
+        if (seenNames.has(name.toLowerCase())) add(pages[i], "error", "duplicate_role", [], `${ROLE_NAMES[kind]}的版式名“${name}”重复，同一种角色里版式名不能相同`);
+        seenNames.add(name.toLowerCase());
+      });
     }
   }
   for (const entry of roles.filter(item => !item.role)) {
@@ -116,7 +131,7 @@ export function checkTemplate(outline: Outline): TemplateIssue[] {
       }
       const found = tokensIn(text);
       if (found.length === 0) continue;
-      if (shape.type !== "text") {
+      if (shape.type !== "text" && !shape.binding) {
         add(slide.index, "error", "token_in_shape", [shape.id], `${shape.name}（id ${shape.id}）是有填充或边框的形状，里面的 ${found.map(token => `{{${token}}}`).join("") } 会被引擎忽略；把文字放进它上面单独的无填充文本框`);
       }
       const fields = [...new Set(found.filter(isField))];
@@ -126,7 +141,7 @@ export function checkTemplate(outline: Outline): TemplateIssue[] {
       for (const token of new Set(found)) {
         if (RENAMES[token]) {
           add(slide.index, "warning", "renamed_token", [shape.id], `{{${token}}} 建议统一写成 {{${RENAMES[token]}}}`);
-        } else if (!isKnown(token) && !/^(TOC_ITEM_\d+_(TITLE|DESC))$/.test(token)) {
+        } else if (!isKnown(token) && !/^(TOC_ITEM_\d+_(TITLE|DESC))$/.test(token) && !token.startsWith("U_")) {
           add(slide.index, "warning", "unknown_token", [shape.id], `{{${token}}} 不在关键字清单里，Agent 只能从名字猜该填什么`);
         }
       }
@@ -138,11 +153,28 @@ export function checkTemplate(outline: Outline): TemplateIssue[] {
     if (strong.length > 1) {
       add(slide.index, "error", "role_conflict", [], `这页同时带有${strong.map(kind => ROLE_NAMES[kind]).join("和")}的标记，引擎会当作${ROLE_NAMES[role]}；角色标记（TOC_ITEM_*、CONTENT_AREA、CHAPTER_*、THANK_YOU）只放在各自的页面上`);
     }
-    if (seen.has(role)) continue;
+    // Repeating units must be built evenly, with the same fields in every instance; picture slots must not hide in a group.
+    for (const unit of Object.values(findUnits(slide.shapes))) {
+      for (const problem of unit.problems) add(slide.index, "error", "unit", [], problem);
+    }
+    const hidden = (nodes: OutlineShape[], inGroup: boolean): OutlineShape[] => nodes.flatMap(node => [
+      ...(inGroup && parseBinding(node.name)?.field && isImageShape(node) ? [node] : []),
+      ...(node.children ? hidden(node.children, true) : [])
+    ]);
+    for (const node of hidden(slide.shapes, false)) {
+      add(slide.index, "error", "image_slot", [node.id], `${node.name}（id ${node.id}）是图片位，但它在一个组合里面，引擎找不到它；把它拿出组合，或先取消组合`);
+    }
+
+    // The first page of a role, and every further page that names its layout, are checked.
+    const layout = declaredVariant(shapes).variant;
+    if (seen.has(role) && !layout) continue;
     seen.add(role);
 
+    // A layout made of repeating units carries its own content; it needs no frame to put blocks in.
+    const hasUnits = Object.keys(findUnits(slide.shapes)).length > 0;
     for (const required of REQUIRED_TOKENS[role]) {
-      if (!tokens.has(required)) add(slide.index, "error", "missing_token", [], `${ROLE_NAMES[role]}缺少必须的 {{${required}}}`);
+      if (required === "CONTENT_AREA" && hasUnits) continue;
+      if (!tokens.has(required)) add(slide.index, "error", "missing_token", [], `${ROLE_NAMES[role]}缺少必须的 {{${required}}}（或用形状名字绑定，例如 @${role === "content" ? "内容" : ROLE_NAMES[role]}.${required === "CONTENT_AREA" ? "区域" : "标题"}）`);
     }
     if (role === "toc") checkToc(slide, shapes, add);
   }
@@ -510,7 +542,8 @@ export interface TemplateDesignFacts {
   tocItems?: number;
   /** Per role, whether the page is dark. */
   dark: Partial<Record<PageKind, boolean>>;
-  pages: Array<{ role: PageKind; slide: number }>;
+  /** Every page of the template, with the layout name and when to use it when the role has several. */
+  pages: Array<{ role: PageKind; slide: number; variant?: string; when?: string }>;
 }
 
 /** The numbers a design description is written from; a model adds only the words. */
@@ -525,6 +558,7 @@ export function templateDesignFacts(outline: Outline): TemplateDesignFacts {
     }
   }
   const pages = Object.values(info.pages).map(page => page!);
+  const everyPage = [...info.variants].sort((a, b) => a.slide - b.slide);
   return {
     pageSize: { w: round(outline.slideSize.w), h: round(outline.slideSize.h) },
     accent: accentOf(outline.slides),
@@ -538,7 +572,7 @@ export function templateDesignFacts(outline: Outline): TemplateDesignFacts {
       : {}),
     ...(info.pages.toc?.entries ? { tocItems: info.pages.toc.entries.length } : {}),
     dark: Object.fromEntries(pages.map(page => [page.kind, page.dark])),
-    pages: pages.map(page => ({ role: page.kind, slide: page.slide }))
+    pages: everyPage.map(page => ({ role: page.kind, slide: page.slide, ...(page.variant ? { variant: page.variant } : {}), ...(page.when ? { when: page.when } : {}) }))
   };
 }
 

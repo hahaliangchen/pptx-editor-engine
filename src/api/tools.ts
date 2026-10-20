@@ -3,7 +3,8 @@ import { batchSchema } from "./schema";
 import type { ApplyResult } from "./engine";
 import type { Outline, OutlineOptions } from "./outline";
 import { compileDeck } from "./deck-spec";
-import { describeTemplate, inferTemplate } from "./template";
+import { describeTemplate, inferTemplate, type PageKind } from "./template";
+import { suggestAnnotations, suggestRoles } from "./annotation-suggest";
 import { checkLayout } from "./layout-check";
 import { checkTemplate, slideRoles } from "./template-authoring";
 
@@ -139,18 +140,38 @@ export const TOOLS: ToolDefinition[] = [
     }
   },
   {
+    name: "suggest_annotations",
+    description:
+      "给一份模板草稿的标注出主意（只读，不改文稿）。不带 slide：返回每一页大概是什么角色（封面、目录、章节、内容、结尾）；"
+      + "带 slide：返回这一页哪些是模板自己的装饰（在别的页同一位置重复出现）、哪些形状排成等距的一行或一列（重复单元：卡片、步骤、条目，"
+      + "按各自的零件配好字段名）、哪些文字像示例文字，并给出可以直接交给 apply_edits 的 setName 命令。"
+      + "结果只是猜测：先看 render_slide 的图再用，没归进单元的连线、图标自己补，装饰不要命名。role 指定这页的角色，variant 给内容页的版式起名，unit 指定重复单元的名字（默认“项”）。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        slide: { type: "integer", minimum: 1, description: "页码；不写就看所有页的角色" },
+        role: { type: "string", enum: ["cover", "toc", "section", "content", "end"] },
+        variant: { type: "string", minLength: 1, description: "内容页的版式名，例如 三图文" },
+        unit: { type: "string", minLength: 1, description: "重复单元的名字，例如 卡片" }
+      },
+      additionalProperties: false
+    }
+  },
+  {
     name: "check_template",
     description:
-      "检查一份正在制作的模板：封面、目录、内容页、结束页各有一页（章节页可选），每页有角色必须的 {{关键字}}，"
-      + "关键字放在无填充的纯文本框里、写法在清单里，目录项编号连续且有“目录”标题，内容区够大。"
+      "检查一份正在制作的模板：封面、目录、内容页、结束页各有至少一页（章节页可选；同一种角色有多页时，除第一页外每页要在形状名字里写版式名），"
+      + "每页有角色必须的标记：形状名字以 @ 开头绑定（例如 @封面.标题、@内容.区域、@目录.1.标题），或写 {{关键字}}；"
+      + "重复单元（@内容.卡片1.标题 …）要编号连续、字段一致、等距排列，目录项编号连续且有“目录”标题，内容区够大。"
       + "每个问题带页码、对象 id 和说明，severity 为 error 的必须改好才能保存为模板；roles 是引擎认出的每页角色。",
     inputSchema: { type: "object", properties: {}, additionalProperties: false }
   },
   {
     name: "get_template",
     description:
-      "文稿是一份模板（里面是封面、目录、章节、内容、结尾等页面，文字里写着 {{TOKEN}} 占位符）时，"
-      + "读出它有哪几种页面、每种页面能填哪些字段、内容页有多大的位置放内容、哪些是示例文字。"
+      "文稿是一份模板（里面是封面、目录、章节、内容、结尾等页面，可填的地方由形状名字以 @ 开头标出，或文字里写着 {{TOKEN}} 占位符）时，"
+      + "读出它有哪几种页面、每种页面能填哪些字段（fieldInfo 给出每个字段在模板里的示例文字和大约能放多少字，照这个长度写）、"
+      + "同一种页面有几个版式（variants，各有 when 说明适用场景，build_deck 里用 variant 指定）、内容页有多大的位置放内容、哪些是示例文字。"
       + "之后用 build_deck 一次生成整份。",
     inputSchema: { type: "object", properties: {}, additionalProperties: false }
   },
@@ -158,8 +179,8 @@ export const TOOLS: ToolDefinition[] = [
     name: "build_deck",
     description:
       "按模板一次生成整份演示文稿：只给每页的类型和内容，版面由引擎排好（缩放文字、对齐、均分），不需要写坐标。"
-      + "每页 {page: cover|toc|section|content|end, ...字段}；字段名见 get_template。"
-      + "toc 页写 items: [\"章节名\" 或 {title, desc}]；content 页写 title 和 blocks（最多 3 块），"
+      + "每页 {page: cover|toc|section|content|end, variant?: 版式名, ...字段}；字段名和版式名见 get_template。"
+      + "toc 页写 items: [\"章节名\" 或 {title, desc}]，条数按实际章节数定（1 条到模板的 maxEntries 条），不要凑满；content 页写 title 和 blocks（最多 3 块），"
       + "块有 5 种：{type:\"text\", text}、{type:\"bullets\", items:[...]}、{type:\"cards\", items:[{value, title, text}]}（2 到 4 张最好）、"
       + "{type:\"chart\", kind:column|bar|line|pie, categories, series:[{name, values}], title?}、{type:\"table\", rows:[[...]]}；"
       + "2 个块默认左右并排，也可写 layout: rows|columns。"
@@ -189,7 +210,7 @@ export const TOOLS: ToolDefinition[] = [
 /** Text to add to a model's system prompt: how to work with these tools. */
 export const TOOL_GUIDE = [
   "你可以用三个工具读取和修改一份 PPTX 演示文稿：get_outline、apply_edits、render_slide。",
-  "在制作模板（给页面写 {{关键字}}）时，改完用 check_template 检查，修到没有 error。",
+  "在制作模板时，用形状名字（setName，以 @ 开头）标出每一块的用途，或给页面写 {{关键字}}；先用 suggest_annotations 看每页大概是什么角色、哪些是装饰、哪些是重复结构（它给出现成的 setName 命令，只是猜测，要对照 render_slide 的图），改完用 check_template 检查，修到没有 error。",
   "check_layout 用测量检查版面（溢出、越界、重叠、大片空白），比看图快，改完可以再调用确认。",
   "文稿是一份模板（页面文字里有 {{TOKEN}} 占位符）时，先 get_template 看有哪些页面类型，再用 build_deck 一次生成整份：你只写内容，排版由引擎完成。之后再用 render_slide 看效果、用 apply_edits 精修有问题的页。",
   "",
@@ -306,6 +327,17 @@ export async function callTool(host: ToolHost, name: string, args: unknown): Pro
           ok: true,
           content: [text({ ok: !issues.some(issue => issue.severity === "error"), roles: slideRoles(outline), issues })]
         };
+      }
+
+      case "suggest_annotations": {
+        const outline = await host.outline({ maxTextLength: 200 });
+        const args = (input ?? {}) as { slide?: number; role?: PageKind; variant?: string; unit?: string };
+        try {
+          if (args.slide === undefined) return { ok: true, content: [text({ pages: suggestRoles(outline) })] };
+          return { ok: true, content: [text(suggestAnnotations(outline, args.slide, args))] };
+        } catch (error) {
+          return failure(error instanceof Error ? error.message : String(error));
+        }
       }
 
       case "get_template": {

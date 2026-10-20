@@ -6,6 +6,7 @@ import { PptVirtualDocument } from "../pptx-virtual-dom";
 import { HeadlessRenderOptions, HeadlessRenderer, RenderSlideOptions } from "./renderer";
 import { ToolResult, callTool } from "../api/tools";
 import { installNodeEnv } from "./node-env";
+import { setImageLoader } from "../api/image-fit";
 
 /**
  * A deck opened without a browser: read its structure, change it with JSON
@@ -20,6 +21,7 @@ export class HeadlessSession {
 
   public static async open(buffer: ArrayBuffer | Uint8Array, options: HeadlessRenderOptions = {}): Promise<HeadlessSession> {
     installNodeEnv();
+    setImageLoader(url => loadImage(url));
     const renderer = new HeadlessRenderer(options);
     const container = document.createElement("div");
     document.body.appendChild(container);

@@ -24,7 +24,7 @@ const PNG = [0x89, 0x50, 0x4e, 0x47];
 
 describe("tool definitions", () => {
   it("offers the tools, each taking an object", () => {
-    expect(TOOLS.map(tool => tool.name)).toEqual(["get_outline", "apply_edits", "render_slide", "check_layout", "check_template", "get_template", "build_deck"]);
+    expect(TOOLS.map(tool => tool.name)).toEqual(["get_outline", "apply_edits", "render_slide", "check_layout", "suggest_annotations", "check_template", "get_template", "build_deck"]);
     for (const tool of TOOLS) {
       expect(tool.inputSchema.type).toBe("object");
       expect(tool.description.length).toBeGreaterThan(40);
