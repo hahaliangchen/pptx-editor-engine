@@ -27,3 +27,16 @@ it("renames a shape and a group, keeps the name through export, and undoes", asy
   session.undo();
   expect(await names(session)).not.toContain("@内容.卡片1");
 });
+
+it("reports what is selected, for a panel that names the selected shape", async () => {
+  const session = await HeadlessSession.open(readFileSync("tools/templates/blank.pptx"), { quiet: true });
+  sessions.push(session);
+  await session.apply({ commands: [
+    { op: "addText", slide: 1, rect: { x: 2, y: 2, w: 8, h: 2 }, text: "选中我", as: "t" },
+    { op: "setName", target: "$t", name: "@内容.标题" }
+  ] });
+  await session.api.select({ slide: 1, name: "@内容.标题" });
+  const picked = await session.api.selection();
+  expect(picked.slide).toBe(1);
+  expect(picked.shapes.map(shape => [shape.name, shape.text])).toEqual([["@内容.标题", "选中我"]]);
+});

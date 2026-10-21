@@ -25,6 +25,25 @@ describe("render service", () => {
     expect(await (await fetch(`${base}/health`)).json()).toEqual({ ok: true });
   });
 
+  it("converts PPTX to transient JSON and HTML back through the HTTP worker", async () => {
+    const imported = await post("/design", JSON.stringify({ operation: "sync", pptxBase64: deck.toString("base64") }));
+    expect(imported.status).toBe(200);
+    const { design } = await imported.json();
+    const { projectPage } = await import("../src/design/projection");
+    const html = projectPage(design, design.pages[0].id).replace("background:#ffffff", "background:#183d32").replace("</body>", '<div data-kind="text" style="position:absolute;left:80px;top:80px;width:800px;height:100px"><p style="margin:0;font:32px/48px Arial;color:#ffffff">HTTP round trip</p></div></body>');
+    const applied = await post("/design", JSON.stringify({ operation: "apply", design, expectedRevision: design.revision, html }));
+    expect(applied.status, await applied.clone().text()).toBe(200);
+    const next = (await applied.json()).design;
+    expect(next.pages[0].background).toBe("#183d32");
+    const bytes = Buffer.from(next.source.pptxBase64, "base64");
+    const rendered = await post("/render?page=1&width=320", bytes);
+    expect(rendered.status).toBe(200);
+    expect(widthOf(Buffer.from(await rendered.arrayBuffer()))).toBe(320);
+    const stale = await post("/design", JSON.stringify({ operation: "apply", design: next, expectedRevision: next.revision, html }));
+    expect(stale.status).toBe(422);
+    expect((await stale.json()).error.message).toContain("STALE_DESIGN");
+  }, 20000);
+
   it("returns the first page as a PNG of the default width, with the slide count", async () => {
     const response = await post("/thumbnail");
     expect(response.status).toBe(200);

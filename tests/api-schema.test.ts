@@ -37,12 +37,12 @@ describe("batch schema", () => {
 
   it("knows every operation in the design", () => {
     expect(OPS).toEqual(expect.arrayContaining([
-      "addSlide", "duplicateSlide", "deleteSlide", "moveSlide", "addText", "addShape", "addImage",
+      "addSlide", "duplicateSlide", "deleteSlide", "moveSlide", "addText", "addShape", "addImage", "addConnector",
       "addChart", "setChart", "addTable", "setTable", "setCell", "insertRow", "deleteRow", "insertColumn", "deleteColumn", "setShadow", "setBackground", "setText", "replaceText", "formatText", "setParagraph", "setBounds", "setRotation", "setFill",
       "setLine", "setAnchor", "setName", "align", "arrange", "duplicate", "copyTo", "delete"
     ]));
-    expect(OPS).toHaveLength(33);
-    expect(batchSchema.properties.commands.items.oneOf).toHaveLength(33);
+    expect(OPS).toHaveLength(34);
+    expect(batchSchema.properties.commands.items.oneOf).toHaveLength(34);
   });
 
   it("rejects an unknown op and lists the ones that exist", () => {

@@ -1,4 +1,4 @@
-import type { CmRect, Outline, OutlineShape, OutlineSlide } from "./outline";
+import { slideAppearance, type CmRect, type Outline, type OutlineShape, type OutlineSlide } from "./outline";
 import { CM_TO_PT, INSET_CM } from "./text-metrics";
 import { ImageSlot, UnitGroup, describeUnits, findUnits, imageSlotOf, isImageShape } from "./units";
 
@@ -16,10 +16,15 @@ export const PAGE_KINDS: PageKind[] = ["cover", "toc", "section", "content", "en
 export interface TextSlot {
   /** The shape on the template page. */
   id: string;
+  name?: string;
+  annotation?: string;
+  options?: Record<string, string>;
   /** Its text on the template, with the `{{TOKEN}}`s in it. */
   text: string;
   rect: CmRect;
   fontSizePt?: number;
+  color?: string;
+  bold?: boolean;
   align?: string;
   /** A shape bound by its name keeps a real sample text; this is it. */
   sample?: string;
@@ -46,6 +51,7 @@ export interface TemplatePage {
   when?: string;
   /** The page on the template, from 1. */
   slide: number;
+  slideId?: string;
   /** Text shapes that carry at least one token, and the fillable name of each token. */
   tokens: TextSlot[];
   /** Fillable names this page takes from the content, token by token. */
@@ -69,6 +75,9 @@ export interface TemplatePage {
   areaShapes?: string[];
   /** The page is dark, so text on it must be light. */
   dark: boolean;
+  appearance: NonNullable<OutlineSlide["appearance"]>;
+  /** Original shapes retain real sample wording and author-defined purpose options. */
+  sourceShapes: OutlineShape[];
 }
 
 export interface TemplateInfo {
@@ -125,6 +134,8 @@ export function fieldAlias(kind: PageKind, key: string): string | undefined {
 }
 
 export interface Binding {
+  /** A diagram/illustration to understand and redraw for the new topic, not fixed decoration. */
+  reference?: boolean;
   /** The page role the name declares, if it has one. */
   role?: PageKind;
   /** The layout name the role part carries (`内容:三圆图`): one of several pages of the same role. */
@@ -166,6 +177,9 @@ export function parseBinding(name: string | undefined): Binding | undefined {
   const variant = role ? variantWords.join(":").trim() || undefined : undefined;
   const tag = <T extends Binding>(binding: T): T => withOptions(variant ? { ...binding, variant } : binding);
   const rest = role ? parts.slice(1) : parts;
+  if (role && (options["用途"] === "参考图" || options.purpose === "reference")) {
+    return tag({ role, reference: true, field: rest.join(".") || "参考图" });
+  }
   if (rest.length === 0) return role ? tag({ role }) : undefined;
   if (rest.length === 1 && AREA_NAMES.has(lower(rest[0])) && (!role || role === "content")) return tag({ role: "content", area: true });
   if (!role && rest.length === 1 && AUTO_NAMES[lower(rest[0])]) return withOptions({ token: AUTO_NAMES[lower(rest[0])] });
@@ -175,6 +189,10 @@ export function parseBinding(name: string | undefined): Binding | undefined {
     const word = lower(rest.filter(part => !/^\d+$/.test(part)).join(".")).replace(/\d+$/, "");
     if (index && (word === "标题" || word === "title" || word === "")) return tag({ role, token: `TOC_ITEM_${index}_TITLE`, field: "title" });
     if (index && (word === "说明" || word === "desc")) return tag({ role, token: `TOC_ITEM_${index}_DESC`, field: "desc" });
+    if (!index && rest.length === 1) {
+      const field = word === "标题" || word === "title" ? "title" : rest[0];
+      return tag({ role, token: encodeField(field), field });
+    }
     return tag({ role });
   }
   // A repeating unit: `卡片2.标题` is a field of the second instance, `卡片2` alone is a part of it (a background, an icon).
@@ -240,6 +258,8 @@ export function slotName(token: string): string {
 
 export const flatten = (shapes: OutlineShape[]): OutlineShape[] =>
   shapes.flatMap(shape => (shape.children ? flatten(shape.children) : [shape]));
+const withGroups = (shapes: OutlineShape[]): OutlineShape[] =>
+  shapes.flatMap(shape => [shape, ...withGroups(shape.children ?? [])]);
 
 /** The layout name and the "when to use" the shapes of a page declare, if any (the first shape that says wins). */
 export function declaredVariant(shapes: OutlineShape[]): { variant?: string; when?: string } {
@@ -317,8 +337,25 @@ function tocEntries(shapes: OutlineShape[]): TocEntry[] {
     }
     let end = index;
     const next = shapes[index + 1];
-    if (next && next.type === "text" && next.text && !isNumber(next.text)
-      && !/\{\{TOC_ITEM_\d+_TITLE\}\}/.test(next.text)) end = index + 1;
+    const entryNumber = /\{\{TOC_ITEM_(\d+)_TITLE\}\}/.exec(shape.text!)![1];
+    // Older decks may keep sample descriptions without a token. Only associate
+    // nearby, aligned text inside the same row background; adjacency alone can
+    // otherwise consume a summary illustration or footer when removing an item.
+    const contains = (outer: CmRect, inner: CmRect) =>
+      inner.x >= outer.x - 0.05 && inner.y >= outer.y - 0.05
+      && inner.x + inner.w <= outer.x + outer.w + 0.05
+      && inner.y + inner.h <= outer.y + outer.h + 0.05;
+    const sampleDescription = next?.type === "text" && !!next.text?.trim()
+      && !isNumber(next.text) && tokensIn(next.text).length === 0
+      && !parseBinding(next.binding ?? next.name)
+      && Math.abs(next.rect.x - shape.rect.x) <= 0.2
+      && next.rect.y >= shape.rect.y + shape.rect.h - 0.05
+      && next.rect.y - (shape.rect.y + shape.rect.h) <= 0.5
+      && (next.style?.fontSizePt ?? Infinity) <= (shape.style?.fontSizePt ?? 0)
+      && shapes.some(background => background.type === "shape" && !background.text
+        && contains(background.rect, shape.rect) && contains(background.rect, next.rect)
+        && titles.filter(title => contains(background.rect, title.shape.rect)).length === 1);
+    if (next?.text?.includes(`{{TOC_ITEM_${entryNumber}_DESC}}`) || sampleDescription) end = index + 1;
     const desc = end > index ? shapes[end] : undefined;
     // Only what sits on the entry's own row belongs to it: a rule under the
     // heading that comes before the first entry stays where it is.
@@ -390,6 +427,9 @@ export function inferTemplate(source: Outline): TemplateInfo {
   const pages: TemplateInfo["pages"] = {};
   const variants: TemplatePage[] = [];
   for (const slide of outline.slides) {
+    const sourceShapes = source.slides.find(item => item.index === slide.index)!.shapes;
+    const referenceMembers = new Set(withGroups(sourceShapes).filter(shape => parseBinding(shape.name)?.reference)
+      .flatMap(shape => withGroups(shape.children ?? []).map(child => child.id)));
     const shapes = flatten(slide.shapes);
     // A shape bound by its name may be any shape with text (a number in a badge); a keyword in plain text must sit in a text box.
     const texts = shapes.filter(shape => (shape.type === "text" || shape.binding) && shape.text);
@@ -405,7 +445,9 @@ export function inferTemplate(source: Outline): TemplateInfo {
     const slotOf = (shape: OutlineShape): TextSlot => {
       const sample = samples.get(`${slide.index}:${shape.id}`);
       return {
-        id: shape.id, text: shape.text!, rect: shape.rect, fontSizePt: shape.style?.fontSizePt, align: shape.style?.align,
+        id: shape.id, name: shape.name, ...(shape.binding ? { annotation: shape.binding } : {}),
+        ...(parseBinding(shape.binding ?? shape.name)?.options ? { options: parseBinding(shape.binding ?? shape.name)!.options } : {}),
+        text: shape.text!, rect: shape.rect, fontSizePt: shape.style?.fontSizePt, color: shape.style?.color, bold: shape.style?.bold, align: shape.style?.align,
         ...(sample !== undefined ? { sample } : {}), ...capacityOf(shape.rect, shape.style?.fontSizePt)
       };
     };
@@ -421,13 +463,13 @@ export function inferTemplate(source: Outline): TemplateInfo {
           if (custom) fieldNames[token] = custom;
           slots[custom ?? slotName(token)] ??= slotOf(shape);
         }
-      } else if (!isNumber(shape.text) && /[\p{L}]{3,}|[一-鿿]{2,}/u.test(shape.text!) && !parseBinding(shape.name)?.group) {
+      } else if (!isNumber(shape.text) && /[\p{L}]{3,}|[一-鿿]{2,}/u.test(shape.text!) && !parseBinding(shape.name)?.group && !parseBinding(shape.name)?.reference && !referenceMembers.has(shape.id)) {
         fixed.push(slotOf(shape));
       }
     }
     const page: TemplatePage = {
-      kind, ...named, slide: slide.index, tokens: tokenShapes, slots, fieldNames, units: findUnits(slide.shapes), images: pageImages(slide.shapes), fixed, texts: Object.fromEntries(texts.map(shape => [shape.id, slotOf(shape)])),
-      rects: Object.fromEntries(shapes.map(shape => [shape.id, shape.rect])), dark: isDark(slide.background)
+      kind, ...named, slide: slide.index, slideId: slide.id, tokens: tokenShapes, slots, fieldNames, units: findUnits(sourceShapes), images: pageImages(sourceShapes), fixed, texts: Object.fromEntries(texts.map(shape => [shape.id, slotOf(shape)])),
+      rects: Object.fromEntries(shapes.map(shape => [shape.id, shape.rect])), dark: isDark(slideAppearance(slide, source.slideSize).background), appearance: slideAppearance(slide, source.slideSize), sourceShapes
     };
     if (kind === "toc") {
       page.entries = tocEntries(shapes);
@@ -449,38 +491,91 @@ export function inferTemplate(source: Outline): TemplateInfo {
 /** What a model needs to know to fill the template: page kinds, their fields, the room for content. */
 export function describeTemplate(template: TemplateInfo): unknown {
   const rounded = (value: number) => Math.round(value * 10) / 10;
+  const slotInfo = (slot: TextSlot) => ({
+    id: slot.id, name: slot.name, rect: slot.rect,
+    ...(slot.annotation ? { annotation: slot.annotation } : {}),
+    ...(slot.options ? { options: slot.options } : {}),
+    ...(slot.sample !== undefined ? { sample: slot.sample } : {}),
+    fitChars: slot.fitChars, lines: slot.lines,
+    ...(slot.fontSizePt ? { fontSizePt: slot.fontSizePt } : {}),
+    ...(slot.color ? {color: slot.color} : {}),
+    ...(slot.align ? {align: slot.align} : {}),
+    ...(slot.bold !== undefined ? {bold: slot.bold} : {})
+  });
+  const semantics = (page: TemplatePage) => {
+    const shapes = withGroups(page.sourceShapes);
+    const annotated = shapes.some(shape => !!parseBinding(shape.name));
+    const annotations: unknown[] = [];
+    const preserveShapeIds: string[] = [];
+    const hasPurpose = (shape: OutlineShape): boolean => !!parseBinding(shape.name)
+      || tokensIn(shape.text ?? "").length > 0 || !!shape.children?.some(hasPurpose);
+    const visit = (nodes: OutlineShape[], parents: string[]) => {
+      for (const shape of nodes) {
+        const binding = parseBinding(shape.name);
+        if (binding) annotations.push({
+          id: shape.id, name: shape.name, type: shape.type, rect: shape.rect,
+          ...binding, ...(shape.text !== undefined ? { sample: shape.text } : {}),
+          ...(parents.length ? { parentIds: parents } : {}),
+          ...(binding.reference ? { memberIds: flatten(shape.children ?? []).map(child => child.id) } : {}),
+          purpose: binding.reference ? "reference_visual" : binding.area ? "content_area" : binding.group ? "repeating_member"
+            : binding.token && AUTO_TOKENS.has(binding.token) ? "automatic_field"
+              : binding.field ? isImageShape(shape) ? "image_field" : "text_field" : "page_role"
+        });
+        if (annotated && !hasPurpose(shape)) preserveShapeIds.push(shape.id);
+        else if (shape.children && !binding?.reference && !binding?.group) visit(shape.children, [...parents, shape.id]);
+      }
+    };
+    visit(page.sourceShapes, []);
+    return {
+      definitionMode: annotated ? "shape_annotations" : "unannotated",
+      readyForGeneration: annotated && !shapes.some(shape => tokensIn(shape.text ?? "").length > 0),
+      annotations, preserveShapeIds,
+      referenceVisuals: annotations.filter((item: any) => item.purpose === "reference_visual"),
+      editNote: "用实际 id 定位；删除组合会删除子对象，删除父组合后不要再删子 id。整批失败先读取当前 outline 再修正，不重复叠加内容。"
+    };
+  };
   const describePage = (page: TemplatePage) => ({
+    sourceSlide: page.slide,
+    sourceSlideId: page.slideId,
+    appearance: page.appearance,
+    ...semantics(page),
     ...(page.variant ? { variant: page.variant } : {}),
     ...(page.when ? { when: page.when } : {}),
     fields: Object.keys(page.slots),
-    // What each field looks like on the template (its sample text) and about how much fits: write text of a similar length.
-    fieldInfo: Object.fromEntries(Object.entries(page.slots).map(([name, slot]) => [name, {
-      ...(slot.sample !== undefined ? { sample: slot.sample } : {}),
-      fitChars: slot.fitChars, lines: slot.lines,
-      ...(slot.fontSizePt ? { fontSizePt: slot.fontSizePt } : {})
-    }])),
+    fieldInfo: Object.fromEntries(Object.entries(page.slots).map(([name, slot]) => [name, slotInfo(slot)])),
+    variableText: page.tokens.map(slotInfo),
     ...(page.entries ? {
       maxEntries: page.entries.length,
       entryFields: page.entries.some(entry => entry.desc) ? ["title", "desc"] : ["title"],
-      entriesNote: `items 写几条由内容的章节数决定，1 到 ${page.entries.length} 条都可以，不要为了凑满而编造；多出的条目连同编号一起删掉，剩下的自动居中`
+      entries: page.entries.map((entry, index) => ({
+        index: index + 1, titleId: entry.title, ...(entry.desc ? { descId: entry.desc } : {}),
+        // Parent groups may span multiple rows and disappear when their last child is deleted.
+        shapeIds: entry.shapes.filter(id => !flatten(page.sourceShapes).find(shape => shape.id === id)?.children),
+        top: entry.top, bottom: entry.bottom
+      })),
+      entriesNote: `参考页有 ${page.entries.length} 个目录项；按实际章节用 apply_edits 自行增删并设计位置，不补凑条目，不自动居中`
     } : {}),
-    ...(page.area ? { contentArea: { w: rounded(page.area.w), h: rounded(page.area.h) } } : {}),
+    ...(page.area ? { contentArea: { x: rounded(page.area.x), y: rounded(page.area.y), w: rounded(page.area.w), h: rounded(page.area.h) }, contentAreaMarkerIds: page.areaShapes ?? [] } : {}),
     ...(Object.keys(page.images).length > 0 ? {
       images: Object.fromEntries(Object.entries(page.images).map(([name, slot]) => [name, {
+        id: slot.id, rect: slot.rect,
         aspect: Math.round(slot.aspect * 100) / 100, ...(slot.shape ? { shape: slot.shape } : {}),
-        note: "写图片的路径（project:images/…，用户上传的图片），或 placeholder 先放一张占位图"
+        note: "参考图片槽；可用 project:images/… 的真实图片或生成的 SVG 资产 PNG，位置与尺寸由设计者明确指定"
       }]))
     } : {}),
-    ...(Object.keys(page.units).length > 0 ? { groups: describeUnits(page.units) } : {}),
-    ...(page.fixed.length > 0 ? { sampleText: page.fixed.map(item => item.text) } : {})
+    ...(Object.keys(page.units).length > 0 ? { groups: describeUnits(page.units, { manualLayout: true }) } : {}),
+    ...(page.fixed.length > 0 ? { sampleText: page.fixed.map(item => item.text), unboundText: page.fixed.map(slotInfo) } : {})
   });
   return {
+    definitionVersion: "shape-purpose-v1",
+    definitionPolicy: "Use @形状用途 annotations and their real samples as the template definition. Read its saved design_spec.md for per-page meaning. Reference visuals explicitly marked |用途=参考图 must be understood and redrawn for the current topic; unbound decoration is preserved. Fill, replace or deliberately remove variable fields. Do not rewrite template definitions while generating a deck. Automatic-number annotations identify what the Agent must explicitly update when editing pages; automatic layout/autofit is disabled. Templates must follow this purpose standard before generation.",
+    layoutPolicy: "Design pages with explicit native apply_edits commands. Sample fields and fitChars describe the reference, not a required layout or content limit. Blank content areas allow free composition; preserve template branding. No automatic positioning, stretching or text shrinking is applied.",
     pages: Object.fromEntries(Object.values(template.pages).map(page => {
       const same = template.variants.filter(item => item.kind === page!.kind);
       return [page!.kind, {
         ...describePage(page!),
         // Several layouts of one role: pick one with `variant` (without it the first is used).
-        ...(same.length > 1 ? { variants: same.map(describePage), variantNote: `这种页面有 ${same.length} 个版式，按内容选一个，用 variant 指定它的名字；不写 variant 用第一个` } : {})
+        ...(same.length > 1 ? { variants: same.map(describePage), variantNote: `这种页面有 ${same.length} 个参考版式；按内容选择 sourceSlide 复制，也可重新设计内容区` } : {})
       }];
     }))
   };

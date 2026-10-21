@@ -288,6 +288,25 @@ function insertText<P, R>(model: TextModel<P, R>, position: number, text: string
     return;
   }
 
+  // Splitting at offset zero moves every original run to the tail. Keep the
+  // insertion style before doing that, otherwise the first/new paragraphs get
+  // the editor's default font instead of the template field's formatting.
+  let basis: R | undefined;
+  let basisCursor = 0;
+  for (const run of model.runs(at.paragraph)) {
+    const value = model.text(run);
+    if (value !== LINE_BREAK) {
+      basis = model.cloneRun(run, value);
+      if (at.offset <= basisCursor + value.length) break;
+    }
+    basisCursor += value.length;
+  }
+  const insertPiece = (paragraph: P, offset: number, value: string) => {
+    if (value && basis && model.runs(paragraph).length === 0) {
+      model.insertRun(paragraph, 0, model.cloneRun(basis, value));
+    } else insertInParagraph(model, paragraph, offset, value);
+  };
+
   // Split the paragraph at the caret: everything after it moves to the last new paragraph.
   const tail: R[] = [];
   let cursor = 0;
@@ -306,14 +325,14 @@ function insertText<P, R>(model: TextModel<P, R>, position: number, text: string
     }
   }
 
-  insertInParagraph(model, at.paragraph, at.offset, pieces[0]);
+  insertPiece(at.paragraph, at.offset, pieces[0]);
   let previous = at.paragraph;
   for (let i = 1; i < pieces.length; i++) {
     const next = model.newParagraphAfter(previous);
     if (i === pieces.length - 1) {
       tail.forEach((run, index) => model.insertRun(next, index, run));
     }
-    insertInParagraph(model, next, 0, pieces[i]);
+    insertPiece(next, 0, pieces[i]);
     previous = next;
   }
 }

@@ -176,19 +176,24 @@ export function findUnits(shapes: OutlineShape[]): Record<string, UnitGroup> {
 }
 
 /** What a model needs to know about a page's repeating units. */
-export function describeUnits(groups: Record<string, UnitGroup>): Record<string, unknown> {
+export function describeUnits(groups: Record<string, UnitGroup>, options: { manualLayout?: boolean } = {}): Record<string, unknown> {
   return Object.fromEntries(Object.values(groups).map(group => {
     const first = group.instances[0];
     return [group.name, {
       fields: group.fields,
       fieldInfo: Object.fromEntries(group.fields.map(field => {
         const member = first.members.find(item => item.field === field)!;
-        if (member.image) return [field, { kind: "image", aspect: Math.round(member.image.aspect * 100) / 100, ...(member.image.shape ? { shape: member.image.shape } : {}), note: "写图片的路径（project:images/…，用户上传的图片），或 placeholder 先放一张占位图" }];
+        if (member.image) return [field, { kind: "image", id: member.id, rect: member.rect, aspect: Math.round(member.image.aspect * 100) / 100, ...(member.image.shape ? { shape: member.image.shape } : {}), note: options.manualLayout ? "图片用途：用真实图片或生成 SVG 的 PNG 资产替换示例图片，明确指定位置和尺寸；不能留 placeholder。" : "写图片的路径（project:images/…，用户上传的图片），或 placeholder 先放一张占位图" }];
         return [field, { ...(member.text ? { sample: member.text } : {}), ...capacityOf(member.rect, member.fontSizePt) }];
       })),
       templateCount: group.instances.length,
       count: group.fixed ? { fixed: group.instances.length } : { min: group.min, max: group.max },
-      note: group.fixed
+      ...(options.manualLayout ? { instances: group.instances.map(instance => ({
+        index: instance.index, rect: instance.rect, members: instance.members
+      })) } : {}),
+      note: options.manualLayout
+        ? `“${group.name}”是模板的重复结构参考，字段用途、示例和成员 id 见 instances；按实际内容用 apply_edits 明确增删、定位和填写，遵守声明的数量约束。不自动重排、缩放或缩字，图片用真实素材或生成资产，不能留占位图。`
+        : group.fixed
         ? `这个版式的“${group.name}”固定是 ${group.instances.length} 个：content 里给 ${group.instances.length} 个，数量对不上就换别的版式`
         : `“${group.name}”写成数组，每项是 {${group.fields.join("、")}}，可以给 ${group.min} 到 ${group.max} 个（模板里有 ${group.instances.length} 个）；多的会自动缩小排开`
     }];

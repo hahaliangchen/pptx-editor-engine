@@ -172,11 +172,11 @@ export class DocumentSession {
   }
 
   /** Build a new .pptx with every edit written back into the original package. */
-  public async exportPptx(): Promise<Blob> {
+  public async exportPptx(markSaved = true): Promise<Blob> {
     const zip = this.parser.getZip();
     if (!zip || !this.doc) throw new Error("请先打开一个 .pptx 文件。");
     const blob = await exportEditedPptx(zip, this.doc.slides, this.dirtyShapes, this.textEdits, this.styleEdits, this.structureEdits);
-    this.editor.markSaved();
+    if (markSaved) this.editor.markSaved();
     return blob;
   }
 

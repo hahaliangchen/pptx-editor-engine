@@ -3,6 +3,7 @@ import { ApiError } from "./errors";
 
 const color = { type: "string", pattern: "^#[0-9a-fA-F]{6}$", description: "#RRGGBB" };
 const cm = { type: "number", description: "centimetres" };
+const point = { type: "object", properties: {x: cm, y: cm}, required: ["x", "y"], additionalProperties: false };
 const rect = {
   type: "object",
   properties: { x: cm, y: cm, w: { type: "number", exclusiveMinimum: 0 }, h: { type: "number", minimum: 0 } },
@@ -139,9 +140,14 @@ const commands = [
     },
     style: textStyle, name: { type: "string", description: "name to find the text box by later" }, as: alias
   }, ["slide", "rect"], { oneOf: [{ required: ["text"] }, { required: ["paragraphs"] }] }),
+  command("addConnector", {
+    slide: slideRef, from: point, to: point,
+    arrow: {type: "boolean", description: "arrowhead at to (default true); false for a plain line"},
+    line: lineStyle, name: {type: "string"}, as: alias
+  }, ["slide", "from", "to"]),
   command("addShape", {
     slide: slideRef,
-    shape: { type: "string", enum: ["rect", "roundRect", "ellipse", "triangle", "rightArrow", "line", "arrow"] },
+    shape: { type: "string", enum: ["rect", "roundRect", "ellipse", "triangle", "rightArrow", "leftArrow", "upArrow", "downArrow", "line", "arrow"] },
     rect, fill: fillValue, opacity: { ...opacity, description: "how see-through the fill is" },
     line: { oneOf: [lineStyle, { type: "null" }], description: "the border; null for none" }, shadow: { oneOf: [shadow, { type: "null" }] },
     text: { type: "string" }, flipH: { type: "boolean" }, flipV: { type: "boolean" },

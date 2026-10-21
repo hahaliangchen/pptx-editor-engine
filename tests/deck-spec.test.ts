@@ -76,6 +76,19 @@ describe("reading a template", () => {
     expect(describeTemplate(info)).toMatchObject({ pages: { content: { fields: ["title"] }, toc: { maxEntries: 3 } } });
   });
 
+  it("does not treat nearby references or unrelated text as removable directory descriptions", async () => {
+    const outline = await (await template()).outline();
+    const toc = outline.slides[1];
+    const descriptions = toc.shapes.filter(shape => shape.text?.includes("项的示例说明"));
+    descriptions[0].name = "@目录.总结图|用途=参考图";
+    descriptions[1].rect.x += 12; // separate right-hand content, not the title's description
+    descriptions[2].rect.y += 4; // footer outside this entry's background
+    const entries = inferTemplate(outline).pages.toc!.entries!;
+    expect(entries.every(entry => entry.desc === undefined)).toBe(true);
+    const members = entries.flatMap(entry => entry.shapes);
+    for (const description of descriptions) expect(members).not.toContain(description.id);
+  });
+
   it("keeps a rule under the contents heading out of the first entry, so fewer entries leave it in place", async () => {
     const session = await HeadlessSession.open(readFileSync("tools/templates/blank.pptx"), { quiet: true });
     sessions.push(session);
@@ -94,7 +107,7 @@ describe("reading a template", () => {
     const rule = (await session.outline()).slides[0].shapes.find((shape: { name: string }) => shape.name === "分隔线")!;
     expect(info.pages.toc!.entries!.map(entry => entry.shapes.length)).toEqual([2, 2, 2]);
     expect(info.pages.toc!.entries!.flatMap(entry => entry.shapes)).not.toContain(rule.id);
-    expect(describeTemplate(info)).toMatchObject({ pages: { toc: { maxEntries: 3, entriesNote: expect.stringContaining("1 到 3 条") } } });
+    expect(describeTemplate(info)).toMatchObject({ pages: { toc: { maxEntries: 3, entriesNote: expect.stringContaining("按实际章节") } } });
 
     expect((await session.apply(compileDeck({ slides: [{ page: "toc", items: ["唯一一章"] }] }, info))).ok).toBe(true);
     const shapes = (await session.outline()).slides[0].shapes;
@@ -223,7 +236,7 @@ describe("building a deck from a spec", () => {
     const shapes = (await session.outline({ slides: [2] })).slides[0].shapes;
     const lines = shapes.map((shape: { text?: string }) => shape.text).filter(Boolean);
     expect(lines).toEqual(expect.arrayContaining(["市场规模", "竞争格局", "头部品牌"]));
-    expect(lines).not.toContain("第 3 项的示例说明");
+    expect(lines.some(line => /第 \d 项的示例说明/.test(line!))).toBe(false);
     // 1 header + 2 entries of (rectangle, number, title) plus the one description given
     // (the new slides also carry the layout's two empty placeholders, which are not content)
     expect(shapes.filter((shape: { type: string; text?: string }) => shape.type !== "text" || shape.text)).toHaveLength(1 + 2 * 3 + 1);

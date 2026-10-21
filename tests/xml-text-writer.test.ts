@@ -23,6 +23,15 @@ const summary = (shape: Element) =>
   );
 
 describe("writeTextOps", () => {
+  it("keeps template typography when replacing all text with several new paragraphs", () => {
+    const shape = apply(`<a:p>${run("正文示例", 'sz="1800" b="1"', '<a:solidFill><a:srgbClr val="147D92"/></a:solidFill>')}<a:endParaRPr sz="1000"/></a:p>`, [{ start: 0, end: 4, insert: "第一段\n第二段\n第三段" }]);
+    const runs = Array.from(shape.getElementsByTagName("a:r"));
+    expect(runs.map(r => r.getElementsByTagName("a:t")[0].textContent)).toEqual(["第一段", "第二段", "第三段"]);
+    for (const r of runs) {
+      expect(r.getElementsByTagName("a:rPr")[0].getAttribute("sz")).toBe("1800");
+      expect(r.getElementsByTagName("a:srgbClr")[0].getAttribute("val")).toBe("147D92");
+    }
+  });
   it("edits inside a run and leaves the other runs byte-identical", () => {
     const shape = apply(
       `<a:p>${run("Hello ", 'b="1"')}${run("world")}</a:p>`,

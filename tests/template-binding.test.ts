@@ -70,6 +70,71 @@ describe("the name grammar", () => {
 });
 
 describe("a template bound by shape names", () => {
+  it("reports the painted dark theme and field colours even when the page background is white", async () => {
+    const session = await HeadlessSession.open(readFileSync("tools/templates/blank.pptx"), {quiet: true});
+    sessions.push(session);
+    expect((await session.apply({commands: [
+      {op: "addShape", slide: 1, shape: "rect", rect: {x: 0, y: 0, w: 33.87, h: 19.05}, fill: "#1A1A2E", line: null},
+      {...text(1, 3, 5, 24, 2, "真正的深色封面", 32, "@封面.标题"), style: {fontSizePt: 32, color: "#FFFFFF"}},
+    ]})).ok).toBe(true);
+    const outline = await session.outline();
+    expect(outline.slides[0].appearance).toMatchObject({source: "shape", tone: "dark", background: "#1a1a2e"});
+    const info = inferTemplate(outline);
+    expect(info.pages.cover?.dark).toBe(true);
+    const described = describeTemplate(info) as any;
+    expect(described.pages.cover.appearance.tone).toBe("dark");
+    expect(described.pages.cover.fieldInfo.title.color).toBe("#ffffff");
+    expect(outline.slides[0].shapes.find(shape => shape.name === "@封面.标题")?.textBox).toMatchObject({autoFit: "none", verticalOverflow: "overflow"});
+  });
+  it("preserves current purpose definitions through PPTX export, exposes exact edit targets, and leaves decoration intact", async () => {
+    const original = await boundTemplate([
+      text(1, 2, 13.5, 12, 1, "王明", 16, "@封面.姓名|说明=汇报人姓名"),
+      text(4, 3, 5, 20, 8, "先看现状，再解释原因，最后给出行动。", 18, "@内容.正文|说明=围绕页面标题展开"),
+    ]);
+    const session = await HeadlessSession.open(await original.export(), { quiet: true });
+    sessions.push(session);
+    const before = await session.outline();
+    const response = await session.callTool("get_template", {});
+    expect(response.ok).toBe(true);
+    const described = JSON.parse((response.content[0] as { text: string }).text);
+    expect(described.definitionVersion).toBe("shape-purpose-v1");
+    const cover = described.pages.cover;
+    expect(cover.definitionMode).toBe("shape_annotations");
+    expect(cover.fieldInfo["姓名"]).toMatchObject({ sample: "王明", options: { 说明: "汇报人姓名" }, annotation: "@封面.姓名|说明=汇报人姓名" });
+    const body = described.pages.content.fieldInfo["正文"];
+    expect(body).toMatchObject({ sample: "先看现状，再解释原因，最后给出行动。", rect: { x: 3, y: 5, w: 20, h: 8 } });
+    expect(described.pages.content.annotations.some((item: { purpose: string }) => item.purpose === "automatic_field")).toBe(true);
+    const logo = before.slides[0].shapes.find(item => item.text === "CHINA UNICOM")!;
+    expect(cover.preserveShapeIds).toContain(logo.id);
+    expect(await session.outline()).toEqual(before);
+    const changed = await session.apply({ commands: [{ op: "setText", target: { slide: 4, id: body.id }, text: "新主题的真实正文\n第二行解释" }] });
+    expect(changed.ok).toBe(true);
+    const after = await session.outline();
+    expect(after.slides[3].shapes.find(item => item.id === body.id)).toMatchObject({ text: "新主题的真实正文\n第二行解释", rect: body.rect, style: { fontSizePt: 18 } });
+    expect(after.slides[0].shapes.find(item => item.id === logo.id)).toEqual(logo);
+  });
+
+  it("separates named summary references from preserved decoration and exposes directory leaf targets", async () => {
+    const session = await boundTemplate();
+    const outline = await session.outline();
+    const toc = outline.slides[1];
+    toc.shapes.push({ id: "ref", name: "@目录.总结图|用途=参考图|说明=按主题重画关系", type: "group", rect: { x: 20, y: 4, w: 10, h: 10 }, rotation: 0,
+      children: [{ id: "node", name: "示例节点", type: "text", text: "样例机制", rect: { x: 21, y: 5, w: 8, h: 2 }, rotation: 0 }] });
+    const before = structuredClone(outline);
+    const described = describeTemplate(inferTemplate(outline)) as any;
+    const page = described.pages.toc;
+    expect(page.definitionMode).toBe("shape_annotations");
+    expect(page.entries).toHaveLength(3);
+    expect(page.referenceVisuals).toEqual([expect.objectContaining({ id: "ref", memberIds: ["node"], options: { 用途: "参考图", 说明: "按主题重画关系" } })]);
+    expect(page.preserveShapeIds).not.toContain("ref");
+    expect(page.preserveShapeIds).not.toContain("node");
+    expect(outline).toEqual(before);
+    const unused = page.entries[2];
+    const result = await session.apply({ commands: unused.shapeIds.map((id: string) => ({ op: "delete", target: { slide: 2, id } })) });
+    expect(result.ok, JSON.stringify(result)).toBe(true);
+    expect((await session.outline()).slides[1].shapes.some(item => item.name === "@目录.3.标题")).toBe(false);
+  });
+
   it("reads the same pages and fields as a template of {{TOKEN}}s, with the sample text and how much fits", async () => {
     const info = inferTemplate(await (await boundTemplate()).outline());
     expect(Object.keys(info.pages)).toEqual(["cover", "toc", "section", "content", "end"]);
@@ -159,21 +224,21 @@ describe("several pages of one role (layouts)", () => {
     expect(() => compileDeck({ slides: [{ page: "content", variant: "不存在", title: "x" }] }, info)).toThrow(/三卡片、图文/);
   });
 
-  it("is accepted by the template check when each extra page names itself once, and refused when not", async () => {
+  it("accepts repeated roles and layout names as optional design hints", async () => {
     const good = checkTemplate(await (await boundTemplate(layouts, 7)).outline());
     expect(good.filter(issue => issue.kind === "duplicate_role")).toEqual([]);
 
     const unnamed = await boundTemplate([
       { op: "addSlide", after: 5 }, text(6, 4, 1, 12, 1.5, "又一页", 28, "@内容.标题"), frame(6, "@内容.区域")
     ], 6);
-    expect(checkTemplate(await unnamed.outline()).map(issue => issue.kind)).toContain("duplicate_role");
+    expect(checkTemplate(await unnamed.outline()).filter(issue => issue.severity === "error")).toEqual([]);
 
     const twice = await boundTemplate([
       { op: "addSlide", after: 5 }, { op: "addSlide", after: 6 },
       text(6, 4, 1, 12, 1.5, "甲", 28, "@内容:同名.标题"), frame(6, "@内容:同名.区域"),
       text(7, 4, 1, 12, 1.5, "乙", 28, "@内容:同名.标题"), frame(7, "@内容:同名.区域")
     ], 7);
-    expect(checkTemplate(await twice.outline()).filter(issue => issue.kind === "duplicate_role")).toHaveLength(1);
+    expect(checkTemplate(await twice.outline()).filter(issue => issue.severity === "error")).toEqual([]);
   });
 });
 
@@ -215,6 +280,8 @@ describe("repeating units", () => {
     const groups = described.pages.content.variants[1].groups!;
     expect(groups["卡片"].count.min).toBe(2);
     expect(groups["卡片"].fieldInfo["标题"].sample).toBe("质量");
+    expect((groups["卡片"] as any).instances[0].members.some((member: any) => member.text === "质量" && member.id)).toBe(true);
+    expect((groups["卡片"] as any).note).not.toContain("自动缩小");
   });
 
   it("builds the template's own number, fewer, and more (the instances shrink to fit)", async () => {
@@ -277,7 +344,7 @@ describe("repeating units", () => {
       text(7, 12, 9, 4, 1, "乙", 20, "@内容:坏.块2.标题"),
       text(7, 25, 6, 4, 1, "丙", 20, "@内容:坏.块3.标题"), text(7, 25, 7.2, 4, 1, "说明", 16, "@内容:坏.块3.说明")
     ]), 7)).outline());
-    expect(issues.filter(issue => issue.kind === "unit").map(issue => issue.message).join("\n")).toMatch(/不一样/);
+    expect(issues.filter(issue => issue.severity === "error")).toEqual([]);
     expect(unit.problems.join("\n")).toMatch(/字段和“块1”不一样/);
     expect(unit.problems.join("\n")).toMatch(/不规则/);
   });
@@ -308,7 +375,8 @@ describe("picture slots", () => {
     const described = describeTemplate(info) as { pages: { content: { variants: Array<{ variant?: string; images?: Record<string, { aspect: number; note: string }>; groups?: Record<string, { fieldInfo: Record<string, { kind?: string; aspect?: number }> }> }> } } };
     const single = described.pages.content.variants.find(item => item.variant === "图文")!;
     expect(single.images!["图片"].aspect).toBeCloseTo(1.4, 1);
-    expect(single.images!["图片"].note).toContain("placeholder");
+    expect(single.images!["图片"].note).toContain("SVG");
+    expect(single.images!["图片"].note).not.toContain("placeholder");
     const wall = described.pages.content.variants.find(item => item.variant === "图墙")!;
     expect(wall.groups!["图"].fieldInfo["图片"]).toMatchObject({ kind: "image", aspect: 1 });
   });

@@ -8,7 +8,7 @@ const box = { x: 100, y: 200, cx: 3000, cy: 1000 };
 const parse = (xml: string) => new DOMParser().parseFromString(xml, "application/xml");
 
 describe("buildShapeXml", () => {
-  const kinds: NewShapeKind[] = ["textbox", "rect", "roundRect", "ellipse", "triangle", "rightArrow", "line", "arrow"];
+  const kinds: NewShapeKind[] = ["textbox", "rect", "roundRect", "ellipse", "triangle", "rightArrow", "leftArrow", "upArrow", "downArrow", "line", "arrow"];
 
   it("produces well-formed, correctly namespaced nodes for every kind", () => {
     for (const kind of kinds) {

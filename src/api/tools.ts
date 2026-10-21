@@ -37,6 +37,8 @@ export interface ToolResult {
   /** False when the call failed in a way the model should react to. */
   ok: boolean;
   content: ToolContent[];
+  /** Saved document version inspected by the hosting application, when known. */
+  document?: { project_id: number; revision: number; stable: boolean };
 }
 
 export const RENDER_WIDTH = { min: 160, max: 2560, default: 1024 };
@@ -65,6 +67,8 @@ function briefOf(outline: Outline): unknown {
         ?? shapes.find(shape => shape.type === "text" && shape.text);
       return {
         index: slide.index,
+        id: slide.id,
+        appearance: slide.appearance,
         ...(slide.layout ? { layout: slide.layout } : {}),
         ...(title?.text ? { title: title.text.length > 40 ? `${title.text.slice(0, 40)}…` : title.text } : {}),
         contents: count(shapes, {})
@@ -80,7 +84,7 @@ export const TOOLS: ToolDefinition[] = [
       "读取演示文稿现在的结构：版式名称列表，以及每一页上每个对象的 id、名称、类型"
       + "（text、shape、image、line、table、chart、group）、位置和大小（厘米）、文字、样式；"
       + "表格给出各行各列的文字，图表给出类型、分类和各系列的数据。"
-      + "修改之前先调用它，才知道要改的对象叫什么、在哪里。页数很多的文稿先给概要，再用 slides 读需要的页。",
+      + "appearance 告诉你实际铺底后的深浅主题，可能不同于页面 background 属性；textBox 给出边距、换行和溢出策略。修改之前先调用它，才知道要改的对象叫什么、在哪里。页数很多的文稿先给概要，再用 slides 读需要的页。",
     inputSchema: {
       type: "object",
       properties: {
@@ -106,8 +110,10 @@ export const TOOLS: ToolDefinition[] = [
       "用一批指令修改演示文稿：新增页面、文字、形状、图片、表格、图表，修改文字与样式，移动缩放，复制，删除等。"
       + "整批默认是原子的：任何一条失败，这一批的所有改动都会撤销，并返回失败的那一条的位置和原因"
       + "（找不到或不唯一的对象会附上候选）。页码从 1 开始，长度单位是厘米，颜色写 #RRGGBB。"
+      + "连接关系用 addConnector 明确 from/to 端点（厘米），原生箭头从 from 指向 to；支持上斜、竖直与反向，不需要负尺寸。"
       + "用 target 指向对象：{slide, id | name | placeholder | text}，或 \"$别名\"（本批前面用 as 创建的对象）。"
-      + "一批里可以放同一页的全部改动。改完后请用 render_slide 检查排版。",
+      + "先单独完成增删复制与排序，再读取 get_template/get_outline 确认最终页码和对象；之后逐页提交绘制批次，避免混用旧页码。"
+      + "原子失败返回 rolledBack:true、appliedCommands:0，前面看似成功的编辑也没有保留。一批里可以放同一页的全部改动。删除组合会连同子对象删除，不要再重复删除子 id；失败后先重新读 outline 再修正。文字换行用真实换行符，不要写字面的反斜杠 n。改完后请用 render_slide 检查排版。",
     inputSchema: batchSchema as unknown as Record<string, unknown>
   },
   {
@@ -132,6 +138,7 @@ export const TOOLS: ToolDefinition[] = [
     name: "check_layout",
     description:
       "用测量的办法检查版面，不需要看图：文字放不下文本框、对象超出页面、对象互相重叠、内容只占页面上半部分。"
+      + "也提示文字与实际不透明底色对比过低、文字被后绘制面板覆盖的风险；这是保守诊断，仍须看实际渲染。只报告，不自动修改布局。"
       + "每个问题带页码、对象 id 和说明，直接据此用 apply_edits 修改；没有问题时 issues 是空数组。",
     inputSchema: {
       type: "object",
@@ -169,10 +176,10 @@ export const TOOLS: ToolDefinition[] = [
   {
     name: "get_template",
     description:
-      "文稿是一份模板（里面是封面、目录、章节、内容、结尾等页面，可填的地方由形状名字以 @ 开头标出，或文字里写着 {{TOKEN}} 占位符）时，"
-      + "读出它有哪几种页面、每种页面能填哪些字段（fieldInfo 给出每个字段在模板里的示例文字和大约能放多少字，照这个长度写）、"
-      + "同一种页面有几个版式（variants，各有 when 说明适用场景，build_deck 里用 variant 指定）、内容页有多大的位置放内容、哪些是示例文字。"
-      + "之后用 build_deck 一次生成整份。",
+      "文稿是一份模板（封面、目录、章节、内容、结尾等页面，可变对象由形状名字以 @ 开头说明用途）时，"
+      + "按当前形状用途定义读出页面角色、sourceSlide、版式及适用说明、annotations、字段形状 id、真实示例、选项、目录成员、图片位和重复结构。"
+      + "referenceVisuals 是按主题重画的参考图，preserveShapeIds 是保留装饰。fieldInfo/fitChars 描述参考文本框，不限制新内容。"
+      + "保留模板视觉语言，用 apply_edits 自主设计原生可编辑页面；内容区为空或参考不足时自由编排，不自动缩字、拉伸或分栏。",
     inputSchema: { type: "object", properties: {}, additionalProperties: false }
   },
   {
@@ -212,7 +219,7 @@ export const TOOL_GUIDE = [
   "你可以用三个工具读取和修改一份 PPTX 演示文稿：get_outline、apply_edits、render_slide。",
   "在制作模板时，用形状名字（setName，以 @ 开头）标出每一块的用途，或给页面写 {{关键字}}；先用 suggest_annotations 看每页大概是什么角色、哪些是装饰、哪些是重复结构（它给出现成的 setName 命令，只是猜测，要对照 render_slide 的图），改完用 check_template 检查，修到没有 error。",
   "check_layout 用测量检查版面（溢出、越界、重叠、大片空白），比看图快，改完可以再调用确认。",
-  "文稿是一份模板（页面文字里有 {{TOKEN}} 占位符）时，先 get_template 看有哪些页面类型，再用 build_deck 一次生成整份：你只写内容，排版由引擎完成。之后再用 render_slide 看效果、用 apply_edits 精修有问题的页。",
+  "模板统一使用形状名字里的 @用途 标注和真实示例文字。先读模板 design_spec.md 和 get_template，按 annotations、fieldInfo.id、目录 entries、图片位、重复结构及版式适用说明理解用途；referenceVisuals 按新主题重画，preserveShapeIds 的装饰保留。用 apply_edits 明确设计和填写，不自动布局、拉伸或缩字，不调用 build_deck。",
   "",
   "工作方式：",
   "1. 先 get_outline 看清现有内容，再动手；不要凭空猜对象的名称。页数很多时它先给概要，再用 slides 读你要改的那几页。",
@@ -223,7 +230,7 @@ export const TOOL_GUIDE = [
   "6. apply_edits 失败时，读返回的 error.message、error.path 和 candidates，改正那一条后重新提交；失败的批次不会留下任何改动。",
   "",
   "约定：页码从 1 开始；长度单位是厘米；颜色是 #RRGGBB；字号是磅（fontSizePt）。",
-  "页面背景用 setBackground 设置（纯色或渐变），不要铺一个满页的矩形来冒充；get_outline 的 background 告诉你每页现在的底色：深色底上的文字、图表、表格要用浅色，别让文字和底色相近。",
+  "新设计的页面背景用 setBackground 设置（纯色或渐变）；已有模板可能用整页形状铺底，实际底色以 get_outline/get_template 的 appearance 和渲染为准，不只看 background 属性。深色底上的文字、图表、表格要用浅色。",
   "版面：新增内容的左边与标题的左边对齐，左右留相同的边距，不要超出页面；表格和图表居中或与标题对齐，不要偏向一边。",
   "数据用 addChart（柱形 column、条形 bar、折线 line、饼图 pie）；成行成列的内容用 addTable；",
   "已有的图表和表格用 setChart、setTable、setCell 改数据，它们会保留原来的样式。",
@@ -317,7 +324,7 @@ export async function callTool(host: ToolHost, name: string, args: unknown): Pro
           slides = parsed;
         }
         const issues = checkLayout(await host.outline(), { slides });
-        return { ok: true, content: [text({ ok: true, issues })] };
+        return { ok: true, content: [text({ layout_passed: issues.length === 0, scope: "geometry_and_visibility", issues, not_checked: ["content completeness", "icon/glyph rendering", "visual design", "topic coverage"], note: "This checks geometry and conservative text visibility, not full visual or content acceptance. Empty issues do not mean the deck is ready." })] };
       }
 
       case "check_template": {
@@ -342,7 +349,7 @@ export async function callTool(host: ToolHost, name: string, args: unknown): Pro
 
       case "get_template": {
         const template = inferTemplate(await host.outline());
-        if (Object.keys(template.pages).length === 0) return failure("这份文稿里没有模板页（文字里带 {{TOKEN}} 占位符的封面、目录、内容页等）");
+        if (Object.keys(template.pages).length === 0) return failure("这份文稿里没有带 @用途 标注或旧 {{TOKEN}} 标记的模板页；请先确认所选模板及当前页面");
         return { ok: true, content: [text(describeTemplate(template))] };
       }
 

@@ -7,6 +7,9 @@ export type NewShapeKind =
   | "ellipse"
   | "triangle"
   | "rightArrow"
+  | "leftArrow"
+  | "upArrow"
+  | "downArrow"
   | "line"
   | "arrow";
 
@@ -31,7 +34,10 @@ const PRESET: Record<Exclude<NewShapeKind, "textbox" | "line" | "arrow">, string
   roundRect: "roundRect",
   ellipse: "ellipse",
   triangle: "triangle",
-  rightArrow: "rightArrow"
+  rightArrow: "rightArrow",
+  leftArrow: "leftArrow",
+  upArrow: "upArrow",
+  downArrow: "downArrow"
 };
 
 const NAMES: Record<NewShapeKind, string> = {
@@ -41,6 +47,9 @@ const NAMES: Record<NewShapeKind, string> = {
   ellipse: "椭圆",
   triangle: "三角形",
   rightArrow: "右箭头",
+  leftArrow: "左箭头",
+  upArrow: "上箭头",
+  downArrow: "下箭头",
   line: "直线",
   arrow: "箭头"
 };
@@ -83,7 +92,7 @@ export function buildShapeXml(kind: NewShapeKind, id: string, box: EmuBox, shape
     : `${solid(SHAPE_FILL)}<a:ln w="${Math.round(SHAPE_LINE_PT * PT_EMU)}">${solid(SHAPE_LINE)}</a:ln>`;
   const textColor = isText ? "" : solid(SHAPE_TEXT);
   const body = isText
-    ? '<a:bodyPr wrap="square" rtlCol="0" anchor="t"><a:noAutofit/></a:bodyPr>'
+    ? '<a:bodyPr wrap="square" vertOverflow="overflow" horzOverflow="overflow" rtlCol="0" anchor="t"><a:noAutofit/></a:bodyPr>'
     : '<a:bodyPr rtlCol="0" anchor="ctr"/>';
   const align = isText ? "" : '<a:pPr algn="ctr"/>';
   return `<p:sp ${NS}><p:nvSpPr><p:cNvPr id="${id}" name="${name}"/><p:cNvSpPr${isText ? ' txBox="1"' : ""}/><p:nvPr/></p:nvSpPr>`
@@ -186,6 +195,8 @@ export function buildShapeElements(
       verticalAnchor: isText ? "top" : "middle",
       autoFit: "none",
       wrap: "square",
+      verticalOverflow: "overflow",
+      horizontalOverflow: "overflow",
       fontScale: 1,
       textDirection: "horz"
     }

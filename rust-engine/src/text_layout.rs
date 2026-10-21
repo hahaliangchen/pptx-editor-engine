@@ -774,6 +774,7 @@ pub fn build_cosmic_paragraphs(
                 .map(|body| body.wrap == "none")
                 .unwrap_or(false);
             if !wrap_none
+                && !text.contains('\n')
                 && is_east_asian_text(&text)
                 && (paragraph.style.hanging_punctuation || paragraph.style.indent != 0.0)
             {
@@ -808,19 +809,23 @@ pub fn build_cosmic_paragraphs(
                 // punctuation can hang without widening every later line.
                 buffer.set_wrap(Wrap::None);
             } else {
-                let default_attrs = cosmic_attrs(first_style, &text, scale, line_height);
-                let mut attrs_list = AttrsList::new(&default_attrs);
-                let mut byte_offset = 0;
-                for run in &paragraph.runs {
-                    let end = byte_offset + run.content.len();
-                    let run_attrs = cosmic_attrs(&run.style, &run.content, scale, line_height);
-                    attrs_list.add_span(byte_offset..end, &run_attrs);
-                    byte_offset = end;
+                // DrawingML a:br becomes a newline inside a paragraph. BufferLine
+                // represents ONE physical line; passing embedded newlines to it
+                // makes cosmic-text shape them as glyphs instead of line breaks.
+                // Keep byte ranges so rich-text spans stay attached to each line.
+                let mut start = 0;
+                for content in text.split('\n') {
+                    let end = start + content.len();
+                    let attrs_list = attrs_for_text_range(
+                        paragraph, first_style, start, end, scale, line_height,
+                    );
+                    let mut line = BufferLine::new(
+                        content, LineEnding::None, attrs_list, Shaping::Advanced,
+                    );
+                    line.set_align(Some(align));
+                    buffer.lines.push(line);
+                    start = end + 1;
                 }
-                let mut line =
-                    BufferLine::new(&text, LineEnding::None, attrs_list, Shaping::Advanced);
-                line.set_align(Some(align));
-                buffer.lines.push(line);
                 buffer.set_wrap(if wrap_none {
                     Wrap::None
                 } else if paragraph.style.east_asian_line_break || is_east_asian_text(&text) {

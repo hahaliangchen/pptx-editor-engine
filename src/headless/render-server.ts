@@ -1,5 +1,6 @@
 import { IncomingMessage, Server, ServerResponse, createServer } from "node:http";
 import { HeadlessSession } from "./session";
+import { convertDesign } from "../design/service";
 
 /**
  * A small HTTP service that draws a page of a .pptx as PNG: the backend of a
@@ -88,6 +89,17 @@ export function createRenderServer(options: RenderServerOptions = {}): Server {
     const url = new URL(request.url ?? "/", "http://localhost");
     if (request.method === "GET" && url.pathname === "/health") {
       response.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ ok: true }));
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/design") {
+      const raw = await readBody(request, maxBody * 4);
+      let input;
+      try { input = JSON.parse(raw.toString("utf8")); } catch { throw new HttpError(400, "BAD_JSON", "Invalid design request"); }
+      const design = await inTurn(async () => {
+        try { return await convertDesign(input); }
+        catch (error) { throw new HttpError(422, "DESIGN_REJECTED", error instanceof Error ? error.message : String(error)); }
+      });
+      response.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" }).end(JSON.stringify({ design }));
       return;
     }
     const isThumbnail = url.pathname === "/thumbnail";

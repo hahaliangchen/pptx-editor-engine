@@ -32,6 +32,10 @@ export interface ViewerOptions {
   onZoomChange?: (percent: number, fit: boolean) => void;
   /** Fired (debounced) after an edit so thumbnails can be refreshed. */
   onSlideEdited?: (slideIndex: number, slide: Slide) => void;
+  /** Synchronous commit notification; consumers must invalidate stale design views immediately. */
+  onDocumentEdited?: () => void;
+  /** Typing/dragging ended; a queued HTML refresh may now take a stable snapshot. */
+  onEditInteractionEnd?: () => void;
 }
 
 interface FontRequest {
@@ -148,11 +152,12 @@ export default class PptViewer {
       view: {
         invalidate: slide => this.invalidateSlide(slide),
         beginDrag: (slide, elements) => this.beginDragLayers(slide, elements),
-        endDrag: () => this.endDragLayers(),
-        slideEdited: slide => this.notifySlideEdited(slide),
+        endDrag: () => { this.endDragLayers(); options.onEditInteractionEnd?.(); },
+        slideEdited: slide => { options.onDocumentEdited?.(); this.notifySlideEdited(slide); },
         beginTextEdit: (slide, element) => this.setHiddenElements(slide, [element]),
-        endTextEdit: slide => this.setHiddenElements(slide, []),
+        endTextEdit: slide => { this.setHiddenElements(slide, []); options.onEditInteractionEnd?.(); },
         slidesChanged: async () => {
+          options.onDocumentEdited?.();
           await this.renderCurrentSlide();
           if (this.presentation) this.onSlidesChanged?.(this.presentation, this.currentSlideIndex);
         },
@@ -166,7 +171,10 @@ export default class PptViewer {
         probe.src = url;
       })
     });
-    if (options.onEditStateChange) this.editor.subscribe(options.onEditStateChange);
+    this.editor.subscribe(state => {
+      options.onEditStateChange?.(state);
+      if (!this.editor.hasActiveInteraction()) options.onEditInteractionEnd?.();
+    });
 
     // Listen to resize to keep canvas crisp
     window.addEventListener("resize", () => this.resizeAndRedraw());
@@ -535,6 +543,46 @@ export default class PptViewer {
     await this.engineReady;
     // Edits may have brought in fonts the page has not drawn yet.
     await this.ensurePresentationFonts({ ...presentation, slides: [slide] });
+    return this.renderDocumentSlide(presentation, slide, width);
+  }
+
+  /** Conversion snapshots never replace the user's live document. */
+  public async prepareDesignDocument(document: PptVirtualDocument): Promise<void> {
+    await this.engineReady;
+    await this.ensurePresentationFonts(document);
+  }
+
+  /** HTML and the WASM renderer use the same downloaded font bytes. */
+  public async prepareDesignFonts(frameDocument: Document): Promise<void> {
+    await this.engineReady;
+    const catalog = await this.getFontCatalog();
+    const requests = Array.from(frameDocument.body.querySelectorAll<HTMLElement>("*"))
+      .filter(el => Array.from(el.childNodes).some(n => n.nodeType === 3 && !!n.textContent?.trim()))
+      .map(el => {
+        const style = frameDocument.defaultView!.getComputedStyle(el);
+        const family = style.fontFamily.split(",")[0].trim().replace(/^["']|["']$/g, "");
+        const resolved = this.resolveBackendFamily({ family, bold: Number(style.fontWeight) >= 600,
+          italic: style.fontStyle === "italic", eastAsian: /[\u3000-\u9fff\uac00-\ud7af]/.test(el.textContent ?? "") }, catalog);
+        return { el, family: resolved, bold: Number(style.fontWeight) >= 600, italic: style.fontStyle === "italic" };
+      });
+    await Promise.all(requests.map(font => this.loadBackendFont(font.family, font.bold, font.italic)));
+    for (const request of requests) request.el.style.setProperty("font-family", JSON.stringify(request.family), "important");
+    document.fonts.forEach(face => (frameDocument.fonts as FontFaceSet & { add(face: FontFace): void }).add(face));
+    await frameDocument.fonts.ready;
+  }
+
+  public async renderDesignAsset(presentation: PptVirtualDocument, slide: Slide, elements: SlideElement[], bounds: { x: number; y: number; w: number; h: number }): Promise<string> {
+    const png = await this.renderDocumentSlide(presentation, { ...slide, elements }, 1280);
+    const image = await createImageBitmap(new Blob([png.slice().buffer as ArrayBuffer], { type: "image/png" }));
+    try {
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.max(1, Math.ceil(bounds.w * 2)); canvas.height = Math.max(1, Math.ceil(bounds.h * 2));
+      canvas.getContext("2d")!.drawImage(image, bounds.x, bounds.y, Math.max(1, bounds.w), Math.max(1, bounds.h), 0, 0, canvas.width, canvas.height);
+      return canvas.toDataURL("image/png");
+    } finally { image.close(); }
+  }
+
+  private async renderDocumentSlide(presentation: PptVirtualDocument, slide: Slide, width: number): Promise<Uint8Array> {
     this.workerRenderer ??= new WorkerRenderer();
     this.workerRenderer.addFonts(this.registeredFontBytes);
     const elements = expandForRender(slide.elements);
@@ -728,7 +776,13 @@ export default class PptViewer {
     this.editor.jumpTo(position);
   }
 
-  /** Build a new .pptx with every edit written back into the original package. */
+  /** Read current bytes without consuming the editor dirty flag (design/preview conversion). */
+  public hasActiveInteraction(): boolean { return this.editor.hasActiveInteraction(); }
+
+  public snapshotPptx(): Promise<Blob> {
+    return this.session.exportPptx(false);
+  }
+
   public exportPptx(): Promise<Blob> {
     return this.session.exportPptx();
   }

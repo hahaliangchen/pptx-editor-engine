@@ -5,6 +5,7 @@ import { HeadlessSession } from "../src/headless/session";
 import { buildDeck } from "./helpers/deck";
 import { apiDeckParts } from "./helpers/api-deck";
 import { checkPackage } from "./helpers/package-check";
+import { readFileSync } from "node:fs";
 
 const sessions: HeadlessSession[] = [];
 async function open(): Promise<HeadlessSession> {
@@ -37,6 +38,55 @@ const insideCard = (width: number) => {
 };
 
 describe("headless session", () => {
+  it("draws upward and vertical native connectors from exact endpoints through export", async () => {
+    const session=await HeadlessSession.open(readFileSync("tools/templates/blank.pptx"),{quiet:true});sessions.push(session);
+    expect((await session.apply([{op:"addConnector",slide:1,from:{x:4,y:9},to:{x:8,y:5},arrow:false,line:{color:"#D97757",widthPt:3}},{op:"addConnector",slide:1,from:{x:12,y:5},to:{x:12,y:9},arrow:false,line:{color:"#D97757",widthPt:3}}])).ok).toBe(true);
+    const reopened=await HeadlessSession.open(await session.export(),{quiet:true});sessions.push(reopened);
+    for(const deck of [session,reopened]){
+      const png=await deck.render(1,{width:1280}),scale=1280/(await deck.outline()).slideSize.w;
+      for(const [x,y]of[[4.5,8.5],[7.5,5.5],[12,7]])expect((await pixelAt(png,x*scale,y*scale)).slice(0,3)).toEqual([217,119,87]);
+      expect((await pixelAt(png,4.5*scale,5.5*scale)).slice(0,3)).toEqual([255,255,255]);
+    }
+    expect(await session.apply([{op:"addConnector",slide:1,from:{x:2,y:2},to:{x:2,y:2}}])).toMatchObject({ok:false,rolledBack:true,appliedCommands:0});
+  });
+  it("duplicates after the requested page, preserving independent native text through export", async () => {
+    const session=await open();
+    expect((await session.apply([{op:"setText",target:{slide:1,name:"卡片"},text:"A"},{op:"duplicateSlide",slide:1},{op:"setText",target:{slide:2,name:"卡片"},text:"B"}])).ok).toBe(true);
+    expect(await session.apply([{op:"duplicateSlide",slide:1,after:2}])).toMatchObject({ok:true,results:[{slide:3}]});
+    expect(await session.apply([{op:"duplicateSlide",slide:2,after:0}])).toMatchObject({ok:true,results:[{slide:1}]});
+    const reopened=await HeadlessSession.open(await session.export(),{quiet:true});sessions.push(reopened);
+    for(const deck of [session,reopened])expect((await deck.outline()).slides.map(s=>s.shapes.find(x=>x.name==="卡片")?.text)).toEqual(["B","A","B","A"]);
+  });
+  it.each([
+    {shape: "leftArrow", rect: {x: 3,y: 5,w: 5,h: 2}, points: [[3.4,6],[7.6,6]]},
+    {shape: "upArrow", rect: {x: 3,y: 5,w: 2,h: 5}, points: [[4,5.4],[4,9.6]]},
+    {shape: "downArrow", rect: {x: 3,y: 5,w: 2,h: 5}, points: [[4,5.4],[4,9.6]]}
+  ])("creates and reopens a visible native $shape", async ({shape,rect,points}) => {
+    const session = await HeadlessSession.open(readFileSync("tools/templates/blank.pptx"), {quiet: true});
+    sessions.push(session);
+    expect((await session.apply({commands: [{op: "addShape", slide: 1, shape, rect, fill: "#D97757", line: null}]})).ok).toBe(true);
+    const reopened = await HeadlessSession.open(await session.export(), {quiet: true});
+    sessions.push(reopened);
+    for (const deck of [session,reopened]) {
+      const picture=await deck.render(1,{width:1280});
+      const scale=1280/(await deck.outline()).slideSize.w;
+      for(const [x,y] of points)expect((await pixelAt(picture,x*scale,y*scale)).slice(0,3)).toEqual([217,119,87]);
+    }
+  });
+  it("draws a native arrow shaft and head inside its bounds before and after PPTX export", async () => {
+    const session = await HeadlessSession.open(readFileSync("tools/templates/blank.pptx"), {quiet: true});
+    sessions.push(session);
+    expect((await session.apply({commands: [{op: "addShape", slide: 1, name: "箭头", shape: "rightArrow", rect: {x: 3, y: 5, w: 5, h: 2}, fill: "#D97757", line: null}]})).ok).toBe(true);
+    const reopened = await HeadlessSession.open(await session.export(), {quiet: true});
+    sessions.push(reopened);
+    for (const deck of [session, reopened]) {
+      const picture = await deck.render(1, {width: 1280});
+      const scale = 1280 / (await deck.outline()).slideSize.w;
+      expect((await pixelAt(picture, 3.4 * scale, 6 * scale)).slice(0, 3)).toEqual([217,119,87]);
+      expect((await pixelAt(picture, 7.6 * scale, 6 * scale)).slice(0, 3)).toEqual([217,119,87]);
+      expect((await pixelAt(picture, 3.4 * scale, 12 * scale)).slice(0, 3)).toEqual([255,255,255]);
+    }
+  });
   it("reads the deck's structure", async () => {
     const outline = await (await open()).outline();
     expect(outline.slides).toHaveLength(1);

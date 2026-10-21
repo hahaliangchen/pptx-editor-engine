@@ -1,4 +1,5 @@
 import JSZip from "jszip";
+import { readTemplateRecord, writeTemplateRecord, annotatedPurpose, type TemplateNodeSemantics } from "./design/template-policy";
 import { ElementSource, GroupRef, Rect, Slide } from "./pptx-virtual-dom";
 import { ChartAdd, ChartModel } from "./charts/model";
 import { BackgroundSpec } from "./editor/shape-ops";
@@ -175,6 +176,7 @@ export type OrderOp = "front" | "back" | "forward" | "backward";
 export interface InsertedShape {
   id: string;
   xml: string;
+  templatePolicies?: Record<string, TemplateNodeSemantics>;
 }
 
 /** A relationship a pasted shape needs in its slide (an image, a hyperlink...). */
@@ -275,11 +277,17 @@ function spTreeOf(doc: Document): Element | null {
  * z-order changes.
  */
 function applyPartEdits(doc: Document, part: string, slides: Slide[], edits: EditSet): void {
+  // Validate the unmodified input first. Only actual native edits may reconcile deleted identities.
+  let templateRecord = readTemplateRecord(doc);
   const spTree = spTreeOf(doc);
   for (const inserted of edits.structure.inserts.get(part) || []) {
     const fragment = new DOMParser().parseFromString(inserted.xml, "application/xml");
     if (fragment.getElementsByTagName("parsererror").length > 0 || !spTree) continue;
     spTree.appendChild(doc.importNode(fragment.documentElement, true));
+    if (inserted.templatePolicies && Object.keys(inserted.templatePolicies).length) {
+      templateRecord ??= {version:1,nodes:{}};
+      Object.assign(templateRecord.nodes,inserted.templatePolicies);
+    }
   }
 
   const background = edits.structure.backgrounds.get(part);
@@ -344,6 +352,20 @@ function applyPartEdits(doc: Document, part: string, slides: Slide[], edits: Edi
   for (const { shapeId, op } of edits.structure.orders.get(part) || []) {
     const shape = findShapeNode(doc, shapeId);
     if (shape) applyOrderOp(shape, op);
+  }
+  if (templateRecord) {
+    const live = new Map(Array.from(doc.getElementsByTagNameNS("*","cNvPr")).map(n=>[n.getAttribute("id")!,n]));
+    for (const [id,policy] of Object.entries(templateRecord.nodes)) {
+      const props=live.get(id);
+      if (!props) {delete templateRecord.nodes[id];continue;}
+      const name=props.getAttribute("name") ?? "";
+      if (name !== policy.name) {
+        const explicit=annotatedPurpose(name);
+        if (explicit) policy.purpose=explicit;
+        policy.name=name;
+      }
+    }
+    writeTemplateRecord(doc,templateRecord);
   }
 }
 
@@ -413,7 +435,7 @@ export async function materializeShape(
   shapeId: string,
   slides: Slide[],
   edits: EditSet
-): Promise<{ xml: string; relationships: RelAdd[] } | null> {
+): Promise<{ xml: string; relationships: RelAdd[]; templatePolicies?: Record<string, TemplateNodeSemantics> } | null> {
   const loaded = await readDocument(zip, part, edits.structure.virtual);
   if (!loaded) return null;
   applyPartEdits(loaded.doc, part, slides, edits);
@@ -428,7 +450,9 @@ export async function materializeShape(
   const relationships = relationshipIdsIn(node)
     .map(id => known.get(id))
     .filter((rel): rel is RelAdd => !!rel);
-  return { xml: new XMLSerializer().serializeToString(node), relationships };
+  const record = readTemplateRecord(loaded.doc);
+  const templatePolicies = Object.fromEntries([...shapeIdsOf(original)].filter(id=>record?.nodes[id]).map(id=>[id,record!.nodes[id]]));
+  return { xml: new XMLSerializer().serializeToString(node), relationships, ...(Object.keys(templatePolicies).length ? {templatePolicies} : {}) };
 }
 
 /**
@@ -440,7 +464,7 @@ export async function materializeSlide(
   part: string,
   slides: Slide[],
   edits: EditSet
-): Promise<{ xml: string; relationships: RelAdd[] } | null> {
+): Promise<{ xml: string; relationships: RelAdd[]; templatePolicies?: Record<string, TemplateNodeSemantics> } | null> {
   const loaded = await readDocument(zip, part, edits.structure.virtual);
   if (!loaded) return null;
   applyPartEdits(loaded.doc, part, slides, edits);

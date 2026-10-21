@@ -13,9 +13,9 @@ import {
 } from "../tables/xml";
 import { ApiError } from "./errors";
 import { ChartFields, applyChartFields, newChart } from "./charts";
-import { Outline, OutlineOptions, buildOutline, emuPerPxOf } from "./outline";
+import { Outline, OutlineOptions, OutlineShape, buildOutline, emuPerPxOf } from "./outline";
 import { ResolveContext, Target, resolveNode, resolveSlide } from "./resolve";
-import { SceneNode, SlideScene, buildScene } from "./scene";
+import { SceneNode, SlideScene, allNodes, buildScene } from "./scene";
 import { CommandBatch, parseBatch } from "./schema";
 
 /** What the API needs from the editor; SlideEditor provides all of it. */
@@ -79,6 +79,9 @@ export interface CommandResult {
 
 export interface ApplyResult {
   ok: boolean;
+  /** An atomic failure restored the original document; no returned edit remains. */
+  rolledBack?: boolean;
+  appliedCommands?: number;
   /** Index of the first command that failed (atomic batches stop there). */
   failedAt?: number;
   error?: ReturnType<ApiError["toJSON"]>;
@@ -103,6 +106,30 @@ export class EditApi {
     return buildOutline(doc, { ...options, layouts: options.layouts ?? (await this.deck.layouts()) });
   }
 
+  /**
+   * What the user has selected on the slide now shown, as the outline describes it (a group counts as one
+   * shape, with its children), for a panel that names the selected shape. Nothing selected: no shapes.
+   */
+  public async selection(): Promise<{ slide: number; shapes: OutlineShape[] }> {
+    const refs = this.editor.selectionRefs();
+    if (refs.length === 0) return { slide: 0, shapes: [] };
+    const scenes = this.context(new Map()).scenes;
+    const first = refs[0];
+    const scene = scenes.find(candidate => allNodes(candidate).some(node => node.part === first.part && node.id === first.id));
+    if (!scene) return { slide: 0, shapes: [] };
+    const outline = await this.outline({ slides: [scene.index], maxTextLength: 200 });
+    const find = (shapes: OutlineShape[], id: string): OutlineShape | undefined => {
+      for (const shape of shapes) {
+        if (shape.id === id) return shape;
+        const inside = shape.children ? find(shape.children, id) : undefined;
+        if (inside) return inside;
+      }
+      return undefined;
+    };
+    const shapes = refs.map(ref => find(outline.slides[0].shapes, ref.id)).filter((shape): shape is OutlineShape => !!shape);
+    return { slide: scene.index, shapes };
+  }
+
   /** Focus an object without changing the deck or adding an undo step. */
   public async select(target: Target): Promise<void> {
     const { scene, node } = resolveNode(this.context(new Map()), target, "target");
@@ -114,7 +141,7 @@ export class EditApi {
     try {
       batch = parseBatch(input);
     } catch (error) {
-      return { ok: false, error: this.asError(error).toJSON(), results: [] };
+      return { ok: false, appliedCommands: 0, error: this.asError(error).toJSON(), results: [] };
     }
 
     const doc = this.requireDocument();
@@ -132,7 +159,7 @@ export class EditApi {
           this.editor.history.rollback();
           this.editor.clearSelection();
           await this.deck.showSlide(Math.min(startIndex, doc.slides.length - 1));
-          return { ok: false, failedAt: index, error: failure.toJSON(), results };
+          return { ok: false, rolledBack: true, appliedCommands: 0, failedAt: index, error: failure.toJSON(), results: [] };
         }
         results.push({ ok: false, error: failure.toJSON() });
       }
@@ -263,8 +290,11 @@ export class EditApi {
       }
       case "duplicateSlide": {
         const scene = resolveSlide(context.scenes, command.slide, at("slide"));
+        const after = command.after ?? scene.index;
+        if (after > context.scenes.length) throw new ApiError("SLIDE_NOT_FOUND", `没有第 ${after} 页，当前共 ${context.scenes.length} 页`, at("after"));
         await this.deck.duplicateSlide(scene.index - 1);
-        return { slide: scene.index + 1 };
+        if (after !== scene.index) this.deck.moveSlide(scene.index, after);
+        return { slide: after + 1 };
       }
       case "deleteSlide": {
         const scene = resolveSlide(context.scenes, command.slide, at("slide"));
@@ -293,6 +323,13 @@ export class EditApi {
         this.formatParagraphs(created.text, paragraphs, command.style);
         this.register(aliases, command.as, created);
         return this.createdResult(scene, created);
+      }
+      case "addConnector": {
+        const {from, to} = command;
+        if (from.x === to.x && from.y === to.y) throw new ApiError("INVALID_SCHEMA", "连接线的两个端点不能重合", at("to"));
+        return this.run({...command, op: "addShape", shape: command.arrow === false ? "line" : "arrow", fill: null,
+          rect: {x: Math.min(from.x,to.x), y: Math.min(from.y,to.y), w: Math.abs(to.x-from.x), h: Math.abs(to.y-from.y)},
+          flipH: to.x < from.x, flipV: to.y < from.y}, path, aliases);
       }
       case "addShape": {
         const scene = resolveSlide(context.scenes, command.slide, at("slide"));

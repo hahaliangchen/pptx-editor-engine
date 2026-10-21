@@ -1132,7 +1132,7 @@ export class PptxParser {
     const szAttr = rPr.getAttribute("sz");
     if (szAttr) {
       const ptSize = parseInt(szAttr, 10) / 100;
-      res.fontSize = Math.round(ptSize * 12700 * absoluteUnitScale);
+      res.fontSize = ptSize * 12700 * absoluteUnitScale;
     }
     const boldAttr = rPr.getAttribute("b");
     if (boldAttr === "1" || boldAttr === "true") {
@@ -2094,7 +2094,9 @@ export class PptxParser {
       }
 
       const computedRuns: TextRun[] = [];
-      const runs = querySelectorAll(p, "a\\:r, r, a\\:fld, fld, a\\:br, br");
+      // Mixed run/field/break children must stay in document order. The selector
+      // fallback helper chooses one tag family and would discard br/fld next to r.
+      const runs = getDirectChildren(p, "r", "fld", "br");
       for (const run of runs) {
         const runName = run.localName || run.nodeName;
         let runStyle = pDefaults;

@@ -2,8 +2,7 @@ use super::helpers::polygon;
 use crate::ast::ShapeElement;
 use web_sys::CanvasRenderingContext2d;
 
-fn mapped_right_arrow(
-    ctx: &CanvasRenderingContext2d,
+fn mapped_arrow_points(
     x: f64,
     y: f64,
     w: f64,
@@ -11,11 +10,12 @@ fn mapped_right_arrow(
     direction: &str,
     head: f64,
     shaft: f64,
-) {
+) -> Vec<(f64, f64)> {
     let head = (w * head.clamp(0.15, 0.8)).min(w * 0.8);
-    let shaft_h = (h * shaft.clamp(0.1, 1.0)).min(h);
-    let top = (h - shaft_h) / 2.0;
-    let bottom = top + shaft_h;
+    // Points below are unit coordinates; map() scales them into the box once.
+    let shaft = shaft.clamp(0.1, 1.0);
+    let top = (1.0 - shaft) / 2.0;
+    let bottom = top + shaft;
     let points = [
         (0.0, top),
         (1.0 - head / w, top),
@@ -34,8 +34,11 @@ fn mapped_right_arrow(
         };
         (x + u * w, y + v * h)
     };
-    let mapped: Vec<_> = points.iter().map(|(u, v)| map(*u, *v)).collect();
-    polygon(ctx, &mapped);
+    points.iter().map(|(u, v)| map(*u, *v)).collect()
+}
+
+fn mapped_right_arrow(ctx: &CanvasRenderingContext2d, x: f64, y: f64, w: f64, h: f64, direction: &str, head: f64, shaft: f64) {
+    polygon(ctx, &mapped_arrow_points(x, y, w, h, direction, head, shaft));
 }
 
 fn up_arrow(ctx: &CanvasRenderingContext2d, shp: &ShapeElement, x: f64, y: f64, w: f64, h: f64) {
@@ -140,5 +143,23 @@ pub fn contains(shp: &ShapeElement, _px: f32, _py: f32, _w: f32, _h: f32) -> Opt
         Some(true)
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::mapped_arrow_points;
+
+    #[test]
+    fn mapped_arrows_stay_in_their_box_at_any_size_and_direction() {
+        for (w, h) in [(5.0, 2.0), (283.46, 113.39), (74.0, 40.0), (40.0, 250.0)] {
+            for direction in ["right", "left", "down", "up"] {
+                let points = mapped_arrow_points(100.0, 200.0, w, h, direction, 0.5, 0.5);
+                assert!(points.iter().all(|(x, y)| *x >= 100.0 && *x <= 100.0 + w && *y >= 200.0 && *y <= 200.0 + h));
+            }
+        }
+        let points = mapped_arrow_points(0.0, 0.0, 200.0, 100.0, "right", 0.5, 0.5);
+        assert_eq!(points[0], (0.0, 25.0));
+        assert_eq!(points[6], (0.0, 75.0));
     }
 }

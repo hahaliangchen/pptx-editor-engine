@@ -787,7 +787,7 @@ export const SPEC_GUIDE = [
   '格式：{"slides":[{"page":"cover","title":"…"}, …], "replace":{"模板里的示例文字":"换成的文字"}}',
   "每页 page 取 cover（封面）、toc（目录）、section（章节页）、content（内容页）、end（结尾）之一；其余字段见下面的模板说明里每种页面的 fields。",
   'toc 页写 items: ["章节名" 或 {"title":"…","desc":"一句话说明"}]；不要写编号。条数按实际章节数定，1 条到模板的 maxEntries 条都可以，不要凑满。',
-  "content 页写 title 和 blocks（1 到 3 块，一页放不下就拆成两页）。块有五种：",
+  "content 页先按模板的 fields 填写；正文文本框直接填写对应字段，重复结构填写对应数组。只有模板标出正文区域（area）时才写 blocks（1 到 3 块，一页放不下就拆成两页）。块有五种：",
   '  {"type":"text","text":"一段话"}',
   '  {"type":"bullets","items":["要点","要点"]}（每条一句话，3 到 5 条）',
   '  {"type":"cards","items":[{"value":"1290万","title":"年销量","text":"同比增长 35%"}]}（2 到 4 张；value 是突出的数字）',

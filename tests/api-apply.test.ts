@@ -240,7 +240,7 @@ describe("batches", () => {
       { op: "addShape", slide: 1, shape: "rect", rect: { x: 1, y: 1, w: 2, h: 2 } },
       { op: "setFill", target: { slide: 1, name: "背景条" }, color: "#E60012" }
     ]);
-    expect(result).toMatchObject({ ok: false, failedAt: 2, error: { code: "SHAPE_NOT_FOUND", path: "commands[2].target.name" } });
+    expect(result).toMatchObject({ ok: false, rolledBack: true, appliedCommands: 0, results: [], failedAt: 2, error: { code: "SHAPE_NOT_FOUND", path: "commands[2].target.name" } });
     expect(result.error!.candidates!.map(c => c.name)).toContain("卡片");
     expect((await shape("卡片")).text).toBe("增长 30%");
     expect(h.steps()).toEqual([]);

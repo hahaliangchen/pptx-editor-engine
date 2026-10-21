@@ -20,9 +20,11 @@
     "headless": "vite-node tools/headless-cli.ts --",
     "agent": "vite-node tools/agent-demo.ts --",
     "render-server": "vite-node tools/render-server.ts --",
-    "page-tools": "vite-node tools/export-page-tools.ts --"
+    "page-tools": "vite-node tools/export-page-tools.ts --",
+    "design": "vite-node tools/design-layer.ts --"
   },
   "dependencies": {
+    "@noble/hashes": "1.8.0",
     "ajv": "^8.20.0",
     "jszip": "^3.10.1"
   },
@@ -37,7 +39,8 @@
     "vitest": "^2.1.9"
   },
   "optionalDependencies": {
+    "@napi-rs/canvas": "^1.0.11",
     "jsdom": "^25.0.1",
-    "@napi-rs/canvas": "^1.0.11"
+    "playwright": "^1.62.1"
   }
 }

@@ -39,13 +39,12 @@ async function plainDeck(): Promise<HeadlessSession> {
 }
 
 describe("checkTemplate", () => {
-  it("reports every missing role of a plain deck and offers no role to its pages", async () => {
+  it("accepts unclassified pages without role or fixed-slot requirements", async () => {
     const issues = checkTemplate(await (await plainDeck()).outline());
-    expect(issues.filter(i => i.kind === "missing_role").map(i => i.message)).toHaveLength(4);
-    expect(issues.filter(i => i.kind === "unassigned").map(i => i.slide)).toEqual([1, 2]);
+    expect(issues).toEqual([]);
   });
 
-  it("finds a keyword in a painted shape, two fields in one box, a bad spelling, and an unnumbered contents page", async () => {
+  it("allows arbitrary text layouts and only advises on unusual legacy token spelling", async () => {
     const session = await open("tools/templates/blank.pptx");
     await run(session, [
       { op: "addSlide", after: 1 },
@@ -56,8 +55,10 @@ describe("checkTemplate", () => {
       text(2, 1, 1, 8, 1, "{{TOC_ITEM_2_TITLE}}", 14),
       text(2, 1, 3, 8, 1, "{{TOC_ITEM_3_TITLE}}", 14)
     ]);
-    const kinds = checkTemplate(await session.outline()).map(i => i.kind);
-    for (const kind of ["token_in_shape", "multiple_fields", "bad_token", "renamed_token", "toc_numbering", "toc_header"]) {
+    const issues = checkTemplate(await session.outline());
+    expect(issues.filter(i => i.severity === "error")).toEqual([]);
+    const kinds = issues.map(i => i.kind);
+    for (const kind of ["bad_token", "renamed_token"]) {
       expect(kinds).toContain(kind);
     }
   });
@@ -145,8 +146,8 @@ describe("making a template from a plain deck", () => {
   it("check_template is a tool", async () => {
     const session = await plainDeck();
     const result = JSON.parse(((await session.callTool("check_template", {})).content[0] as { text: string }).text);
-    expect(result.ok).toBe(false);
-    expect(result.issues.length).toBeGreaterThan(0);
+    expect(result.ok).toBe(true);
+    expect(result.issues).toEqual([]);
   });
 });
 
@@ -160,4 +161,33 @@ describe.skipIf(!existsSync(REAL))("the real deck of the design doc", () => {
     const built = JSON.parse(((await session.callTool("check_layout", {})).content[0] as { text: string }).text);
     console.log("layout issues:", JSON.stringify(built.issues.map((i: { slide: number; kind: string }) => `${i.slide}:${i.kind}`)));
   }, 240_000);
+});
+
+
+describe("HTML template source validation", () => {
+  it("accepts a blank page and rejects invalid geometry, duplicate IDs and non-widescreen canvas", async () => {
+    const source = await (await open("tools/templates/blank.pptx")).outline();
+    expect(checkTemplate(source)).toEqual([]);
+    expect(checkTemplate({...source,slides:[]})).toEqual(expect.arrayContaining([expect.objectContaining({kind:"empty_deck",severity:"error"})]));
+    expect(checkTemplate({...source,slideSize:{w:4,h:3}})).toEqual(expect.arrayContaining([expect.objectContaining({kind:"canvas",severity:"error"})]));
+    expect(checkTemplate({...source,slides:[source.slides[0],source.slides[0]]})).toEqual(expect.arrayContaining([expect.objectContaining({kind:"identity",severity:"error"})]));
+  });
+  it("includes every unclassified page and current persisted semantics in description facts", async () => {
+    const source = await (await plainDeck()).outline();
+    source.slides[1].template = {role:"品牌基础页",layoutName:"红色品牌",note:"固定页眉，其余自由设计"};
+    source.slides[1].shapes[0].template = {purpose:"fixed",note:"品牌装饰"};
+    const facts = templateDesignFacts(source);
+    expect(facts.pages).toHaveLength(2);
+    expect(facts.pages[1]).toMatchObject({role:"品牌基础页",variant:"红色品牌",when:"固定页眉，其余自由设计"});
+    expect(facts.pages[1].objects[0]).toMatchObject({purpose:"fixed",note:"品牌装饰"});
+  });
+});
+
+
+it("does not restore legacy roles after an author explicitly clears page semantics", async () => {
+  const source = await (await plainDeck()).outline();
+  source.slides[0].shapes[0].name = "@封面.标题";
+  source.slides[0].template = {};
+  expect(slideRoles(source)[0].role).toBeUndefined();
+  expect(templateDesignFacts(source).pages[0].role).toBeUndefined();
 });

@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
 import { HeadlessSession } from "../src/headless/session";
 import { checkLayout, describeIssues } from "../src/api/layout-check";
+import type { Outline, OutlineShape } from "../src/api/outline";
 
 const sessions: HeadlessSession[] = [];
 afterEach(() => { for (const session of sessions.splice(0)) session.dispose(); });
@@ -19,6 +20,86 @@ const text = (rect: { x: number; y: number; w: number; h: number }, value: strin
 const kinds = async (session: HeadlessSession) => checkLayout(await session.outline()).map(issue => issue.kind);
 
 describe("layout check", () => {
+  it("measures the real mixed-size cover by native paragraph spacing without false overflow", async () => {
+    // Saved product project 820 v4: 37.5pt two-line title followed by an 18pt
+    // subtitle, not three lines all set in the title's first-run size.
+    const session = await HeadlessSession.open(readFileSync("tests/fixtures/unicom-mixed-text-metrics.pptx"), { quiet: true });
+    sessions.push(session);
+    const outline = await session.outline({ slides: [1] });
+    const title = outline.slides[0].shapes.find(s => s.text?.startsWith("减少无效加班"))!;
+    expect(title.textBox?.wrap).toBe("none");
+    expect(title.textParagraphs?.map(p => p.runs[0].fontSizePt)).toEqual([37.5, 18]);
+    expect(title.textParagraphs?.map(p => p.lineSpacing)).toEqual([{ unit: "points", value: 51 }, { unit: "points", value: 28.5 }]);
+    expect(title.textParagraphs?.[1].spaceBeforePt).toBe(15);
+    const original = structuredClone(outline);
+    expect(checkLayout(outline).filter(i => i.kind === "text_overflow" && i.ids.includes(title.id))).toEqual([]);
+    expect(outline).toEqual(original);
+    // The same native content must still report actual height and no-wrap width
+    // violations, rather than suppressing diagnostics for mixed-size text.
+    title.rect.h = 2;
+    expect(checkLayout(outline).some(i => i.kind === "text_overflow" && i.ids.includes(title.id))).toBe(true);
+    title.rect.h = original.slides[0].shapes.find(s => s.id === title.id)!.rect.h;
+    title.rect.w = 4;
+    expect(checkLayout(outline).some(i => i.kind === "text_overflow" && i.ids.includes(title.id))).toBe(true);
+  });
+
+  it("uses each run's width and preserves explicit breaks, no-wrap and paragraph gaps", () => {
+    const shape: OutlineShape = {
+      id: "mixed", name: "Mixed sizes", type: "text", rotation: 0,
+      rect: { x: 2, y: 3, w: 8, h: 2 }, text: "大后面是较小字号的说明文字", style: { fontSizePt: 28 },
+      textBox: { margins: { left: 0, right: 0, top: 0, bottom: 0 }, autoFit: "none", wrap: "none" },
+      textParagraphs: [{ runs: [{ text: "大", fontSizePt: 28, letterSpacingPt: 0 }, { text: "后面是较小字号的说明文字", fontSizePt: 10, letterSpacingPt: 0 }], spaceBeforePt: 0, spaceAfterPt: 0, marginLeftPt: 0, indentPt: 0 }]
+    };
+    const outline: Outline = { slideSize: { w: 33.87, h: 19.05 }, layouts: [], slides: [{ index: 1, id: "1", shapes: [shape] }] };
+    expect(checkLayout(outline).filter(i => i.kind === "text_overflow")).toEqual([]);
+    shape.textParagraphs![0].spaceBeforePt = 50;
+    expect(checkLayout(outline).some(i => i.kind === "text_overflow")).toBe(true);
+    shape.textParagraphs![0].spaceBeforePt = 0;
+    shape.textParagraphs![0].runs[1].text = "\u2028第二行\n第三行";
+    expect(checkLayout(outline).some(i => i.kind === "text_overflow")).toBe(true);
+  });
+
+  it("reports a light caption partly escaping its dark panel onto the white page", async () => {
+    const session=await deckWith([
+      {op:"addShape",slide:1,shape:"roundRect",rect:{x:3.5,y:12,w:19.3,h:1.6},fill:"#1A1A2E",line:null},
+      {...text({x:4,y:12.45,w:20,h:1.5},"判定原则：没有数据先补记录；试点未改善，就回到机制假设而非扩大动作。",16),style:{fontSizePt:16,bold:true,color:"#FFFFFF"}}
+    ]);
+    const before=await session.outline();
+    expect(checkLayout(before).some(i=>i.kind==="low_contrast"&&i.message.includes("面板外"))).toBe(true);
+    expect(await session.outline()).toEqual(before);
+    const caption=before.slides[0].shapes.find(s=>s.text?.startsWith("判定原则"))!;
+    await session.apply([{op:"setText",target:{slide:1,id:caption.id},text:"先记录，再试点，最后复盘。"}]);
+    expect(await kinds(session)).not.toContain("low_contrast");
+  });
+  it("reports wrapped height even when the widest original line only slightly exceeds the box", async () => {
+    const session = await deckWith([text({x: 7.6, y: 5.1, w: 5.6, h: 2.2}, "02｜排期与资源挤压\n并行项目争用关键人", 17)]);
+    expect(await kinds(session)).toContain("text_overflow");
+  });
+  it("detects dark-on-dark text against a painted background and later opaque covering panels without moving anything", async () => {
+    const session = await deckWith([
+      {op: "addShape", slide: 1, shape: "rect", rect: {x: 0, y: 0, w: 33.87, h: 19.05}, fill: "#1A1A2E", line: null},
+      {...text({x: 3, y: 5, w: 12, h: 2}, "深色背景上的深色正文", 18), style: {fontSizePt: 18, color: "#1A1A2E"}},
+      {...text({x: 18, y: 5, w: 12, h: 2}, "白字被后绘制面板遮盖", 18), style: {fontSizePt: 18, color: "#FFFFFF"}},
+      {op: "addShape", slide: 1, shape: "rect", rect: {x: 17, y: 4, w: 14, h: 4}, fill: "#FFFFFF", line: null},
+    ]);
+    const before = await session.outline();
+    const issues = checkLayout(before);
+    expect(issues.some(issue => issue.kind === "low_contrast" && issue.message.includes("#1a1a2e"))).toBe(true);
+    expect(issues.some(issue => issue.kind === "occluded_text")).toBe(true);
+    expect(await session.outline()).toEqual(before);
+  });
+  it("flags a tall one-sided list and font-dependent icons without changing their layout", async () => {
+    const session = await deckWith([
+      text({x: 3, y: 4, w: 12, h: 1}, "需求与排期", 20),
+      text({x: 3, y: 8, w: 12, h: 1}, "协同与返工", 20),
+      text({x: 3, y: 12, w: 12, h: 1}, "管理改进", 20),
+      text({x: 3, y: 14, w: 1, h: 1}, "💡", 20),
+    ]);
+    const before = await session.outline();
+    expect(checkLayout(before).some(issue => issue.kind === "unbalanced" && issue.message.includes("一侧"))).toBe(true);
+    expect(checkLayout(before).some(issue => issue.kind === "font_icon")).toBe(true);
+    expect(await session.outline()).toEqual(before);
+  });
   it("finds nothing wrong in a tidy page", async () => {
     const session = await deckWith([
       text({ x: 2, y: 2, w: 12, h: 2 }, "标题", 28),
@@ -103,7 +184,9 @@ describe("layout check", () => {
     const all = JSON.parse(((await session.callTool("check_layout", {})).content[0] as { text: string }).text);
     expect(all.issues.map((issue: { kind: string }) => issue.kind)).toContain("out_of_bounds");
     const none = JSON.parse(((await session.callTool("check_layout", { slides: [2] })).content[0] as { text: string }).text);
-    expect(none.ok).toBe(true);
+    expect(none.layout_passed).toBe(true);
+    expect(none.scope).toBe("geometry_and_visibility");
+    expect(none.not_checked).toContain("content completeness");
     expect((await session.callTool("check_layout", { slides: [0] })).ok).toBe(false);
   });
 });

@@ -8,7 +8,7 @@ import type { CmRect, Outline, OutlineShape } from "./outline";
  * alone, so it costs nothing and misses nothing it can measure.
  */
 
-export type IssueKind = "text_overflow" | "out_of_bounds" | "overlap" | "empty_space" | "small_text" | "small_object" | "edge_margin" | "type_hierarchy" | "unbalanced";
+export type IssueKind = "text_overflow" | "out_of_bounds" | "overlap" | "empty_space" | "small_text" | "small_object" | "edge_margin" | "type_hierarchy" | "unbalanced" | "font_icon" | "low_contrast" | "occluded_text";
 
 export interface LayoutIssue {
   slide: number;
@@ -26,19 +26,62 @@ const flatten = (shapes: OutlineShape[]): OutlineShape[] =>
 
 const round = (value: number) => Math.round(value * 10) / 10;
 
+/** Opaque panels include painted backgrounds that differ from slide.background. */
+function opaquePanelColor(shape: OutlineShape): string | undefined {
+  if (shape.type !== "shape" || !["rect", "roundRect"].includes(shape.shape ?? "") || (shape.opacity ?? 1) < .95) return;
+  if (typeof shape.fill === "string" && /^#[0-9a-f]{6}$/i.test(shape.fill)) return shape.fill;
+  if (shape.fill && typeof shape.fill === "object" && "gradient" in shape.fill) {
+    const stops = shape.fill.gradient.stops;
+    if (!stops.length || stops.some(stop => (stop.opacity ?? 1) < .95)) return;
+    const mean = [1, 3, 5].map(at => Math.round(stops.reduce((sum, stop) => sum + parseInt(stop.color.slice(at, at + 2), 16), 0) / stops.length));
+    return "#" + mean.map(value => value.toString(16).padStart(2, "0")).join("");
+  }
+}
+
+function luminance(color: string): number {
+  const rgb = [1, 3, 5].map(at => parseInt(color.slice(at, at + 2), 16) / 255)
+    .map(value => value <= .04045 ? value / 12.92 : ((value + .055) / 1.055) ** 2.4);
+  return rgb[0] * .2126 + rgb[1] * .7152 + rgb[2] * .0722;
+}
+
 /** What a text needs: its widest line, and the height of its lines when they wrap at `width`. */
 function measure(shape: OutlineShape): { oneLine: number; wrappedHeight: number; lineHeight: number; lines: number } {
   const size = shape.style?.fontSizePt ?? 18;
-  const lines = (shape.text ?? "").split("\n");
-  const perLine = Math.max(1, ((shape.rect.w - 2 * INSET_CM) * CM_TO_PT) / size);
-  const wrapped = lines.reduce((sum, line) => sum + Math.max(1, Math.ceil(widthEm(line) / perLine)), 0);
-  const lineHeight = (size * LINE_GAP) / CM_TO_PT;
-  return {
-    oneLine: (Math.max(...lines.map(widthEm)) * size) / CM_TO_PT + 2 * INSET_CM,
-    wrappedHeight: wrapped * lineHeight,
-    lineHeight,
-    lines: wrapped
-  };
+  const margin = shape.textBox?.margins;
+  const horizontalMargin = margin ? margin.left + margin.right : 2 * INSET_CM;
+  const verticalMargin = margin ? margin.top + margin.bottom : 0;
+  const availablePt = Math.max(1, (shape.rect.w - horizontalMargin) * CM_TO_PT);
+  const wrap = shape.textBox?.wrap !== "none";
+  const paragraphs = shape.textParagraphs?.length ? shape.textParagraphs : [{
+    runs: [{ text: shape.text ?? "", fontSizePt: size, letterSpacingPt: 0 }],
+    spaceBeforePt: 0, spaceAfterPt: 0, marginLeftPt: 0, indentPt: 0,
+    lineSpacing: undefined
+  }];
+  let widest = 0, height = 0, lineHeight = 0, lines = 0;
+  for (const paragraph of paragraphs) {
+    const fontSize = Math.max(1, ...paragraph.runs.map(run => run.fontSizePt));
+    const spacing = paragraph.lineSpacing;
+    const advance = spacing ? Math.max(fontSize, spacing.unit === "points" ? spacing.value : fontSize * spacing.value) : fontSize * LINE_GAP;
+    const left = Math.max(0, paragraph.marginLeftPt), indent = paragraph.indentPt;
+    let explicitWidth = 0, currentWidth = 0, count = 1, firstLine = true;
+    const widthLimit = () => Math.max(1, availablePt - left - (firstLine ? indent : 0));
+    const endExplicitLine = () => {
+      widest = Math.max(widest, explicitWidth + left + (firstLine ? Math.max(0, indent) : 0));
+      explicitWidth = 0; currentWidth = 0; count++; firstLine = false;
+    };
+    for (const run of paragraph.runs) for (const char of run.text.replace(/\r\n/g, "\n")) {
+      if (char === "\n" || char === "\u2028" || char === "\u2029") { endExplicitLine(); continue; }
+      const width = Math.max(0, widthEm(char) * run.fontSizePt + run.letterSpacingPt);
+      explicitWidth += width;
+      if (wrap && currentWidth > 0 && currentWidth + width > widthLimit()) { count++; currentWidth = 0; firstLine = false; }
+      currentWidth += width;
+    }
+    widest = Math.max(widest, explicitWidth + left + (firstLine ? Math.max(0, indent) : 0));
+    lines += count;
+    height += paragraph.spaceBeforePt + count * advance + paragraph.spaceAfterPt;
+    lineHeight = Math.max(lineHeight, advance / CM_TO_PT);
+  }
+  return { oneLine: widest / CM_TO_PT + horizontalMargin, wrappedHeight: height / CM_TO_PT + verticalMargin, lineHeight, lines };
 }
 
 const overlapArea = (a: CmRect, b: CmRect) => {
@@ -76,6 +119,9 @@ export function checkLayout(outline: Outline, options: { slides?: number[] } = {
     const label = (shape: OutlineShape) => `${shape.name}（id ${shape.id}${shape.text ? `，“${shape.text.slice(0, 12)}${shape.text.length > 12 ? "…" : ""}”` : ""}）`;
 
     for (const shape of content) {
+      if (shape.text && /^[\p{Extended_Pictographic}\uFE0F\u200D\s]+$/u.test(shape.text.trim())) {
+        add("font_icon", [shape.id], `${label(shape)} 使用字体字符充当图标，可能显示缺字方框；检查实际渲染，图标应改用 SVG/图片资产，不要替换为单字`);
+      }
       const { x, y, w, h } = shape.rect;
       // Decoration may run off the page on purpose; content may not.
       if (x < -TOLERANCE || y < -TOLERANCE || x + w > pageW + TOLERANCE || y + h > pageH + TOLERANCE) {
@@ -91,9 +137,36 @@ export function checkLayout(outline: Outline, options: { slides?: number[] } = {
       }
       if (shape.text) {
         const need = measure(shape);
-        // A text that fits on one line is fine, whatever the box's height; otherwise it wraps (or is cut) and must fit by height.
-        if (need.oneLine > shape.rect.w * 1.1 + 0.3 && need.wrappedHeight > shape.rect.h * 1.1 + 0.15) {
-          add("text_overflow", [shape.id], `${label(shape)} 的文字放不下（一行需要约 ${round(need.oneLine)} 厘米宽，折行后需要约 ${round(need.wrappedHeight)} 厘米高；框是 ${round(shape.rect.w)}×${round(shape.rect.h)}）；缩小字号、加宽加高文本框或删减文字`);
+        // Respect native no-wrap: a long explicit line is horizontal overflow,
+        // not fictitious extra rows. Rich text keeps each paragraph's own sizes.
+        if (need.wrappedHeight > shape.rect.h * 1.1 + 0.15 || (shape.textBox?.wrap === "none" && need.oneLine > shape.rect.w * 1.1 + 0.15)) {
+          add("text_overflow", [shape.id], `${label(shape)} 的文字放不下（最长显式行需要约 ${round(need.oneLine)} 厘米宽，按原生字号、段间距与${shape.textBox?.wrap === "none" ? "不自动折行" : "折行"}设置估算需要约 ${round(need.wrappedHeight)} 厘米高；框是 ${round(shape.rect.w)}×${round(shape.rect.h)}）；缩小字号、加宽加高文本框或删减文字`);
+        }
+        const ink = inkOf(shape);
+        const covers = (panel: OutlineShape) => overlapArea(panel.rect, ink) >= Math.max(.001, ink.w * ink.h) * .85;
+        const index = shapes.indexOf(shape);
+        const after = shapes.slice(index + 1).find(panel => panel.id !== shape.id && opaquePanelColor(panel) && covers(panel));
+        if (after) add("occluded_text", [shape.id, after.id], `${label(shape)} 的大部分文字区域被后绘制的不透明面板 ${label(after)} 覆盖；检查实际渲染和图层顺序`);
+        const panel = opaquePanelColor(shape) ? shape : shapes.slice(0, index).reverse().find(candidate => opaquePanelColor(candidate) && covers(candidate));
+        const background = panel ? opaquePanelColor(panel) : typeof slide.background === "string" ? slide.background : undefined;
+        const foreground = shape.style?.color;
+        if (background && foreground && /^#[0-9a-f]{6}$/i.test(foreground) && (shape.style?.opacity ?? 1) >= .95) {
+          const a = luminance(background), b = luminance(foreground);
+          const ratio = (Math.max(a, b) + .05) / (Math.min(a, b) + .05);
+          if (ratio < 3) add("low_contrast", [...new Set([shape.id, ...(panel ? [panel.id] : [])])], `${label(shape)} 的文字色 ${foreground} 与实际底色 ${background} 对比度只有 ${round(ratio)}；可能看起来缺字或被遮住。检查深浅主题和面板填充，不要只看页面 background 属性`);
+          // Most of a white caption can fit its dark panel while its last words
+          // or wrapped line escape onto the white page. Whole-box contrast alone
+          // incorrectly accepts that partially invisible caption.
+          if (panel && ratio >= 3 && overlapArea(panel.rect, ink) < ink.w * ink.h * .98) {
+            const beneath = shapes.slice(0, shapes.indexOf(panel)).reverse().find(candidate => opaquePanelColor(candidate) && covers(candidate));
+            const outside = beneath ? opaquePanelColor(beneath) : typeof slide.background === "string" ? slide.background : !slide.background ? "#ffffff" : undefined;
+            if (outside) {
+              const c = luminance(outside);
+              if ((Math.max(c, b) + .05) / (Math.min(c, b) + .05) < 3) {
+                add("low_contrast", [shape.id, panel.id], `${label(shape)} 的部分文字区域伸出面板 ${label(panel)}，文字色 ${foreground} 在面板外的底色 ${outside} 上对比不足；尾字或换行可能消失。检查实际渲染，主动调整文案、文本框或面板范围`);
+              }
+            }
+          }
         }
       }
     }
@@ -135,6 +208,21 @@ export function checkLayout(outline: Outline, options: { slides?: number[] } = {
 
     // A page with a chart, a table or several blocks that stops short of the page's lower part.
     const body = content.filter(shape => shape.rect.y > pageH * 0.14 && shape.rect.y + shape.rect.h < pageH * 0.93);
+    // A tall list on one side can leave half a page empty even when its last
+    // item reaches the footer. Panels alone are not evidence of real content.
+    const visuals = shapes.filter(shape => shape.type === "image" && shape.rect.w * shape.rect.h < pageW * pageH * 0.8
+      && shape.rect.y > pageH * 0.14 && shape.rect.y + shape.rect.h < pageH * 0.95);
+    if (body.length >= 3) {
+      const bounds = [...body.map(inkOf), ...visuals.map(shape => shape.rect)];
+      const left = Math.min(...bounds.map(rect => rect.x));
+      const right = Math.max(...bounds.map(rect => rect.x + rect.w));
+      const top = Math.min(...bounds.map(rect => rect.y));
+      const bottom = Math.max(...bounds.map(rect => rect.y + rect.h));
+      if (bottom - top > pageH * 0.3 && right - left < pageW * 0.55
+        && ((left < pageW * 0.2 && right < pageW * 0.6) || (right > pageW * 0.8 && left > pageW * 0.4))) {
+        add("unbalanced", [], "正文集中在一侧，另一侧有大片空白；结合页面意图检查视觉平衡，可补充相关图解或重新编排，不能仅凭无重叠认定完成");
+      }
+    }
     const rich = body.length >= 3 || body.some(shape => shape.type === "chart" || shape.type === "table");
     // Cards and panels hold their text: the room a page uses reaches their edges, not only the text inside.
     const panels = shapes.filter(shape => shape.type === "shape" && shape.rect.w > 1 && shape.rect.h > 1 && shape.rect.y > pageH * 0.14

@@ -1,3 +1,4 @@
+import { annotatedPurpose, readTemplateRecord, type TemplateNodeSemantics, type TemplatePageSemantics } from "../design/template-policy";
 import { ImageElement, LineStyle, PptVirtualDocument, ShadowStyle, ShapeElement, Slide, TextElement } from "../pptx-virtual-dom";
 import { ChartElement, ChartKind, LegendPosition } from "../charts/model";
 import { splitColor } from "../color";
@@ -30,7 +31,19 @@ export interface OutlineShadow {
   angle: number;
 }
 
+/** Native paragraph/run metrics for read-only layout diagnostics (all lengths in points). */
+export interface OutlineTextParagraph {
+  runs: Array<{ text: string; fontSizePt: number; letterSpacingPt: number }>;
+  lineSpacing?: { unit: "percent" | "points"; value: number };
+  spaceBeforePt: number;
+  spaceAfterPt: number;
+  marginLeftPt: number;
+  indentPt: number;
+}
+
 export interface OutlineShape {
+  /** Persisted semantic policy; a manually changed annotation name takes precedence. */
+  template?: TemplateNodeSemantics;
   id: string;
   name: string;
   type: SceneNode["kind"];
@@ -41,6 +54,9 @@ export interface OutlineShape {
   rotation: number;
   text?: string;
   textTruncated?: boolean;
+  /** Same bounded text as `text`, retaining native breaks, run sizes and paragraph spacing. */
+  textParagraphs?: OutlineTextParagraph[];
+  textBox?: { margins: {left: number; right: number; top: number; bottom: number}; wrap?: string; autoFit: string; verticalOverflow?: string; horizontalOverflow?: string };
   style?: { fontSizePt?: number; bold?: boolean; italic?: boolean; color?: string; opacity?: number; align?: string; /** Where the text sits in its box when it is not the top. */ anchor?: "middle" | "bottom" };
   /** A colour, null for none, a gradient, or a pattern or picture the commands cannot describe. */
   fill?: string | null | OutlineGradient | { other: "pattern" | "picture" };
@@ -71,12 +87,38 @@ export interface OutlineShape {
 }
 
 export interface OutlineSlide {
+  /** Optional authoring semantics persisted in the PPTX extension record. */
+  template?: TemplatePageSemantics;
   index: number;
   id: string;
   layout?: string;
   /** The page's background (its own, or the layout's or master's): a colour, or a gradient. */
   background?: string | OutlineGradient;
+  /** The visible full-page paint can be a shape over a different page background. */
+  appearance?: { background?: string | OutlineGradient; source: "slide" | "shape"; shapeId?: string; tone: "light" | "dark" | "mixed" | "unknown" };
   shapes: OutlineShape[];
+}
+
+export function slideAppearance(slide: OutlineSlide, size: { w: number; h: number }): NonNullable<OutlineSlide["appearance"]> {
+  const leaves = (nodes: OutlineShape[]): OutlineShape[] => nodes.flatMap(node => node.children ? leaves(node.children) : [node]);
+  let background = slide.background;
+  let shapeId: string | undefined;
+  for (const shape of leaves(slide.shapes)) {
+    if (shape.text?.trim()) break;
+    const r = shape.rect;
+    if (shape.type !== "shape" || !["rect", "roundRect"].includes(shape.shape ?? "") || (shape.opacity ?? 1) < .95
+      || r.x > .05 || r.y > .05 || r.x + r.w < size.w - .05 || r.y + r.h < size.h - .05) continue;
+    const fill = shape.fill;
+    if (typeof fill === "string" && /^#[a-f0-9]{6}$/i.test(fill)) { background = fill; shapeId = shape.id; }
+    else if (fill && typeof fill === "object" && "gradient" in fill && fill.gradient.stops.every(stop => (stop.opacity ?? 1) >= .95)) { background = fill; shapeId = shape.id; }
+  }
+  const colors = typeof background === "string" ? [background] : background?.gradient.stops.map(stop => stop.color) ?? [];
+  const dark = colors.filter(color => /^#[a-f0-9]{6}$/i.test(color)).map(color => {
+    const [r,g,b] = [1,3,5].map(index => parseInt(color.slice(index,index+2),16));
+    return .299*r+.587*g+.114*b < 110;
+  });
+  const tone = !dark.length ? "unknown" : dark.every(Boolean) ? "dark" : dark.every(value => !value) ? "light" : "mixed";
+  return { background, source: shapeId ? "shape" : "slide", ...(shapeId ? { shapeId } : {}), tone };
 }
 
 export interface Outline {
@@ -233,6 +275,35 @@ function describeNode(node: SceneNode, emuPerPx: number, maxText: number): Outli
     if (text.length > maxText) out.textTruncated = true;
     const element = node.elements.find((candidate): candidate is TextElement => candidate.type === "text" && candidate.content !== "");
     const run = element?.paragraphs?.flatMap(paragraph => paragraph.runs).find(candidate => candidate.content !== "");
+    if (element?.body) {
+      const body = element.body, cm = (px: number) => round(px * emuPerPx / 360000, 3);
+      out.textBox = { margins: {left: cm(body.marginLeft), right: cm(body.marginRight), top: cm(body.marginTop), bottom: cm(body.marginBottom)}, wrap: body.wrap, autoFit: body.autoFit, verticalOverflow: body.verticalOverflow, horizontalOverflow: body.horizontalOverflow };
+    }
+    if (element?.paragraphs) {
+      const pt = (px: number) => round(px * emuPerPx / 12700, 4);
+      let remaining = maxText;
+      out.textParagraphs = [];
+      for (const paragraph of element.paragraphs) {
+        if (remaining <= 0) break;
+        const runs: OutlineTextParagraph["runs"] = [];
+        for (const source of paragraph.runs) {
+          if (remaining <= 0) break;
+          const text = source.content.slice(0, remaining);
+          remaining -= text.length;
+          runs.push({ text, fontSizePt: pt(source.style.fontSize), letterSpacingPt: pt(source.style.letterSpacing ?? 0) });
+        }
+        const spacing = paragraph.style.lineSpacing;
+        out.textParagraphs.push({
+          runs,
+          ...(spacing ? { lineSpacing: { unit: spacing.unit, value: spacing.unit === "points" ? pt(spacing.value) : spacing.value } } : {}),
+          spaceBeforePt: pt(paragraph.style.spaceBefore ?? 0),
+          spaceAfterPt: pt(paragraph.style.spaceAfter ?? 0),
+          marginLeftPt: pt(paragraph.style.marginLeft),
+          indentPt: pt(paragraph.style.indent)
+        });
+        remaining--; // The paragraph separator included in out.text.
+      }
+    }
     if (run) {
       out.style = {
         // Sizes are whole pixels internally; PowerPoint sizes come in half points.
@@ -265,13 +336,29 @@ export function buildOutline(doc: PptVirtualDocument, options: OutlineOptions = 
       .filter(scene => !wanted || wanted.has(scene.index))
       .map(scene => {
         const emuPerPx = emuPerPxOf(scene.slide, doc.size.width);
-        return {
+        const page: OutlineSlide = {
           index: scene.index,
           id: scene.slide.id,
           ...(scene.slide.layout ? { layout: scene.slide.layout } : {}),
           ...describeBackground(scene.slide),
           shapes: scene.roots.map(node => describeNode(node, emuPerPx, maxText))
         };
+        if (scene.slide.rawXml) {
+          const record = readTemplateRecord(new DOMParser().parseFromString(scene.slide.rawXml, "application/xml"));
+          if (record?.page) page.template = { ...record.page };
+          const assign = (nodes: OutlineShape[]) => {
+            for (const node of nodes) {
+              const saved = record?.nodes[node.id];
+              const named = annotatedPurpose(node.name);
+              if (saved && (saved.name === undefined || saved.name === node.name)) node.template = { ...saved };
+              else if (named) node.template = { purpose: named, name: node.name };
+              if (node.children) assign(node.children);
+            }
+          };
+          assign(page.shapes);
+        }
+        page.appearance = slideAppearance(page, {w: (doc.size.width * emuPerPx) / 360000, h: (doc.size.height * emuPerPx) / 360000});
+        return page;
       })
   };
 }

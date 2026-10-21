@@ -1,3 +1,4 @@
+import type { TemplateNodeSemantics } from "../design/template-policy";
 import { ChartAdd, ChartElement, ChartModel, cloneChart } from "../charts/model";
 import { CHART_REL_TYPE, graphicFrameXml } from "../charts/write";
 import { TableElement, TableModel } from "../tables/model";
@@ -58,7 +59,7 @@ export interface EditorHost {
   /** Live record of shapes added, reordered or given new relationships. */
   structure(): StructureEdits;
   /** The XML a shape has right now (edits applied), for copying. */
-  materialize(source: ElementSource): Promise<{ xml: string; relationships: RelAdd[] } | null>;
+  materialize(source: ElementSource): Promise<{ xml: string; relationships: RelAdd[]; templatePolicies?: Record<string, TemplateNodeSemantics> } | null>;
   allocateShapeId(part: string): string;
   /** Font the deck uses for body text, so new text looks like the rest. */
   deckFont(): { fontFamily?: string; eastAsianFontFamily?: string };
@@ -406,6 +407,7 @@ class PasteCommand implements Command {
 }
 
 interface ClipboardEntry {
+  templatePolicies?: Record<string, TemplateNodeSemantics>;
   object: { source: ElementSource; isGroup: boolean; depth: number };
   xml: string;
   relationships: RelAdd[];
@@ -663,6 +665,9 @@ export class SlideEditor {
     document.addEventListener("selectionchange", this.onDocumentSelectionChange);
     this.history.subscribe(() => this.emit());
   }
+
+  /** In-progress typing/dragging has not entered history yet. Do not replace its document. */
+  public hasActiveInteraction(): boolean { return !!this.textSession || !!this.drag || this.history.inBatch; }
 
   private onDocumentKeyDown = (e: KeyboardEvent) => this.onKeyDown(e);
 
@@ -1001,6 +1006,7 @@ export class SlideEditor {
         object: { source: object.source, isGroup: object.isGroup, depth: object.depth },
         xml: snapshot.xml,
         relationships: snapshot.relationships,
+        templatePolicies: snapshot.templatePolicies,
         elements: JSON.parse(JSON.stringify(object.elements))
       });
     }
@@ -1123,7 +1129,7 @@ export class SlideEditor {
       const top = entry.object.isGroup
         ? { part, shapeId: topId, xform: elements[0].source!.groups![0].xform }
         : elements[0].source!;
-      pasted.push({ elements, inserted: { id: topId, xml: remapped.xml }, adds, owner: top, ...(chart ? { chart } : {}) });
+      pasted.push({ elements, inserted: { id: topId, xml: remapped.xml, ...(entry.templatePolicies ? { templatePolicies: Object.fromEntries(Object.entries(entry.templatePolicies).filter(([id])=>remapped.idMap.has(id)).map(([id,value])=>[remapped.idMap.get(id)!,value])) } : {}) }, adds, owner: top, ...(chart ? { chart } : {}) });
     }
     if (pasted.length === 0) return;
 
