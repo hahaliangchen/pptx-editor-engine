@@ -9,6 +9,12 @@ import {
   PresentationSize
 } from "./pptx-parser";
 import * as wasm from "../rust-engine/pkg/ppt_engine";
+// Rspack 0.5 does not see that the async-WASM module imports these generated
+// functions dynamically, so it otherwise tree-shakes them from the namespace.
+// Enumerating the namespace keeps the wasm-bindgen imports callable at runtime.
+// @ts-ignore generated wasm-bindgen glue does not include a standalone .d.ts
+import * as wasmBindgenImports from "../rust-engine/pkg/ppt_engine_bg.js";
+void Object.keys(wasmBindgenImports);
 import { EditorState, SlideEditor } from "./editor/slide-editor";
 import { EditApi } from "./api/engine";
 import { DocumentSession } from "./document-session";
