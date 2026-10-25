@@ -80,7 +80,7 @@ export class PageToolLink {
       result = await this.options.run(call.name, call.arguments);
       if (result.ok && this.options.mutating.has(call.name) && this.options.persist) {
         const revision = await this.options.persist();
-        result = { ...result, content: [...result.content, { type: "text", text: JSON.stringify({ saved: true, revision }) }] };
+        result = { ...result, content: [...result.content, { type: "text", text: JSON.stringify({ saved: true, stored_revision: revision }) }] };
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

@@ -91,7 +91,7 @@ export class DesignBridge {
     const work = (async () => {
       const pptxBase64 = await blobBase64(await this.viewer.snapshotPptx());
       const design = await this.convert({ operation: "sync", pptxBase64, design: this.design });
-      if (epoch !== this.epoch || this.disposed) throw new Error("STALE_DESIGN: 文稿在读取期间发生变化，请重新读取");
+      if (this.disposed) throw new Error("PAGE_CLOSED: design bridge disposed");
       // Even an undo back to identical pixels invalidates a previously-issued HTML edit.
       design.revision = Math.max(design.revision, (this.design?.revision ?? -1) + 1);
       this.project(design);
@@ -139,7 +139,7 @@ export class DesignBridge {
           ...(name === "suggest_annotations" ? {advisory:"用途为当前规则，非修改授权。根据页面 HTML 和 render_slide 提出具体用途变化，制作人确认后才可 apply_html。"} : {}),
           pages:design.pages.map((page,index)=>({page:index+1,id:page.id,semantics:page.semantics ?? {},semanticsDefined:page.semantics!==undefined,
             objects:page.nodes.map(node=>({id:node.id,shapeId:node.origin?.shapeId ?? node.metadata?.sourceShapeId,name:node.name,kind:node.kind,parentId:node.parentId,purpose:effectivePurpose(page,node),locked:effectiveLock(page,node),note:node.note,rect:node.appearance.rect,text:nodeText(node),binding:node.binding,...(node.appearance.src?{asset:`design-asset:${encodeURIComponent(node.id)}`}:{})}))})).filter(page=>a.slide===undefined||page.page===a.slide),
-          diagnostics:design.diagnostics,designGuide:"先 get_design(page) 阅读 HTML；复用或重设计都通过 apply_html。页面角色可选，固定品牌不可修改或遮挡。参考页可用 duplicateSlide 复制。"});
+          diagnostics:design.diagnostics,designGuide:"读取当前 PPT 的 HTML，有效结果直接复用。根据内容和设计意图自由选择 HTML/CSS 构图、样式和布局；浏览器测量排版结果后写入可编辑 PPT。保留固定品牌素材。溢出和遮挡只作本地提示，不拦截保存或导出；视觉检查仅按用户明确要求执行。参考页可用 duplicateSlide 复制。"});
       }
       if (name === "get_design") {
         const design = await this.current();
@@ -153,21 +153,20 @@ export class DesignBridge {
         if (!Number.isInteger(a.page) || !page) throw new Error("Invalid page number");
         return this.result({ ...identity, page: a.page, pageId: page.id, semantics: page.semantics ?? {}, semanticsDefined:page.semantics!==undefined, nodes: page.nodes.map(n => ({id:n.id, shapeId:n.origin?.shapeId ?? n.metadata?.sourceShapeId, name:n.name, purpose:effectivePurpose(page,n), note:n.note, locked:effectiveLock(page,n)})), assets: page.nodes.filter(n => n.appearance.src).map(n => ({ id: n.id, name: n.name, src: `design-asset:${encodeURIComponent(n.id)}`, locked: effectiveLock(page,n), purpose: effectivePurpose(page,n), note:n.note })), html: this.html.get(page.id) });
       }
-      if (!this.design || this.captured !== this.epoch) throw new Error("STALE_DESIGN: 请先 get_design 读取编辑器的最新页面");
-      const epoch = this.epoch, before = this.design;
-      if (a.expected_revision !== before.revision) throw new Error(`STALE_DESIGN: request revision is no longer current. ${JSON.stringify({reason:"requestRevision",expected:before.revision,received:a.expected_revision??null,recovery:"Call get_design, redo your changes on its latest HTML, and retry with that exact revision; do not relabel old HTML."})}`);
+      await this.current();
+      const before = await this.current();
       const request: DesignRequest = name === "apply_html"
         ? { operation: "apply", design: before, expectedRevision: before.revision, html: a.html }
         : { operation: "pages", design: before, expectedRevision: before.revision, commands: a.commands };
       if (request.html) {
         const pageId = parseDesignHtml(request.html).body.dataset.pageId;
         request.baselineHtml = pageId ? this.html.get(pageId) : undefined;
-        if (!request.baselineHtml) throw new Error("STALE_DESIGN: no current HTML baseline for this page");
+        if (!request.baselineHtml) throw new Error("Unknown design page");
         const proposal = templateSemanticProposal(before, request.baselineHtml, request.html);
         if (proposal.changes.length) {
           if (this.options.mode !== "template-authoring") throw templateSemanticPermissionError(proposal,"generation cannot change template purposes or annotation notes; restore the original values");
           if (!humanForm && !await this.options.confirmSemanticChanges?.(proposal)) throw new Error("TEMPLATE_CONFIRMATION_REQUIRED: author did not approve these annotation changes");
-          if (epoch !== this.epoch || this.disposed) throw new Error("STALE_DESIGN: document changed while annotation confirmation was open");
+          if (this.disposed) throw new Error("PAGE_CLOSED: design bridge disposed");
           request.semanticAuthorization = { ...proposal, mode:"template-authoring" };
         }
       }
@@ -182,7 +181,7 @@ export class DesignBridge {
         request.html = "<!doctype html>" + html.documentElement.outerHTML;
       }
       const next = await this.convert(request);
-      if (epoch !== this.epoch || this.disposed || this.viewer.hasActiveInteraction?.()) throw new Error("STALE_DESIGN: 转换期间用户修改了稿件，未应用 AI 结果");
+      if (this.disposed) throw new Error("PAGE_CLOSED: design bridge disposed");
       if (next.revision === before.revision && next.source.sha256 === before.source.sha256) return this.result({ revision: next.revision, applied: false, needsSave: this.dirty, changes: [] });
       const selected = this.viewer.getCurrentSlideIndex();
       this.loading = true;
@@ -197,10 +196,13 @@ export class DesignBridge {
       } finally { this.loading = false; }
       this.epoch++; this.captured = this.epoch; this.design = next; this.dirty = true;
       this.project(next);
-      return this.result({ revision: next.revision, pages: next.pages.length, pageList: next.pages.map((p,i)=>({page:i+1,id:p.id})), applied: true, needsSave: true, changes: next.changes ?? [] });
+      return this.result({ revision: next.revision, pages: next.pages.length, pageList: next.pages.map((p,i)=>({page:i+1,id:p.id})), applied: true, needsSave: true, changes: next.changes ?? [], diagnostics: next.diagnostics });
     } catch (error) {
       return { ok: false, content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }] };
     } finally { this.running = false; if (this.captured !== this.epoch) this.scheduleRefresh(); }
   }
-  private result(value: unknown): ToolResult { return { ok: true, content: [{ type: "text", text: JSON.stringify(value) }] }; }
+  private result(value: any): ToolResult {
+    const {revision,...data}=value;
+    return {ok:true,content:[{type:"text",text:JSON.stringify({...data,...(revision!==undefined?{design_revision:revision}:{})})}]};
+  }
 }

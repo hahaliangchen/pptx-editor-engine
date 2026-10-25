@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { expandForRender } from "../render-elements";
 import { PptVirtualDocument } from "../pptx-virtual-dom";
 import { OPEN_FONT_MAP } from "../page/font-map";
+import { scanLocalFonts, nativeFontDirectories, matchLocalFont, type LocalFont } from "./native-fonts";
 
 export interface FontRequest {
   family: string;
@@ -38,17 +39,24 @@ export function collectFontRequests(doc: PptVirtualDocument): FontRequest[] {
 }
 
 /**
- * Maps a requested font to a file on this machine through fontconfig, which
- * also supplies the fallback when the exact family is not installed (the same
- * role the font backend plays for the browser viewer).
+ * Maps a requested font through native OpenType discovery on Windows or when
+ * PPT_FONT_DIRS is configured, otherwise through fontconfig. Both supply the
+ * open-source stand-ins used by the browser viewer.
  */
 export class FontResolver {
   private cache = new Map<string, string>();
+  private localFonts?: LocalFont[];
 
   public resolve(request: FontRequest): string {
     const key = `${request.family.toLowerCase()}|${request.bold}|${request.italic}|${request.eastAsian}`;
     const cached = this.cache.get(key);
     if (cached) return cached;
+    if (process.platform === "win32" || process.env.PPT_FONT_DIRS) {
+      this.localFonts ??= scanLocalFonts(nativeFontDirectories());
+      const file = matchLocalFont(this.localFonts, request);
+      this.cache.set(key, file);
+      return file;
+    }
     // Same open-source stand-ins as the browser, so both draw the same glyphs.
     const family = OPEN_FONT_MAP[request.family.trim().toLowerCase()] ?? request.family;
     const pattern = [

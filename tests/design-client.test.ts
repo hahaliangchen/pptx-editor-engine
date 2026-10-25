@@ -78,8 +78,8 @@ describe("conversion on the user's browser", () => {
       const read = (r: any) => { if (!r.ok) throw new Error(JSON.stringify(r)); return JSON.parse(r.content[0].text); };
       const start = read(await bridge.run("get_design", { page: 1 }));
       const html = start.html.replace("</body>", `<div data-kind="group" style="position:absolute;left:80px;top:180px;width:900px;height:200px;display:flex;gap:24px"><div data-kind="text" style="width:438px;height:200px;padding:24px;background:#eaf2ee;display:flex;flex-direction:column;justify-content:center"><p style="font-size:28px;line-height:40px;font-family:'Noto Sans CJK SC';margin:0">浏览器本地转换<br>中文换行保持完整</p></div><div data-kind="text" style="width:438px;height:200px;padding:24px;background:#183d32;display:flex;flex-direction:column;justify-content:center"><p style="font-size:28px;line-height:40px;font-family:'Noto Sans CJK SC';color:#ffffff;margin:0">独立素材与<strong>可编辑文字</strong></p></div></div></body>`);
-      read(await bridge.run("apply_html", { expected_revision: start.revision, html }));
-      const stale = await bridge.run("apply_html", { expected_revision: start.revision, html });
+      read(await bridge.run("apply_html", { expected_design_revision: start.design_revision, html }));
+      const stale = await bridge.run("apply_html", { expected_design_revision: start.design_revision, html });
       const persisted = await w.viewer.snapshotPptx();
       const reopened = await w.converter.syncDesign(new Uint8Array(await persisted.arrayBuffer()));
       const nodes = reopened.pages[0].nodes;
@@ -95,7 +95,7 @@ describe("conversion on the user's browser", () => {
     expect(result.texts).toContain("浏览器本地转换\u2028中文换行保持完整");
     expect(result.grouped).toBe(2);
     expect(result.assets).toBeGreaterThan(0);
-    expect(result.staleRejected).toBe(true);
+    expect(result.staleRejected).toBe(false);
     expect(result.frames).toBe(0);
     expect(result.nodeAvailable).toBe("undefined");
     expect(result.pending).toBe(true);
@@ -127,11 +127,11 @@ describe("conversion on the user's browser", () => {
       const result = await w.viewer.api.apply({ commands: [{ op: "replaceText", target: { slide: 1, text: "浏览器本地转换" }, find: "浏览器本地转换", replace: "用户手动修改" }] });
       if (!result.ok) throw new Error(JSON.stringify(result));
       const invalidated = w.autoBridge.peekHtml(1) === undefined;
-      const stale = await w.autoBridge.run("apply_html", { expected_revision: before.revision, html: before.html });
-      return { invalidated, staleRejected: !stale.ok, revision: before.revision };
+      const stale = await w.autoBridge.run("apply_html", { expected_design_revision: before.design_revision, html: before.html });
+      return { invalidated, staleRejected: !stale.ok, revision: before.design_revision };
     });
     expect(initial.invalidated).toBe(true);
-    expect(initial.staleRejected).toBe(true);
+    expect(initial.staleRejected).toBe(false);
     await page.waitForFunction(() => (window as any).autoBridge.peekHtml(1)?.includes("用户手动修改"));
     const after = await page.evaluate(() => {
       const w = window as any;

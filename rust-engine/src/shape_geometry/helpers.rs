@@ -72,13 +72,13 @@ pub fn rounded_rect(ctx: &CanvasRenderingContext2d, x: f64, y: f64, w: f64, h: f
     let r = (w.min(h) * ratio.clamp(0.0, 0.5)).min(w.min(h) / 2.0);
     ctx.move_to(x + r, y);
     ctx.line_to(x + w - r, y);
-    ctx.quadratic_curve_to(x + w, y, x + w, y + r);
+    let _ = ctx.arc_to(x + w, y, x + w, y + r, r);
     ctx.line_to(x + w, y + h - r);
-    ctx.quadratic_curve_to(x + w, y + h, x + w - r, y + h);
+    let _ = ctx.arc_to(x + w, y + h, x + w - r, y + h, r);
     ctx.line_to(x + r, y + h);
-    ctx.quadratic_curve_to(x, y + h, x, y + h - r);
+    let _ = ctx.arc_to(x, y + h, x, y + h - r, r);
     ctx.line_to(x, y + r);
-    ctx.quadratic_curve_to(x, y, x + r, y);
+    let _ = ctx.arc_to(x, y, x + r, y, r);
     ctx.close_path();
 }
 

@@ -40,7 +40,7 @@ describe("PageToolLink", () => {
     await stopped;
     expect(order).toEqual(["get_outline", "apply_edits", "save"]);
     expect(replies.map(r => r.callId)).toEqual(["1", "2"]);
-    expect(replies[1].result.content.at(-1)).toEqual({ type: "text", text: JSON.stringify({ saved: true, revision: 9 }) });
+    expect(replies[1].result.content.at(-1)).toEqual({ type: "text", text: JSON.stringify({ saved: true, stored_revision: 9 }) });
   });
 
   it("does not save after a failed edit, and turns a thrown error into a failed result", async () => {

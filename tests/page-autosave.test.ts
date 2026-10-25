@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { AutoSaver, DeckStore, RevisionConflict, SaveStatus } from "../src/page/autosave";
+import { AutoSaver, DeckStore, SaveStatus } from "../src/page/autosave";
 
 class FakeDeck {
   dirty = false;
@@ -91,18 +91,14 @@ describe("AutoSaver", () => {
     expect(saver.hasPendingChanges()).toBe(false);
   });
 
-  it("stops on a conflict until the page decides", async () => {
+  it("accepts the stored sequence even when another writer advanced it", async () => {
     const deck = new FakeDeck();
-    const { value, calls } = store(async expected => { if (expected === 2) throw new RevisionConflict(7); return expected + 1; });
-    const saver = new AutoSaver(deck, value, { revision: 2, idleMs: 100 });
+    const { value, calls } = store(async () => 8);
+    const saver = new AutoSaver(deck, value, { revision: 2 });
     deck.dirty = true;
-    await expect(saver.saveNow("user")).rejects.toBeInstanceOf(RevisionConflict);
-    expect(saver.currentStatus).toBe("conflict");
-    deck.dirty = true;
-    saver.notifyEdited();
-    await vi.advanceTimersByTimeAsync(500);
+    await expect(saver.saveNow("user")).resolves.toBe(8);
+    expect(saver.currentStatus).toBe("saved");
     expect(calls).toHaveLength(1);
-    await expect(saver.resolveConflict(7, true)).resolves.toBe(8);
-    expect(calls.at(-1)).toEqual({ expected: 7, source: "user" });
+    expect(saver.hasPendingChanges()).toBe(false);
   });
 });

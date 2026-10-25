@@ -144,9 +144,26 @@ export async function exportDesignBytes(design: DesignDocument, identities?: Map
         zip.file("[Content_Types].xml", stringify(types));
       }
     };
-    const emit = async (node: DesignNode, parent: Element, parentChanged = false): Promise<void> => {
+    const emit = async (node: DesignNode, parent: Element, parentChanged = false, children?: DesignNode[]): Promise<void> => {
       if (node.metadata?.backdrop) return;
       const sourceId = node.origin?.shapeId ?? node.metadata?.sourceShapeId;
+      if (node.appearance.text?.frames) {
+        const a = node.appearance, text = a.text!;
+        // Keep the source object's identity (including animation references) on
+        // a native group; its background and independently laid-out paragraphs
+        // become editable children at the browser's actual coordinates.
+        if (sourceId) {
+          owners.get(String(sourceId))?.remove();
+          owners.set(String(sourceId), fragment(`<p:grpSp><p:nvGrpSpPr><p:cNvPr id="${sourceId}" name="${x(node.name)}"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/></p:grpSp>`));
+        }
+        const parts: DesignNode[] = [];
+        if (a.fill || a.border || a.radius) parts.push({id:`${node.id}:paint`,kind:"shape",name:`${node.name} background`,purpose:node.purpose,
+          appearance:{rect:a.rect,fill:a.fill,border:a.border,radius:a.radius}});
+        text.frames!.forEach((frame,i) => parts.push({id:`${node.id}:paragraph:${i}`,kind:"text",name:`${node.name} paragraph ${i+1}`,purpose:node.purpose,
+          appearance:{rect:frame.rect,text:{paragraphs:[{...text.paragraphs[i],before:0,after:0}],padding:frame.padding,verticalAlign:"top"}}}));
+        await emit({...node,kind:"group",appearance:{rect:a.rect}},parent,true,parts);
+        return;
+      }
       let owner = sourceId ? owners.get(String(sourceId)) : undefined;
       if (node.hidden) return;
       let fresh = !owner;
@@ -176,7 +193,7 @@ export async function exportDesignBytes(design: DesignDocument, identities?: Map
           const w = Math.max(1, Math.round(r.w / t.sx)), h = Math.max(1, Math.round(r.h / t.sy));
           replaceChild(ensure(owner, "p:grpSpPr"), "xfrm", fragment(`<a:xfrm><a:off x="${Math.round((r.x - t.ox) / t.sx)}" y="${Math.round((r.y - t.oy) / t.sy)}"/><a:ext cx="${w}" cy="${h}"/><a:chOff x="0" y="0"/><a:chExt cx="${w}" cy="${h}"/></a:xfrm>`));
         }
-        for (const child of page.nodes.filter(n => n.parentId === node.id)) await emit(child, owner, changedGroup);
+        for (const child of children ?? page.nodes.filter(n => n.parentId === node.id)) await emit(child, owner, changedGroup);
         return;
       }
       const old = node.origin?.appearance, a = node.appearance;

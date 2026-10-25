@@ -1,22 +1,15 @@
 /** Where the page keeps the deck: the plugin's own backend. */
 export interface DeckStore {
   /**
-   * Store `pptx` as the next revision after `expectedRevision` and return the
-   * new revision. Throw `RevisionConflict` when the stored revision moved on
-   * (saved from another tab or device).
+   * Store the submitted PPTX and return its saved sequence number.
+   * expectedRevision is retained only for older store implementations.
    */
   save(pptx: Blob, expectedRevision: number, source: SaveSource): Promise<number>;
 }
 
 export type SaveSource = "agent" | "user";
 
-export type SaveStatus = "saved" | "dirty" | "saving" | "error" | "conflict";
-
-export class RevisionConflict extends Error {
-  constructor(public readonly current?: number) {
-    super("稿件已在别处修改");
-  }
-}
+export type SaveStatus = "saved" | "dirty" | "saving" | "error";
 
 /** What the saver needs from the editor. `PptViewer` has both. */
 export interface SavableDeck {
@@ -39,8 +32,7 @@ export interface AutoSaverOptions {
  * Agent edit (so the tool result can carry the new revision), and after the
  * user has paused for `idleMs`. One save runs at a time; a request made while
  * one is running waits for it and then saves what has changed since. Every
- * save names the revision it builds on, so a save from another tab is never
- * overwritten: the saver stops in `conflict` until `resolveConflict`.
+ * save accepts the submitted contents without version conflict detection.
  */
 export class AutoSaver {
   private revision: number;
@@ -75,7 +67,7 @@ export class AutoSaver {
 
   /** The user changed something; save once they pause. */
   public notifyEdited(): void {
-    if (this.disposed || this.status === "conflict") return;
+    if (this.disposed) return;
     if (!this.deck.hasUnsavedEdits() && !this.unsaved) return;
     if (this.status !== "saving") this.setStatus("dirty");
     this.schedule(this.idleMs);
@@ -84,7 +76,6 @@ export class AutoSaver {
   /** Save now (Agent edits, the "save now" button) and return the stored revision. */
   public saveNow(source: SaveSource): Promise<number> {
     this.cancelTimer();
-    if (this.status === "conflict") return Promise.reject(new RevisionConflict());
     if (!this.running) {
       this.running = this.run(source).finally(() => { this.running = null; });
       return this.running;
@@ -101,24 +92,6 @@ export class AutoSaver {
       this.queued.source = "agent";
     }
     return this.queued.promise;
-  }
-
-  /**
-   * After a conflict the page decides: reload the stored deck (pass its
-   * revision, nothing is saved), or keep this one and overwrite (pass the
-   * stored revision and `overwrite: true`).
-   */
-  public resolveConflict(storedRevision: number, overwrite: boolean): Promise<number> | void {
-    if (this.status !== "conflict") return;
-    this.revision = storedRevision;
-    if (!overwrite) {
-      this.unsaved = false;
-      this.setStatus("saved");
-      return;
-    }
-    this.unsaved = true;
-    this.setStatus("dirty");
-    return this.saveNow("user");
   }
 
   public dispose(): void {
@@ -149,12 +122,8 @@ export class AutoSaver {
       return revision;
     } catch (error) {
       const failure = error instanceof Error ? error : new Error(String(error));
-      if (failure instanceof RevisionConflict) {
-        this.setStatus("conflict", failure);
-      } else {
-        this.setStatus("error", failure);
-        if (!this.disposed) this.schedule(this.retryMs);
-      }
+      this.setStatus("error", failure);
+      if (!this.disposed) this.schedule(this.retryMs);
       throw failure;
     }
   }

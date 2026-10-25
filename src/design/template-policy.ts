@@ -75,7 +75,8 @@ const paintRects = (node: DesignNode, textPaint?: Record<string,DesignRect[]>): 
   return a.text && !a.src && !a.border && (!a.fill || ["transparent","rgba(0, 0, 0, 0)"].includes(a.fill)) && textPaint?.[node.id] !== undefined ? textPaint[node.id] : [a.rect];
 };
 /** Use trusted glyph extents for transparent text, complete bounds for painted boxes and assets. */
-export function checkFixedProtection(before: DesignPage, after: DesignPage, beforeTextPaint?: Record<string,DesignRect[]>, afterTextPaint?: Record<string,DesignRect[]>): void {
+export function checkFixedProtection(before: DesignPage, after: DesignPage, beforeTextPaint?: Record<string,DesignRect[]>, afterTextPaint?: Record<string,DesignRect[]>): Array<{nodeId?: string; message: string}> {
+  const warnings: Array<{nodeId?: string; message: string}> = [];
   const beforeIndex = new Map(before.nodes.map((n,i) => [n.id,i]));
   const afterIndex = new Map(after.nodes.map((n,i) => [n.id,i]));
   const oldById = new Map(before.nodes.map(n => [n.id,n]));
@@ -84,7 +85,7 @@ export function checkFixedProtection(before: DesignPage, after: DesignPage, befo
     if (!next) throw new Error(`Fixed element removed: ${fixed.id}`);
     // An ancestor's reordering can change paint order even if each object's attributes remain unchanged.
     for (const n of before.nodes) if (n.id !== fixed.id && afterIndex.has(n.id) && ((beforeIndex.get(n.id)! < beforeIndex.get(fixed.id)!) !== (afterIndex.get(n.id)! < afterIndex.get(fixed.id)!))) {
-      if (overlap(n.appearance.rect, fixed.appearance.rect) > 0.5) throw new Error(`Fixed element layer order changed: ${fixed.id}`);
+      if (overlap(n.appearance.rect, fixed.appearance.rect) > 0.5) warnings.push({nodeId:n.id,message:`Fixed element layer order changed: ${fixed.id}. Layout warning: inspect the rendered page and adjust the mutable foreground if it hides the brand.`});
     }
     const areas = fixed.metadata?.protectedRegions as DesignRect[] | undefined;
     const r = fixed.appearance.rect;
@@ -96,10 +97,11 @@ export function checkFixedProtection(before: DesignPage, after: DesignPage, befo
         const area = paintRects(foreground,afterTextPaint).reduce((sum,r)=>sum+overlap(region,r),0);
         const oldArea = old && beforeIndex.get(old.id)! > beforeIndex.get(fixed.id)! ? paintRects(old,beforeTextPaint).reduce((sum,r)=>sum+overlap(region,r),0) : 0;
         const paintChanged = !!old && (old.appearance.src !== foreground.appearance.src || old.appearance.fill !== foreground.appearance.fill || JSON.stringify(old.appearance.border) !== JSON.stringify(foreground.appearance.border));
-        if (area > 0.5 && (area > oldArea + 0.5 || !old || paintChanged)) throw new Error(`FIXED_OCCLUSION: ${foreground.id} covers fixed element ${fixed.id}. ${JSON.stringify({nodeId:foreground.id,nodeBounds:foreground.appearance.rect,fixedNodeId:fixed.id,protectedBounds:region,overlapArea:Math.round(area*100)/100,canvas:{width:1280,height:720},recovery:"Move or reflow only the mutable foreground content outside protectedBounds; retain the fixed object and its metadata. Transparent text is checked using measured glyphs, filled/bordered objects by their full bounds. Retry apply_html; no page content was applied."})}`);
+        if (area > 0.5 && (area > oldArea + 0.5 || !old || paintChanged)) warnings.push({nodeId:foreground.id,message:`FIXED_OCCLUSION: ${foreground.id} covers fixed element ${fixed.id}. ${JSON.stringify({nodeId:foreground.id,nodeBounds:foreground.appearance.rect,fixedNodeId:fixed.id,protectedBounds:region,overlapArea:Math.round(area*100)/100,canvas:{width:1280,height:720},recovery:"Layout warning only; this does not block applying the page. Inspect the actual rendering before deciding whether to move or reflow mutable foreground content. Retain the fixed object's content and metadata."})}`});
       }
     }
   }
+  return warnings;
 }
 export function applyDefaultPolicies(document: DesignDocument): void {
   // Repeated identical top-of-page words are commonly brand headers. Do not infer permission from position.

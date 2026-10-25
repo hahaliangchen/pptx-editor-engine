@@ -16,18 +16,21 @@ const change = (html:string,id:string,fn:(e:HTMLElement)=>void) => {const d = ne
 const logo = (d:DesignDocument) => d.pages[0].nodes.find(n=>n.kind==="image")!;
 
 describe("template HTML policy and closed-loop persistence",()=>{
-  it("protects the real ordinary-image Unicom logo from replacement, movement, deletion, clipping and foreground cover",async()=>{
+  it("preserves the logo and reports foreground cover as a layout warning",async()=>{
     const d=await syncDesign(source), brand=logo(d), html=projectPage(d,d.pages[0].id);
     expect(brand.purpose).toBe("fixed");
     for(const mutate of [(e:HTMLElement)=>e.style.left="700px",(e:HTMLElement)=>e.remove(),(e:HTMLElement)=>e.setAttribute("src",d.pages[0].nodes.find(n=>n.kind==="asset")!.appearance.src!)]) await expect(mergeHtml(d,change(html,brand.id,mutate))).rejects.toThrow(/Locked|locked|Fixed/);
-    await expect(mergeHtml(d,html.replace("</body>",'<div data-kind="shape" data-id="new:cover" style="position:absolute;left:780px;top:5px;width:200px;height:80px;background:white"></div></body>'))).rejects.toThrow("FIXED_OCCLUSION");
+    const covered=await mergeHtml(d,html.replace("</body>",'<div data-kind="shape" data-id="new:cover" style="position:absolute;left:780px;top:5px;width:200px;height:80px;background:white"></div></body>'));
+    expect(covered.diagnostics.some(d=>d.severity==="warning" && d.message.includes("FIXED_OCCLUSION"))).toBe(true);
+    const saved=await materializeDesign(covered);
+    expect(saved.diagnostics.some(d=>d.severity==="warning" && d.message.includes("FIXED_OCCLUSION"))).toBe(true);
     await expect(mergeHtml(d,change(html,brand.id,e=>{const wrap=e.ownerDocument.createElement("div");wrap.style.cssText="position:absolute;left:755px;top:0;width:20px;height:20px;overflow:hidden";e.before(wrap);wrap.appendChild(e);}))).rejects.toThrow(/Unsupported CSS/);
     // Existing edge overflow is kept; editing an unrelated title is safe.
     const next=await convertDesign({operation:"apply",design:d,expectedRevision:d.revision,html:html.replace("{{TITLE}}","共同成长")});
     expect(logo(next).appearance).toEqual(brand.appearance);
   },30000);
 
-  it("allows a wide transparent title box beside the real logo while rejecting actual glyph and fill occlusion",async()=>{
+  it("allows title edits and reports actual glyph or fill occlusion for visual review",async()=>{
     const d=await syncDesign(source), page=d.pages.find(p=>p.part==="ppt/slides/slide3.xml")!;
     const title=page.nodes.find(n=>n.origin?.shapeId==="8")!, baseline=projectPage(d,page.id);
     const edited=(width:number,text:string,size:number,height=60.8,left=50.2,fill="")=>change(baseline,title.id,e=>{
@@ -36,14 +39,17 @@ describe("template HTML policy and closed-loop persistence",()=>{
     });
     const safe=await mergeHtml(d,edited(740,"联通产互为什么总加班？",34));
     expect(safe.pages.find(p=>p.id===page.id)!.nodes.find(n=>n.id===title.id)!.appearance.rect.w).toBe(740);
-    await expect(mergeHtml(d,edited(740,"联通产互为什么总加班？",34,60.8,50.2,"background:white"))).rejects.toThrow("FIXED_OCCLUSION");
-    await expect(mergeHtml(d,edited(400,"覆盖品牌",34,60.8,760))).rejects.toThrow('"protectedBounds"');
-    let failure="";
-    try { await mergeHtml(d,edited(349,"加班，常是交付的末端缓冲区",30,61,50)); } catch(error) {failure=(error as Error).message;}
+    const painted=await mergeHtml(d,edited(740,"联通产互为什么总加班？",34,60.8,50.2,"background:white"));
+    expect(painted.diagnostics.some(d=>d.message.includes("FIXED_OCCLUSION"))).toBe(true);
+    const occluded=await mergeHtml(d,edited(400,"覆盖品牌",34,60.8,760));
+    expect(occluded.diagnostics.some(d=>d.message.includes('"protectedBounds"'))).toBe(true);
+    const clipped=await mergeHtml(d,edited(349,"加班，常是交付的末端缓冲区",30,61,50));
+    const failure=clipped.diagnostics.find(d=>d.message.includes("Text is clipped or outside its box"))!.message;
     expect(failure).toContain("Text is clipped or outside its box");
     const details=JSON.parse(failure.slice(failure.indexOf("{")));
     expect(details.nodeBounds.w).toBe(349);expect(details.requiredTextHeight).toBeGreaterThan(61);expect(details.overflow.bottom).toBeGreaterThan(0);
-    expect(details.recovery).toContain("Retry apply_html");
+    expect(details.firstOverflow.character).toBeTruthy();
+    expect(details.recovery).toContain("own edges");
   },30000);
 
   it("requires an exact author grant for semantic-only edits and persists them in PPTX",async()=>{
@@ -51,7 +57,7 @@ describe("template HTML policy and closed-loop persistence",()=>{
     const html=change(baseline,brand.id,e=>{e.dataset.purpose="reference";e.dataset.note="按主题重做示例图";});
     await expect(convertDesign({operation:"apply",design:d,expectedRevision:d.revision,html})).rejects.toThrow("TEMPLATE_PERMISSION");
     const proposal=templateSemanticProposal(d,baseline,html);
-    await expect(convertDesign({operation:"apply",design:d,expectedRevision:d.revision,html,semanticAuthorization:{...proposal,revision:proposal.revision+1,mode:"template-authoring"}})).rejects.toThrow("TEMPLATE_PERMISSION");
+    await expect(convertDesign({operation:"apply",design:d,expectedRevision:d.revision,html,semanticAuthorization:{...proposal,revision:proposal.revision+1,mode:"template-authoring"}})).resolves.toBeDefined();
     const changed=await convertDesign({operation:"apply",design:d,expectedRevision:d.revision,html,semanticAuthorization:{...proposal,mode:"template-authoring"}});
     expect(changed.revision).toBeGreaterThan(d.revision);
     expect(changed.changes?.[0].fields).toEqual(["semantics.purpose","semantics.note"]);
@@ -86,21 +92,13 @@ describe("template HTML policy and closed-loop persistence",()=>{
     expect(repaired.pages[0].nodes.some(n=>nodeText(n)==="共同成长")).toBe(true);
   },30000);
 
-  it("distinguishes a model-abbreviated hash from a genuinely stale page revision without repairing either",async()=>{
+  it("does not gate edits or template proposals on version or hash metadata",async()=>{
     const d=await syncDesign(source), baseline=projectPage(d,d.pages[0].id);
-    const shortened="c6eac6430cb03526aadbbd88e03c7dc7";
-    const wrong=baseline.replace(d.source.sha256,shortened);
-    let message="";
-    try {templateSemanticProposal(d,baseline,wrong);} catch(error) {message=(error as Error).message;}
-    expect(message).toContain("INVALID_DESIGN_IDENTITY");
-    const detail=JSON.parse(message.slice(message.indexOf("{")));
-    expect(detail.reason).toBe("sourceHashFormat");expect(detail.expected.sourceHash).toBe(d.source.sha256);expect(detail.received.sourceHash).toBe(shortened);expect(detail.received.sourceHashLength).toBe(32);
-    expect(()=>templateSemanticProposal(d,baseline,baseline.replace(d.source.sha256,shortened.slice(0,31)))).toThrow('"sourceHashLength":31');
-    await expect(convertDesign({operation:"apply",design:d,expectedRevision:d.revision,html:wrong})).rejects.toThrow("INVALID_DESIGN_IDENTITY");
-    expect(()=>templateSemanticProposal(d,baseline,baseline.replace(d.source.sha256,"0".repeat(64)))).toThrow('"sourceHashMismatch"');
-    expect(()=>templateSemanticProposal(d,baseline,baseline.replace('data-design-revision="0"','data-design-revision="99"'))).toThrow("STALE_DESIGN");
-    expect(()=>templateSemanticProposal(d,baseline,baseline.replaceAll(d.pages[0].id,"ppt/slides/missing.xml"))).toThrow('"reason":"pageId"');
-    expect(d.revision).toBe(0);
+    for (const html of [baseline.replace(d.source.sha256,"short"),baseline.replace(d.source.sha256,"0".repeat(64)),baseline.replace('data-design-revision="0"','data-design-revision="99"'),baseline.replace(/ data-source-hash="[^"]*"/,"").replace(/ data-design-revision="[^"]*"/,"")]) {
+      expect(()=>templateSemanticProposal(d,baseline,html)).not.toThrow();
+      await expect(convertDesign({operation:"apply",design:d,expectedRevision:999,html})).resolves.toBeDefined();
+    }
+    expect(()=>templateSemanticProposal(d,baseline,baseline.replaceAll(d.pages[0].id,"ppt/slides/missing.xml"))).toThrow("design page");
   });
 
   it("preserves logo policies, assets and distinct identities while duplicating to twenty pages and reopening",async()=>{
@@ -123,16 +121,16 @@ describe("template HTML policy and closed-loop persistence",()=>{
       const single=payload(await bridge.run("get_design",{page:20}));
       expect(single.pages).toBeUndefined();expect(single.page).toBe(20);expect(single.totalPages).toBe(20);
       expect(single.pageId).toBe(overview.pages[19].id);expect(single.semantics).toEqual(overview.pages[19].semantics);
-      expect(single.revision).toBe(overview.revision);expect(single.sourceHash).toBe(overview.sourceHash);
+      expect(single.design_revision).toBe(overview.design_revision);expect(single.sourceHash).toBe(overview.sourceHash);
       expect(single.nodes.length).toBeGreaterThan(0);expect(single.assets.length).toBeGreaterThan(0);
       expect(single.html).toContain(`data-page-id="${single.pageId}"`);
     } finally {bridge.dispose();}
   },60000);
 
-  it("exposes manual annotation via the same HTML bridge and refuses AI confirmation after concurrent changes",async()=>{
-    let bytes:Uint8Array=source;let confirmResolve!:(ok:boolean)=>void;
+  it("exposes manual annotation via the same HTML bridge and keeps author confirmation without version gating",async()=>{
+    let bytes:Uint8Array=source;let confirmResolve!:(ok:boolean)=>void; let started!:()=>void; const confirming=new Promise<void>(resolve=>{started=resolve;});
     const viewer={snapshotPptx:async()=>new Blob([bytes as BlobPart]),loadPptx:async(buffer:ArrayBuffer)=>{bytes=new Uint8Array(buffer)},getCurrentSlideIndex:()=>0,getSlidesCount:()=>4,selectSlide:async()=>{}};
-    const bridge=new DesignBridge(viewer,convertDesign,undefined,{mode:"template-authoring",confirmSemanticChanges:()=>new Promise(resolve=>confirmResolve=resolve)});
+    const bridge=new DesignBridge(viewer,convertDesign,undefined,{mode:"template-authoring",confirmSemanticChanges:()=>new Promise(resolve=>{confirmResolve=resolve;started();})});
     expect(payload(await bridge.run("get_template",{})).pages).toHaveLength(4);
     expect(payload(await bridge.run("suggest_annotations",{slide:1})).pages[0].objects.length).toBeGreaterThan(0);
     let info=payload(await bridge.run("get_design",{page:1}));
@@ -143,10 +141,10 @@ describe("template HTML policy and closed-loop persistence",()=>{
     payload(await bridge.updateTemplateSemantics(1,[{role:""}]));
     info=payload(await bridge.run("get_design",{page:1}));expect(info.semanticsDefined).toBe(true);expect(info.semantics.role).toBeUndefined();
     expect((await syncDesign(bytes)).pages[0].semantics?.role).toBeUndefined();
-    const pending=bridge.run("apply_html",{expected_revision:info.revision,html:change(info.html,brand.id,e=>e.dataset.purpose="content")});
-    bridge.edited();confirmResolve(true);
-    expect((await pending).ok).toBe(false);
-    expect(logo(await syncDesign(bytes)).purpose).toBe("fixed");bridge.dispose();
+    const pending=bridge.run("apply_html",{expected_design_revision:info.design_revision,html:change(info.html,brand.id,e=>e.dataset.purpose="content")});
+    await confirming;bridge.edited();confirmResolve(true);
+    expect((await pending).ok).toBe(true);
+    expect(logo(await syncDesign(bytes)).purpose).toBe("content");bridge.dispose();
     const generation=new DesignBridge(viewer,convertDesign);
     expect((await generation.updateTemplateSemantics(1,[{nodeId:brand.id,purpose:"content"}])).ok).toBe(false);generation.dispose();
   },30000);

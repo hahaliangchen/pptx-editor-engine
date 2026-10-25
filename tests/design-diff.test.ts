@@ -40,8 +40,9 @@ describe("HTML attribute differences", () => {
     expect(changed.pages[0].nodes.find(n=>n.id===before.id)).toEqual(expected);
     expect(changed.pages[0].nodes.filter(n=>n.id!==before.id)).toEqual(page.nodes.filter(n=>n.id!==before.id));
     expect(changed.changes!.flatMap(c=>c.fields).every(field=>/^appearance\.text\.paragraphs\.0\.runs\.\d+\.text$/.test(field))).toBe(true);
-    // Real clipping remains an error; no fitting or box enlargement is performed.
-    await expect(mergeHtml(design,edited.replace("height:110px","height:50px"))).rejects.toThrow(/clipped|outside/);
+    // Clipping remains visible as a warning; no fitting or box enlargement is performed.
+    const clipped=await mergeHtml(design,edited.replace("height:110px","height:50px"));
+    expect(clipped.diagnostics.some(d=>d.severity==="warning" && /clipped|outside/.test(d.message))).toBe(true);
   },30000);
 
   it("changes one word without replacing native geometry, margins, styles or another node's XML", async () => {
@@ -52,7 +53,8 @@ describe("HTML attribute differences", () => {
     const expected = cloneDesign(before); expected.appearance.text!.paragraphs[0].runs[0].text = "Updated title";
     expect(changed.pages[0].nodes.find(n => n.id === before.id)).toEqual(expected);
     expect(changed.pages[0].nodes.find(n => n.id === untouched.id)).toEqual(untouched);
-    expect(changed.changes).toEqual([{ pageId: design.pages[0].id, nodeId: before.id, action: "update", fields: ["appearance.text.paragraphs.0.runs.0.text"] }]);
+    expect(changed.changes).toEqual([{ pageId: design.pages[0].id, nodeId: before.id, action: "update", fields: ["appearance.text.paragraphs.0.runs.0.text"],
+      text: { before: "Original title", after: "Updated title" } }]);
     const saved = await materializeDesign(changed);
     expect(saved.pages[0].nodes.find(n => n.id === untouched.id)?.appearance).toEqual(untouched.appearance);
     const originalZip = await JSZip.loadAsync(Buffer.from(design.source.pptxBase64, "base64"));
@@ -73,14 +75,15 @@ describe("HTML attribute differences", () => {
     expect(changed.changes![0].fields).toEqual(["appearance.text.paragraphs.0.runs.0.color"]);
   }, 15000);
 
-  it("leaves existing unrelated overflow alone but rejects overflow in edited text", async () => {
+  it("leaves unrelated overflow alone and reports edited overflow without rejecting it", async () => {
     const design = await fixture();
     const untouched = design.pages[0].nodes.find(n => nodeText(n) === "Leave this alone")!;
     untouched.appearance.rect.h = 5; // existing bad manual layout, not part of this request
     const html = projectPage(design, design.pages[0].id);
     const result = await mergeHtml(design, html.replace("Original title", "Updated title"));
     expect(result.pages[0].nodes.find(n => n.id === untouched.id)).toEqual(untouched);
-    await expect(mergeHtml(design, html.replace("Leave this alone", "Edited overflow"))).rejects.toThrow(/clipped|outside/);
+    const changed=await mergeHtml(design, html.replace("Leave this alone", "Edited overflow"));
+    expect(changed.diagnostics.some(d=>d.nodeId===untouched.id && d.severity==="warning" && /clipped|outside/.test(d.message))).toBe(true);
   }, 15000);
 
   it("detects shared stylesheet changes and flex layout dependencies", async () => {

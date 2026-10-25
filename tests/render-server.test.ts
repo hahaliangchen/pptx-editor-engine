@@ -39,9 +39,9 @@ describe("render service", () => {
     const rendered = await post("/render?page=1&width=320", bytes);
     expect(rendered.status).toBe(200);
     expect(widthOf(Buffer.from(await rendered.arrayBuffer()))).toBe(320);
-    const stale = await post("/design", JSON.stringify({ operation: "apply", design: next, expectedRevision: next.revision, html }));
-    expect(stale.status).toBe(422);
-    expect((await stale.json()).error.message).toContain("STALE_DESIGN");
+    const stale = await post("/design", JSON.stringify({ operation: "apply", design: next, expectedRevision: -99, html: projectPage(next, next.pages[0].id).replace(next.source.sha256, design.source.sha256).replace(`data-design-revision="${next.revision}"`, 'data-design-revision="0"') }));
+    expect(stale.status, await stale.clone().text()).toBe(200);
+    expect((await stale.json()).design).toBeDefined();
   }, 20000);
 
   it("returns the first page as a PNG of the default width, with the slide count", async () => {

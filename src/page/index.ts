@@ -9,7 +9,7 @@ export { PROJECT_ASSET_PREFIX, resolveProjectAssets } from "./assets";
 export type { AssetResolver } from "./assets";
 export { PageToolLink } from "./tool-link";
 export type { PageToolCall, ToolCallTransport, PageToolLinkOptions } from "./tool-link";
-export { AutoSaver, RevisionConflict } from "./autosave";
+export { AutoSaver } from "./autosave";
 export type { DeckStore, SaveSource, SaveStatus, SavableDeck, AutoSaverOptions } from "./autosave";
 export { OPEN_FONT_MAP, OPEN_FALLBACKS, resolveOpenFamily } from "./font-map";
 export { WorkerRenderer } from "./worker-renderer";

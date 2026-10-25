@@ -20,14 +20,10 @@ export function parseDesignHtml(source: string): Document {
   return new DOMParser().parseFromString(source, "text/html");
 }
 
-/** Validate host-issued identity exactly; never repair or abbreviate a model-supplied hash. */
+/** Page identity is structural; revision and source hash are informational only. */
 export function assertDesignHtmlIdentity(design: DesignDocument, body: HTMLElement, expectedPageId?: string): void {
-  const pageId=body.dataset.pageId, hash=body.dataset.sourceHash, revision=Number(body.dataset.designRevision);
-  const reason=!pageId || !design.pages.some(p=>p.id===pageId) || expectedPageId && expectedPageId!==pageId ? "pageId"
-    : !body.hasAttribute("data-design-revision") || !Number.isInteger(revision) || revision!==design.revision ? "revision"
-    : !/^[a-f0-9]{64}$/.test(hash ?? "") ? "sourceHashFormat"
-    : hash!==design.source.sha256 ? "sourceHashMismatch" : undefined;
-  if (!reason) return;
-  const stale=reason==="pageId" || reason==="revision", code=stale?"STALE_DESIGN":"INVALID_DESIGN_IDENTITY";
-  throw new Error(`${code}: ${stale?"page or revision is no longer current":"source hash was omitted, abbreviated or differs from the current design"}. ${JSON.stringify({code,reason,expected:{pageId:expectedPageId ?? (design.pages.some(p=>p.id===pageId)?pageId:undefined),revision:design.revision,sourceHash:design.source.sha256},received:{pageId:pageId??null,revision:body.dataset.designRevision??null,sourceHash:hash??null,sourceHashLength:hash?.length??0},recovery:stale?"Call get_design for the current page and redo the requested changes on that latest HTML. Do not just relabel old HTML with a new revision. No content was applied.":"Copy all identity attributes verbatim from the latest get_design HTML; the source hash must be all 64 characters, never shortened or rewritten. If the page/revision has since changed, reread and redo your changes on the latest HTML. Then retry apply_html; no content was applied."})}`);
+  const pageId = body.dataset.pageId;
+  if (!pageId || !design.pages.some(page => page.id === pageId) || expectedPageId && pageId !== expectedPageId) {
+    throw new Error("Unknown or mismatched design page");
+  }
 }

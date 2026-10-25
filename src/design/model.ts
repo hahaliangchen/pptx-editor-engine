@@ -21,6 +21,8 @@ export interface DesignParagraph {
 }
 export interface DesignText {
   paragraphs: DesignParagraph[];
+  /** Browser-resolved paragraph frames when one native text flow cannot represent the layout. */
+  frames?: Array<{ rect: DesignRect; padding: [number, number, number, number] }>;
   padding: [number, number, number, number]; // top, right, bottom, left in CSS px
   verticalAlign: "top" | "middle" | "bottom";
 }
@@ -64,9 +66,9 @@ export interface DesignDocument {
   /** Opaque original package: masters, relationships, animations and unknown XML survive. */
   source: { pptxBase64: string; sha256: string; widthEMU: number; heightEMU: number };
   pages: DesignPage[];
-  diagnostics: Array<{ pageId: string; nodeId?: string; message: string }>;
-  /** Ephemeral edit summary; never persisted alongside PPTX. */
-  changes?: Array<{ pageId: string; nodeId?: string; action: "add" | "remove" | "update" | "reorder"; fields: string[] }>;
+  diagnostics: Array<{ pageId: string; nodeId?: string; message: string; severity?: "warning" }>;
+  /** Ephemeral edit summary; never persisted alongside PPTX. `text` shows a text node's words before and after. */
+  changes?: Array<{ pageId: string; nodeId?: string; action: "add" | "remove" | "update" | "reorder"; fields: string[]; text?: { before?: string; after?: string } }>;
 }
 export interface MeasuredPage {
   sourceHash?: string;
@@ -80,7 +82,7 @@ export interface MeasuredPage {
 }
 
 export const cloneDesign = <T>(value: T): T => JSON.parse(JSON.stringify(value));
-export const nodeText = (node: DesignNode): string => node.appearance.text?.paragraphs.map(p => p.runs.map(r => r.text).join("")).join("\n") ?? "";
+export const nodeText = (node: Pick<DesignNode, "appearance">): string => node.appearance.text?.paragraphs.map(p => p.runs.map(r => r.text).join("")).join("\n") ?? "";
 
 export function assertDesign(document: DesignDocument): void {
   if (document?.schemaVersion !== 1) throw new Error("Unsupported design JSON schemaVersion; expected 1");
@@ -110,8 +112,6 @@ export function assertDesign(document: DesignDocument): void {
 /** Merge only the projected appearance. HTML cannot overwrite locks, bindings, source or metadata. */
 export function mergeMeasuredPage(document: DesignDocument, measured: MeasuredPage, baseline?: MeasuredPage): DesignDocument {
   assertDesign(document);
-  if (measured.sourceHash && measured.sourceHash !== document.source.sha256) throw new Error("STALE_DESIGN: source document changed");
-  if (measured.revision !== document.revision) throw new Error("STALE_DESIGN: read the latest design JSON/HTML before editing");
   const result = cloneDesign(document);
   const page = result.pages.find(p => p.id === measured.pageId);
   if (!page) throw new Error("Unknown design page");
@@ -141,7 +141,9 @@ export function mergeMeasuredPage(document: DesignDocument, measured: MeasuredPa
     if (before.hidden) { merged.push(before); continue; }
     if (effectiveLock(page, before) || before.required) throw new Error(`Required/locked element removed: ${before.id}`);
   }
-  checkFixedProtection(page, { ...page, nodes: merged }, baseline?.textPaint, measured.textPaint);
+  const warnings = checkFixedProtection(page, { ...page, nodes: merged }, baseline?.textPaint, measured.textPaint);
+  result.diagnostics = result.diagnostics.filter(d => d.pageId !== page.id || d.severity !== "warning");
+  result.diagnostics.push(...warnings.map(warning => ({...warning, pageId: page.id, severity: "warning" as const})));
   page.nodes = merged;
   if (measured.background) page.background = measured.background;
   result.revision++;

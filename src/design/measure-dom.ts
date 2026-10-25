@@ -10,8 +10,8 @@ export async function measureDesignDOM({ nonce, collectIssues = false }: { nonce
       const body = document.body, br = body.getBoundingClientRect();
       if (Math.abs(br.width - 1280) > 0.1 || Math.abs(br.height - 720) > 0.1 || Math.abs(br.x) > 0.1 || Math.abs(br.y) > 0.1) throw new Error("HTML body must be exactly 1280x720 at (0,0)");
       if (body.scrollWidth > 1281 || body.scrollHeight > 721) issue("HTML page overflows its 1280x720 canvas");
-      const revision = Number(body.dataset.designRevision), pageId = body.dataset.pageId;
-      if (!pageId || !body.hasAttribute("data-design-revision") || !Number.isInteger(revision)) throw new Error("Missing data-page-id or data-design-revision");
+      const revision = Number(body.dataset.designRevision) || 0, pageId = body.dataset.pageId;
+      if (!pageId) throw new Error("Missing data-page-id");
       const px = (value: string) => Number.parseFloat(value) || 0;
       const color = (value: string): string => {
         const rgba = value.match(/^rgba?\(\s*([\d.]+)[, ]+([\d.]+)[, ]+([\d.]+)(?:\s*[,/]\s*([\d.]+))?\s*\)$/);
@@ -84,11 +84,16 @@ export async function measureDesignDOM({ nonce, collectIssues = false }: { nonce
         }
         const glyphs: NonNullable<MeasuredPage["textPaint"]>[string] = [];
         let clippedText = false;
+        let firstOverflow: {character: string; font: string; overflow: {left: number; top: number; right: number; bottom: number}} | undefined;
         if (kind === "image" || kind === "asset") {
           if (style.objectFit !== "fill") throw new Error(`Pre-crop the asset before using object-fit: ${id}`);
           appearance.src = (el as unknown as HTMLImageElement).src;
         } else if (kind !== "group") {
-          const blocks = el.matches("p,h1,h2,h3,h4,h5,h6,li") ? [el] : Array.from(el.querySelectorAll<HTMLElement>("[data-paragraph],p,h1,h2,h3,h4,h5,h6,li"));
+          const found = el.matches("p,h1,h2,h3,h4,h5,h6,li") ? [el] : Array.from(el.querySelectorAll<HTMLElement>("[data-paragraph],p,h1,h2,h3,h4,h5,h6,li"));
+          // A paragraph marker inside another paragraph (e.g. <span data-paragraph>
+          // in <p data-paragraph>) is already that paragraph's text; reading it
+          // again would duplicate the words.
+          const blocks = found.filter(block => !found.some(outer => outer !== block && outer.contains(block)));
           if (!blocks.length && el.textContent?.trim()) throw new Error(`Text needs a paragraph element: ${id}`);
           if (blocks.length) {
             const paragraphs = blocks.map(block => {
@@ -128,7 +133,10 @@ export async function measureDesignDOM({ nonce, collectIssues = false }: { nonce
                       const hasInkMetrics = [metrics.fontBoundingBoxAscent,metrics.actualBoundingBoxAscent,metrics.actualBoundingBoxDescent,metrics.actualBoundingBoxLeft,metrics.actualBoundingBoxRight].every(Number.isFinite);
                       const ink = hasInkMetrics ? {x:glyph.x-metrics.actualBoundingBoxLeft,y:glyph.y+metrics.fontBoundingBoxAscent-metrics.actualBoundingBoxAscent,w:metrics.actualBoundingBoxLeft+metrics.actualBoundingBoxRight,h:metrics.actualBoundingBoxAscent+metrics.actualBoundingBoxDescent} : {x:glyph.x,y:glyph.y,w:glyph.width,h:glyph.height};
                       if (ink.w > 0 && ink.h > 0) {
-                        if (ink.x < bounds.left - 0.5 || ink.x+ink.w > bounds.right + 0.5 || ink.y < bounds.top - 1 || ink.y+ink.h > bounds.bottom + 1) clippedText = true;
+                        if (ink.x < bounds.left - 1 || ink.x+ink.w > bounds.right + 1 || ink.y < bounds.top - 1 || ink.y+ink.h > bounds.bottom + 1) {
+                          clippedText = true;
+                          firstOverflow ??= {character,font,overflow:{left:Math.max(0,bounds.left-ink.x),top:Math.max(0,bounds.top-ink.y),right:Math.max(0,ink.x+ink.w-bounds.right),bottom:Math.max(0,ink.y+ink.h-bounds.bottom)}};
+                        }
                         glyphs.push(ink);
                       }
                     }
@@ -143,17 +151,33 @@ export async function measureDesignDOM({ nonce, collectIssues = false }: { nonce
               return { runs, align: (["left", "center", "right"].includes(bs.textAlign) ? bs.textAlign : "left") as "left" | "center" | "right", lineHeight, before: px(bs.marginTop), after: px(bs.marginBottom) };
             });
             appearance.text = { paragraphs, padding: [px(style.paddingTop), px(style.paddingRight), px(style.paddingBottom), px(style.paddingLeft)], verticalAlign: style.justifyContent === "center" ? "middle" : style.justifyContent === "flex-end" ? "bottom" : "top" };
+            const boxes = blocks.map(block => block.getBoundingClientRect());
+            const left = bounds.left + px(style.borderLeftWidth) + px(style.paddingLeft);
+            const width = bounds.width - px(style.borderLeftWidth) - px(style.borderRightWidth) - px(style.paddingLeft) - px(style.paddingRight);
+            const height = bounds.height - px(style.borderTopWidth) - px(style.borderBottomWidth) - px(style.paddingTop) - px(style.paddingBottom);
+            const flowHeight = boxes.reduce((sum, box, i) => sum + box.height + paragraphs[i].before + paragraphs[i].after, 0);
+            let y = bounds.top + px(style.borderTopWidth) + px(style.paddingTop)
+              + (appearance.text.verticalAlign === "middle" ? (height - flowHeight) / 2 : appearance.text.verticalAlign === "bottom" ? height - flowHeight : 0);
+            const separateFrames = boxes.some((box, i) => {
+              y += paragraphs[i].before;
+              const differs = Math.abs(box.x - left) > 1 || Math.abs(box.width - width) > 1 || Math.abs(box.y - y) > 1;
+              y += box.height + paragraphs[i].after;
+              return differs;
+            });
+            if (separateFrames) appearance.text.frames = boxes.map((box, i) => {
+              const block = computedStyle(blocks[i]);
+              return {rect:{x:box.x,y:box.y,w:box.width,h:box.height},padding:[px(block.paddingTop),px(block.paddingRight),px(block.paddingBottom),px(block.paddingLeft)]};
+            });
           }
         }
         if (appearance.text) {
           textPaint[id] = glyphs;
           if (clippedText && glyphs.length) {
             const left=Math.min(...glyphs.map(r=>r.x)), top=Math.min(...glyphs.map(r=>r.y)), right=Math.max(...glyphs.map(r=>r.x+r.w)), bottom=Math.max(...glyphs.map(r=>r.y+r.h));
-            issue(`Text is clipped or outside its box: ${id}. ${JSON.stringify({nodeId:id,nodeBounds:appearance.rect,textBounds:{x:left,y:top,w:right-left,h:bottom-top},requiredTextHeight:bottom-top,overflow:{left:Math.max(0,bounds.left-left),top:Math.max(0,bounds.top-top),right:Math.max(0,right-bounds.right),bottom:Math.max(0,bottom-bounds.bottom)},lineHeights:appearance.text.paragraphs.map(p=>p.lineHeight),recovery:"Resize or reposition this mutable text box, revise the wording or explicitly revise typography so measured text fits. Keep fixed assets clear; preserve all data-* metadata. Do not use automatic fitting. Retry apply_html; no page content was applied."})}`,id);
+            issue(`Text is clipped or outside its box: ${id}. ${JSON.stringify({nodeId:id,nodeBounds:appearance.rect,textBounds:{x:left,y:top,w:right-left,h:bottom-top},requiredTextHeight:bottom-top,overflow:{left:Math.max(0,bounds.left-left),top:Math.max(0,bounds.top-top),right:Math.max(0,right-bounds.right),bottom:Math.max(0,bottom-bounds.bottom)},firstOverflow,lineHeights:appearance.text.paragraphs.map(p=>p.lineHeight),recovery:"Layout warning only; applying HTML is allowed. Overflow is relative to this text box's own edges; moving the entire box does not change it. Inspect the actual rendering, then adjust padding, width, height, line height or wording if visibly clipped. Preserve fixed assets and data-* metadata."})}`,id);
           }
         }
         nodes.push({ id, kind, ...(parent ? { parentId: parent.dataset.id } : {}), appearance });
       }
-      if (!/^[a-f0-9]{64}$/.test(body.dataset.sourceHash ?? "")) throw new Error("Missing data-source-hash");
       return { pageId, revision, background: transparent(computedStyle(body).backgroundColor) ? "#ffffff" : color(computedStyle(body).backgroundColor), sourceHash: body.dataset.sourceHash, nodes, textPaint, ...(collectIssues ? { issues } : {}) };
 }

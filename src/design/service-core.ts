@@ -50,7 +50,7 @@ export function createDesignConverter(runtime: DesignRuntime) {
         // Source-backed appearance is fresh; HTML-inexpressible business fields survive both directions.
         return { ...before, ...node, id: before.id, role: node.role, binding: node.binding,
           ...(!increment ? { purpose: before.purpose, note: before.note } : {}),
-          ...(!increment ? { appearance: cloneDesign(before.appearance), origin: node.origin ? { ...node.origin, appearance: cloneDesign(before.appearance) } : undefined } : {}),
+          ...(!increment && !before.appearance.text?.frames ? { appearance: cloneDesign(before.appearance), origin: node.origin ? { ...node.origin, appearance: cloneDesign(before.appearance) } : undefined } : {}),
           required: before.required, constraints: before.constraints,
           lock: before.lock ?? node.lock, metadata: { ...before.metadata, ...node.metadata } };
       });
@@ -66,6 +66,7 @@ export function createDesignConverter(runtime: DesignRuntime) {
     const bytes = await exportDesign(design, identities);
     const result = await syncDesign(bytes, design, identities, false);
     if (design.changes) result.changes = cloneDesign(design.changes);
+    result.diagnostics.push(...cloneDesign(design.diagnostics.filter(d => d.severity === "warning")));
     return result;
   }
 
@@ -78,7 +79,6 @@ export function createDesignConverter(runtime: DesignRuntime) {
     const design = request.design;
     if (!design) throw new Error("Read the current design before changing it");
     assertDesign(design);
-    if (request.expectedRevision !== design.revision) throw new Error("STALE_DESIGN: design revision changed");
     if (request.operation === "apply") {
       if (!request.html) throw new Error("apply requires a complete HTML document");
       const resolveAssets = (source: string) => {

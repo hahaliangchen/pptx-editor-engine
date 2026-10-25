@@ -16,7 +16,7 @@ const pageFields = { role: "data-page-role", layoutName: "data-layout-name", not
 const values = (el: Element, fields: Record<string,string>): Record<string,string|undefined> => Object.fromEntries(Object.entries(fields).map(([key,attr])=>[key,el.getAttribute(attr) || undefined]));
 const equal = (a: unknown,b: unknown) => JSON.stringify(a) === JSON.stringify(b);
 interface ReadonlyHtmlChange { nodeId: string; name: string; attribute: string; original: string | null; submitted: string | null }
-const metadataRecovery = "No page content was applied. Use the latest get_design HTML as the baseline, preserve every existing data-* attribute exactly, edit only the allowed content/style, and retry apply_html with that revision. Do not recreate the deck or stop after this recoverable validation error.";
+const metadataRecovery = "No page content was applied. Use the latest get_design HTML as the baseline, preserve every existing data-* attribute exactly, edit only the allowed content/style, and retry apply_html. Do not recreate the deck or stop after this recoverable validation error.";
 /** Include every changed permission field, so a model can fix one rejected submission without guessing. */
 export function templateSemanticPermissionError(proposal: TemplateSemanticProposal, reason: string): Error {
   return new Error(`TEMPLATE_PERMISSION: ${reason}. ${JSON.stringify({code:"TEMPLATE_PERMISSION",pageId:proposal.pageId,revision:proposal.revision,semanticChanges:proposal.changes,recovery:metadataRecovery})}`);
@@ -49,7 +49,7 @@ export function templateSemanticProposal(design: DesignDocument, baselineHtml: s
 export function prepareTemplateSemantics(design: DesignDocument, baselineHtml: string, html: string, authorization?: TemplateSemanticAuthorization): {design:DesignDocument; proposal:TemplateSemanticProposal} {
   const proposal = templateSemanticProposal(design,baselineHtml,html);
   if (!proposal.changes.length) return {design,proposal};
-  if (!authorization || authorization.mode !== "template-authoring" || !equal(proposal,{sourceHash:authorization.sourceHash,revision:authorization.revision,pageId:authorization.pageId,changes:authorization.changes})) throw templateSemanticPermissionError(proposal,"template purpose changes need the author's confirmation for these exact objects and version");
+  if (!authorization || authorization.mode !== "template-authoring" || !equal({pageId:proposal.pageId,changes:proposal.changes},{pageId:authorization.pageId,changes:authorization.changes})) throw templateSemanticPermissionError(proposal,"template purpose changes need the author's confirmation for these exact objects and changes");
   const next = cloneDesign(design), page = next.pages.find(p=>p.id===proposal.pageId)!;
   page.semanticsChanged = true;
   for (const change of proposal.changes) {

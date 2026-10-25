@@ -8,7 +8,7 @@ import type { CmRect, Outline, OutlineShape } from "./outline";
  * alone, so it costs nothing and misses nothing it can measure.
  */
 
-export type IssueKind = "text_overflow" | "out_of_bounds" | "overlap" | "empty_space" | "small_text" | "small_object" | "edge_margin" | "type_hierarchy" | "unbalanced" | "font_icon" | "low_contrast" | "occluded_text";
+export type IssueKind = "text_overflow" | "out_of_bounds" | "overlap" | "empty_space" | "small_text" | "small_object" | "edge_margin" | "type_hierarchy" | "unbalanced" | "font_icon" | "low_contrast" | "occluded_text" | "repeated_text";
 
 export interface LayoutIssue {
   slide: number;
@@ -121,6 +121,13 @@ export function checkLayout(outline: Outline, options: { slides?: number[] } = {
     for (const shape of content) {
       if (shape.text && /^[\p{Extended_Pictographic}\uFE0F\u200D\s]+$/u.test(shape.text.trim())) {
         add("font_icon", [shape.id], `${label(shape)} 使用字体字符充当图标，可能显示缺字方框；检查实际渲染，图标应改用 SVG/图片资产，不要替换为单字`);
+      }
+      // The same paragraph twice in one box is usually a copy left by an edit.
+      const paragraphs = shape.textParagraphs?.map(p => p.runs.map(r => r.text).join("").trim()) ?? (shape.text ?? "").split("\n").map(t => t.trim());
+      const counts = new Map<string, number>();
+      for (const text of paragraphs) if (text) counts.set(text, (counts.get(text) ?? 0) + 1);
+      for (const [text, count] of counts) if (count > 1) {
+        add("repeated_text", [shape.id], `${label(shape)} 里同一段文字“${text.slice(0, 20)}${text.length > 20 ? "…" : ""}”出现了 ${count} 次；如果不是有意重复，删掉多余的段落`);
       }
       const { x, y, w, h } = shape.rect;
       // Decoration may run off the page on purpose; content may not.

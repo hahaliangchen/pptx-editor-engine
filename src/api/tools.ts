@@ -31,17 +31,21 @@ export interface ToolHost {
 
 export type ToolContent =
   | { type: "text"; text: string }
-  | { type: "image"; mimeType: string; /** base64 */ data: string };
+  /** `meta` says what an image shows (render_slide: `{ slide }`); hosts keep it with the image. */
+  | { type: "image"; mimeType: string; /** base64 */ data: string; meta?: Record<string, unknown> };
 
 export interface ToolResult {
   /** False when the call failed in a way the model should react to. */
   ok: boolean;
   content: ToolContent[];
   /** Saved document version inspected by the hosting application, when known. */
-  document?: { project_id: number; revision: number; stable: boolean };
+  document?: { project_id: number; stored_revision: number; stable: boolean };
 }
 
 export const RENDER_WIDTH = { min: 160, max: 2560, default: 1024 };
+
+/** Pages one render_slide call may draw: a 3×3 review sheet. */
+export const MAX_RENDER_SLIDES = 9;
 
 /** A deck with more pages than this gets an overview first, unless the model asks for pages or for the full outline. */
 export const BRIEF_ABOVE = 8;
@@ -119,18 +123,21 @@ export const TOOLS: ToolDefinition[] = [
   {
     name: "render_slide",
     description:
-      "把一页渲染成 PNG 图片，用来检查：文字有没有溢出文本框、对象有没有重叠或超出页面、"
-      + "对齐是否整齐、图表和表格是否清楚。每次较大的修改之后都应该看一眼。",
+      "把页面渲染成 PNG 图片，每页一张，用来检查：文字有没有溢出文本框、对象有没有重叠或超出页面、"
+      + `对齐是否整齐、图表和表格是否清楚。一页用 slide；多页用 slides，一次最多 ${MAX_RENDER_SLIDES} 页，图片按给出的页码顺序返回。`,
     inputSchema: {
       type: "object",
       properties: {
         slide: { type: "integer", minimum: 1, description: "页码，从 1 开始" },
+        slides: {
+          type: "array", minItems: 1, maxItems: MAX_RENDER_SLIDES, uniqueItems: true,
+          items: { type: "integer", minimum: 1 }, description: `要渲染的多个页码，从 1 开始，最多 ${MAX_RENDER_SLIDES} 页`
+        },
         width: {
           type: "integer", minimum: RENDER_WIDTH.min, maximum: RENDER_WIDTH.max,
           description: `图片宽度（像素），默认 ${RENDER_WIDTH.default}；高度按页面比例`
         }
       },
-      required: ["slide"],
       additionalProperties: false
     }
   },
@@ -138,8 +145,8 @@ export const TOOLS: ToolDefinition[] = [
     name: "check_layout",
     description:
       "用测量的办法检查版面，不需要看图：文字放不下文本框、对象超出页面、对象互相重叠、内容只占页面上半部分。"
-      + "也提示文字与实际不透明底色对比过低、文字被后绘制面板覆盖的风险；这是保守诊断，仍须看实际渲染。只报告，不自动修改布局。"
-      + "每个问题带页码、对象 id 和说明，直接据此用 apply_edits 修改；没有问题时 issues 是空数组。",
+      + "也提示文字与实际不透明底色对比过低、文字被后绘制面板覆盖的风险；这是本地保守提示，不要求模型视觉检查或验收，不拦截保存或导出。只报告，不自动修改布局。"
+      + "每个问题带页码、对象 id 和说明，根据实际需要通过 apply_html 修改；没有问题时 issues 是空数组。",
     inputSchema: {
       type: "object",
       properties: { slides: { type: "array", items: { type: "integer", minimum: 1 }, minItems: 1, description: "只检查这些页；不写就检查全部" } },
@@ -298,7 +305,18 @@ export async function callTool(host: ToolHost, name: string, args: unknown): Pro
 
       case "render_slide": {
         if (!host.render) return failure("这个环境不能渲染图片");
-        if (!Number.isInteger(input.slide) || (input.slide as number) < 1) return failure("slide 必须是从 1 开始的页码");
+        let pages: number[];
+        if (input.slides !== undefined) {
+          if (input.slide !== undefined) return failure("slide 和 slides 只给一个：一页用 slide，多页用 slides");
+          const parsed = integerList(input.slides, "slides");
+          if (typeof parsed === "string") return failure(parsed);
+          if (parsed.length > MAX_RENDER_SLIDES) return failure(`slides 一次最多 ${MAX_RENDER_SLIDES} 页`);
+          if (new Set(parsed).size !== parsed.length) return failure("slides 里的页码不能重复");
+          pages = parsed;
+        } else {
+          if (!Number.isInteger(input.slide) || (input.slide as number) < 1) return failure("slide 必须是从 1 开始的页码；多页用 slides");
+          pages = [input.slide as number];
+        }
         let width = RENDER_WIDTH.default;
         if (input.width !== undefined) {
           if (!Number.isInteger(input.width) || (input.width as number) < RENDER_WIDTH.min || (input.width as number) > RENDER_WIDTH.max) {
@@ -306,14 +324,13 @@ export async function callTool(host: ToolHost, name: string, args: unknown): Pro
           }
           width = input.width as number;
         }
-        const png = await host.render(input.slide as number, { width });
-        return {
-          ok: true,
-          content: [
-            { type: "image", mimeType: "image/png", data: bytesToBase64(png) },
-            text(`第 ${input.slide} 页，宽 ${width} 像素`)
-          ]
-        };
+        const content: ToolContent[] = [];
+        for (const page of pages) {
+          const png = await host.render(page, { width });
+          content.push({ type: "image", mimeType: "image/png", data: bytesToBase64(png), meta: { slide: page } });
+        }
+        content.push(text(`第 ${pages.join("、")} 页，每页一张，宽 ${width} 像素`));
+        return { ok: true, content };
       }
 
       case "check_layout": {
