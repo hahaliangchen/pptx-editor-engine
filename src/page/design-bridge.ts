@@ -17,6 +17,8 @@ export interface DesignViewer {
 }
 export interface DesignBridgeOptions {
   mode?: "generation" | "template-authoring";
+  convertInlineSvg?: (svg: string) => Promise<{ viewBox: [number, number, number, number]; shapesXml: string }>;
+  resolveNativeAsset?: (path: string) => Promise<{ viewBox: [number, number, number, number]; shapesXml: string } | undefined>;
   /** Display these exact changes to the template author; never auto-approve model proposals. */
   confirmSemanticChanges?: (proposal: TemplateSemanticProposal) => Promise<boolean>;
 }
@@ -158,6 +160,38 @@ export class DesignBridge {
       const request: DesignRequest = name === "apply_html"
         ? { operation: "apply", design: before, expectedRevision: before.revision, html: a.html }
         : { operation: "pages", design: before, expectedRevision: before.revision, commands: a.commands };
+      if (request.html?.toLowerCase().includes("<svg")) {
+        const html = parseDesignHtml(request.html, true);
+        for (const svg of Array.from(html.querySelectorAll("svg"))) {
+          if (!this.options.convertInlineSvg) throw new Error("Inline SVG conversion is unavailable");
+          const clone = svg.cloneNode(true) as SVGElement;
+          // CSS layout and design metadata stay on the HTML image wrapper; the SVG
+          // artwork itself is sent as a standalone, inert vector document.
+          const paint = new Set(["color","stop-color","stop-opacity","fill","stroke","stroke-width","stroke-linecap","stroke-linejoin","opacity","fill-opacity","stroke-opacity"]);
+          const layout = new Set(["width","height","position","left","right","top","bottom","display","margin","margin-left","margin-right","margin-top","margin-bottom","flex","flex-shrink","flex-grow","align-self"]);
+          for (const el of [clone, ...Array.from(clone.querySelectorAll<SVGElement>("*"))]) {
+            const style = el.style;
+            for (const key of Array.from(style)) {
+              if (paint.has(key)) el.setAttribute(key, style.getPropertyValue(key));
+              else if (!(el === clone && layout.has(key))) throw new Error(`Unsupported inline SVG style: ${key}; use SVG presentation attributes`);
+            }
+            el.removeAttribute("style");
+            if (el !== clone && el.hasAttribute("class")) throw new Error("Inline SVG child classes must be converted to presentation attributes");
+          }
+          for (const attr of Array.from(clone.attributes)) if (attr.name === "class" || attr.name.startsWith("data-") || attr.name === "aria-label" || attr.name === "role") clone.removeAttribute(attr.name);
+          const source = new XMLSerializer().serializeToString(clone);
+          const native = await this.options.convertInlineSvg(source);
+          const encoded = btoa(Array.from(new TextEncoder().encode(source), b => String.fromCharCode(b)).join(""));
+          const preview = `data:image/svg+xml;base64,${encoded}`;
+          const img = html.createElement("img");
+          for (const attr of Array.from(svg.attributes)) if (["class", "style", "width", "height", "id", "title", "aria-label", "role"].includes(attr.name) || attr.name.startsWith("data-")) img.setAttribute(attr.name, attr.value);
+          if (img.dataset.kind && img.dataset.kind !== "image") throw new Error("Inline SVG must use data-kind=image");
+          img.dataset.kind = "image"; img.src = preview;
+          (request.nativeAssets ??= {})[preview] = native;
+          svg.replaceWith(img);
+        }
+        request.html = "<!doctype html>" + html.documentElement.outerHTML;
+      }
       if (request.html) {
         const pageId = parseDesignHtml(request.html).body.dataset.pageId;
         request.baselineHtml = pageId ? this.html.get(pageId) : undefined;
@@ -176,7 +210,11 @@ export class DesignBridge {
           const src = image.getAttribute("src") ?? "";
           if (!src.startsWith("project:")) continue;
           if (!this.resolveAsset) throw new Error("Project asset resolver is unavailable");
-          image.setAttribute("src", await this.resolveAsset(src.slice("project:".length)));
+          const path = src.slice("project:".length);
+          const preview = await this.resolveAsset(path);
+          const native = await this.options.resolveNativeAsset?.(path);
+          if (native) (request.nativeAssets ??= {})[preview] = native;
+          image.setAttribute("src", preview);
         }
         request.html = "<!doctype html>" + html.documentElement.outerHTML;
       }

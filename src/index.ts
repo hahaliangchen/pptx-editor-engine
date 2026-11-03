@@ -24,6 +24,8 @@ import { WorkerRenderer } from "./page/worker-renderer";
 
 export interface ViewerOptions {
   container: HTMLElement;
+  /** Display and navigation without editing interactions. */
+  readOnly?: boolean;
   width?: number; // CSS width
   height?: number; // CSS height
   fontBackendUrl?: string;
@@ -103,6 +105,13 @@ export default class PptViewer {
   /** "fit" follows the window; a number is a percentage where 100 is the slide's real size. */
   private zoomMode: "fit" | number = "fit";
   private zoomPercent = 100;
+  private resizeHandler = () => this.resizeAndRedraw();
+  private wheelTarget?: HTMLElement;
+  private wheelHandler = (event: WheelEvent) => {
+    if (!(event.ctrlKey || event.metaKey) || !this.presentation) return;
+    event.preventDefault();
+    this.setZoom(this.zoomPercent * Math.exp(-event.deltaY * 0.0015), { x: event.clientX, y: event.clientY });
+  };
 
   private get presentation(): PptVirtualDocument | null {
     return this.session.presentation;
@@ -154,6 +163,7 @@ export default class PptViewer {
 
     this.container.style.touchAction = "none";
     this.session = new DocumentSession({
+      readOnly: options.readOnly,
       container: this.container,
       view: {
         invalidate: slide => this.invalidateSlide(slide),
@@ -183,14 +193,11 @@ export default class PptViewer {
     });
 
     // Listen to resize to keep canvas crisp
-    window.addEventListener("resize", () => this.resizeAndRedraw());
+    window.addEventListener("resize", this.resizeHandler);
 
     // Ctrl + wheel (and trackpad pinch) zooms around the pointer; plain wheel scrolls the stage.
-    (this.container.parentElement ?? this.container).addEventListener("wheel", event => {
-      if (!(event.ctrlKey || event.metaKey) || !this.presentation) return;
-      event.preventDefault();
-      this.setZoom(this.zoomPercent * Math.exp(-event.deltaY * 0.0015), { x: event.clientX, y: event.clientY });
-    }, { passive: false });
+    this.wheelTarget = this.container.parentElement ?? this.container;
+    this.wheelTarget.addEventListener("wheel", this.wheelHandler, { passive: false });
   }
 
   private async initEngine() {
@@ -609,6 +616,8 @@ export default class PptViewer {
 
   /** Stop the render worker and release the editor. The viewer cannot be used afterwards. */
   public dispose(): void {
+    window.removeEventListener("resize", this.resizeHandler);
+    this.wheelTarget?.removeEventListener("wheel", this.wheelHandler);
     this.workerRenderer?.dispose();
     this.workerRenderer = null;
     this.session.dispose();

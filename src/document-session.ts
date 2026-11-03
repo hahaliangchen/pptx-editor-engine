@@ -53,6 +53,7 @@ export interface SessionView {
 export type ImageProbe = (bytes: Uint8Array, contentType: string, url: string) => Promise<{ width: number; height: number }>;
 
 export interface SessionOptions {
+  readOnly?: boolean;
   /** The editor mounts its overlay here (a real element in a browser, a detached one in Node). */
   container: HTMLElement;
   view: SessionView;
@@ -91,6 +92,7 @@ export class DocumentSession {
     this.view = options.view;
     this.probeImage = options.probeImage;
     this.editor = new SlideEditor({
+      readOnly: options.readOnly,
       container: options.container,
       getSlide: () => this.currentSlide(),
       getSlideSize: () => this.doc?.size || null,

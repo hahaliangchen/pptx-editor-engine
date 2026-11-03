@@ -35,6 +35,8 @@ import {
 import { normalizeParagraphs, paragraphsText, vdomTextModel } from "./text-model-vdom";
 
 export interface EditorHost {
+  /** Preview sessions must not attach editing input handlers. */
+  readOnly?: boolean;
   /** Element that wraps the canvas; the editor overlay is mounted inside it. */
   container: HTMLElement;
   getSlide(): Slide | null;
@@ -654,15 +656,20 @@ export class SlideEditor {
     container.appendChild(this.layer);
     this.toolbar = new FormatToolbar(this.layer, format => this.applyFormat(format));
 
-    container.addEventListener("pointerdown", e => this.onPointerDown(e));
-    container.addEventListener("pointermove", e => this.onPointerMove(e));
-    container.addEventListener("pointerup", e => this.onPointerUp(e));
-    container.addEventListener("pointercancel", e => this.onPointerUp(e));
-    container.addEventListener("pointerleave", () => this.setHover(null));
-    container.addEventListener("dblclick", e => this.onDoubleClick(e));
-    container.addEventListener("contextmenu", e => this.openMenu(e));
-    document.addEventListener("keydown", this.onDocumentKeyDown);
-    document.addEventListener("selectionchange", this.onDocumentSelectionChange);
+    if (!host.readOnly) {
+      container.addEventListener("pointerdown", e => this.onPointerDown(e));
+      container.addEventListener("pointermove", e => this.onPointerMove(e));
+      container.addEventListener("pointerup", e => this.onPointerUp(e));
+      container.addEventListener("pointercancel", e => this.onPointerUp(e));
+      container.addEventListener("pointerleave", () => this.setHover(null));
+      container.addEventListener("dblclick", e => this.onDoubleClick(e));
+      container.addEventListener("contextmenu", e => this.openMenu(e));
+      document.addEventListener("keydown", this.onDocumentKeyDown);
+      document.addEventListener("selectionchange", this.onDocumentSelectionChange);
+    } else {
+      this.layer.setAttribute("inert", "");
+      this.layer.setAttribute("aria-hidden", "true");
+    }
     this.history.subscribe(() => this.emit());
   }
 

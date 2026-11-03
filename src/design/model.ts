@@ -36,6 +36,8 @@ export interface DesignAppearance {
 }
 export interface DesignNode {
   id: string;
+  /** Host-provided conversion payload, consumed during materialization only. */
+  nativeArt?: { viewBox: [number, number, number, number]; shapesXml: string };
   kind: "group" | "shape" | "text" | "image" | "asset";
   name: string;
   purpose?: TemplatePurpose;

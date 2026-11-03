@@ -11,6 +11,8 @@ export interface DesignRequest {
   baselineHtml?: string;
   /** Host-issued exact, version-bound author confirmation; never an AI tool argument. */
   semanticAuthorization?: TemplateSemanticAuthorization;
+  /** Host-resolved assets, never accepted from model tool arguments. */
+  nativeAssets?: Record<string, { viewBox: [number, number, number, number]; shapesXml: string }>;
   expectedRevision?: number;
   commands?: Array<{ op: "addSlide"; after?: number } | { op: "duplicateSlide"; slide: number; after?: number } | { op: "deleteSlide"; slide: number } | { op: "moveSlide"; slide: number; to: number }>;
 }
@@ -48,7 +50,8 @@ export function createDesignConverter(runtime: DesignRuntime) {
         if (!before) return node;
         remap.set(node.id, before.id);
         // Source-backed appearance is fresh; HTML-inexpressible business fields survive both directions.
-        return { ...before, ...node, id: before.id, role: node.role, binding: node.binding,
+        const { nativeArt: _consumedNativeArt, ...previousNode } = before;
+        return { ...previousNode, ...node, id: before.id, role: node.role, binding: node.binding,
           ...(!increment ? { purpose: before.purpose, note: before.note } : {}),
           ...(!increment && !before.appearance.text?.frames ? { appearance: cloneDesign(before.appearance), origin: node.origin ? { ...node.origin, appearance: cloneDesign(before.appearance) } : undefined } : {}),
           required: before.required, constraints: before.constraints,
@@ -95,6 +98,13 @@ export function createDesignConverter(runtime: DesignRuntime) {
       };
       const merged = await mergeHtml(design, resolveAssets(request.html), request.baselineHtml ? resolveAssets(request.baselineHtml) : undefined, request.semanticAuthorization);
       if (merged.revision === design.revision) return merged;
+      for (const page of merged.pages) for (const node of page.nodes) {
+        const previous = design.pages.flatMap(p => p.nodes).find(n => n.id === node.id);
+        if ((node.kind === "image" || node.kind === "asset") && node.appearance.src && (!previous || previous.appearance.src !== node.appearance.src)) {
+          const native = request.nativeAssets?.[node.appearance.src];
+          if (native) node.nativeArt = native;
+        }
+      }
       return materializeDesign(merged);
     }
     if (request.operation === "pages") {

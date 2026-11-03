@@ -147,6 +147,30 @@ export async function exportDesignBytes(design: DesignDocument, identities?: Map
     const emit = async (node: DesignNode, parent: Element, parentChanged = false, children?: DesignNode[]): Promise<void> => {
       if (node.metadata?.backdrop) return;
       const sourceId = node.origin?.shapeId ?? node.metadata?.sourceShapeId;
+      if (node.nativeArt) {
+        const {viewBox, shapesXml} = node.nativeArt;
+        if (viewBox.length !== 4 || !viewBox.every(Number.isFinite) || viewBox[2] <= 0 || viewBox[3] <= 0 || shapesXml.length > 4 * 1024 * 1024) throw new Error("Invalid native SVG geometry");
+        const wrapper = parse(`<root xmlns:a="${A}" xmlns:p="${P}">${shapesXml}</root>`);
+        if (wrapper.getElementsByTagName("parsererror").length || !wrapper.documentElement.children.length || Array.from(wrapper.documentElement.children).some(el => el.namespaceURI !== P || el.localName !== "sp")) throw new Error("Invalid native SVG shapes");
+        for (const el of Array.from(wrapper.getElementsByTagName("*"))) {
+          if (el === wrapper.documentElement) continue;
+          if (el.namespaceURI !== P && el.namespaceURI !== A) throw new Error("Invalid native SVG namespace");
+          if (["pic", "graphicFrame", "hlinkClick", "hlinkMouseOver", "blip", "extLst"].includes(el.localName)) throw new Error("Unsupported native SVG content");
+        }
+        const sourceId = node.origin?.shapeId ?? node.metadata?.sourceShapeId;
+        const id = sourceId ? String(sourceId) : String(++serial);
+        if (sourceId) owners.get(id)?.remove();
+        const t = transform(parent), r = node.appearance.rect;
+        const group = fragment(`<p:grpSp><p:nvGrpSpPr><p:cNvPr id="${id}" name="${x(node.name)}"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x="${Math.round((r.x-t.ox)/t.sx)}" y="${Math.round((r.y-t.oy)/t.sy)}"/><a:ext cx="${Math.max(1,Math.round(r.w/t.sx))}" cy="${Math.max(1,Math.round(r.h/t.sy))}"/><a:chOff x="${Math.round(viewBox[0]*9525)}" y="${Math.round(viewBox[1]*9525)}"/><a:chExt cx="${Math.max(1,Math.round(viewBox[2]*9525))}" cy="${Math.max(1,Math.round(viewBox[3]*9525))}"/></a:xfrm></p:grpSpPr></p:grpSp>`);
+        for (const shape of Array.from(wrapper.documentElement.children)) {
+          for (const props of all(shape, "cNvPr")) props.setAttribute("id", String(++serial));
+          group.appendChild(group.ownerDocument.importNode(shape, true));
+        }
+        parent.appendChild(group);
+        identities?.set(`${page.part}#${id}`, node.id);
+        record.nodes[id] = {purpose: node.purpose ?? defaultPurpose(node), ...(node.note ? {note:node.note} : {}), name:node.name};
+        return;
+      }
       if (node.appearance.text?.frames) {
         const a = node.appearance, text = a.text!;
         // Keep the source object's identity (including animation references) on
