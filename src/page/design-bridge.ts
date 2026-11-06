@@ -1,4 +1,4 @@
-import { describeLayout, fillLayout } from "../design/layout-fill";
+import { describeLayout, fillLayout, layoutIssues } from "../design/layout-fill";
 import { templateSemanticPermissionError, templateSemanticProposal, type TemplateSemanticProposal, type TemplateSemanticEdit } from "../design/template-semantics";
 import { effectivePurpose, effectiveLock } from "../design/template-policy";
 import { nodeText } from "../design/model";
@@ -129,6 +129,56 @@ export class DesignBridge {
       return this.execute("apply_html", {expected_revision:design.revision,html:"<!doctype html>"+html.documentElement.outerHTML}, true);
     } catch(error) { return {ok:false,content:[{type:"text",text:error instanceof Error?error.message:String(error)}]}; }
   }
+  /** Human author form operation: wrap sibling objects in a new group, the block a layout-fill page repeats, and give it its slot. */
+  async groupTemplateNodes(page: number, nodeIds: string[], slot?: string): Promise<ToolResult> {
+    try {
+      if (this.options.mode !== "template-authoring") throw new Error("TEMPLATE_PERMISSION: not a template authoring editor");
+      if (this.running) throw new Error("Design conversion is already running");
+      const design = await this.current(), selected = design.pages[page - 1];
+      if (!selected) throw new Error("Invalid page number");
+      if (nodeIds.length < 2) throw new Error("选择两个以上的元素再组成块");
+      const html = parseDesignHtml(this.html.get(selected.id)!);
+      const byId = new Map(Array.from(html.querySelectorAll<HTMLElement>("[data-id]")).map(n => [n.dataset.id!, n]));
+      const members = nodeIds.map(id => { const el = byId.get(id); if (!el) throw new Error(`Unknown template node: ${id}`); return el; });
+      const parent = members[0].parentElement!;
+      if (members.some(el => el.parentElement !== parent)) throw new Error("只能把同一层的元素组成块：先选中同一个组合里的元素");
+      if (members.some(el => el.dataset.locked || el.dataset.purpose === "fixed")) throw new Error("固定元素不能组成块：块里的元素生成时会被复制和移动");
+      const px = (el: HTMLElement, key: "left" | "top" | "width" | "height") => parseFloat(el.style[key]) || 0;
+      const left = Math.min(...members.map(el => px(el, "left"))), top = Math.min(...members.map(el => px(el, "top")));
+      const right = Math.max(...members.map(el => px(el, "left") + px(el, "width"))), bottom = Math.max(...members.map(el => px(el, "top") + px(el, "height")));
+      const group = html.createElement("div");
+      // New objects are named after their id: keep the names the author sees, unique on the page.
+      const replaced = new Set(members.flatMap(el => [el, ...Array.from(el.querySelectorAll<HTMLElement>("[data-id]"))]).map(el => el.dataset.id!));
+      const taken = new Set([...byId.keys(), ...selected.nodes.filter(n => !replaced.has(n.id)).map(n => n.name)]);
+      const fresh = (name: string) => { let id = `new:${name}`; for (let n = 2; taken.has(id); n++) id = `new:${name}-${n}`; taken.add(id); return id; };
+      group.dataset.id = fresh(slot?.replace(/#\d+$/, "") || "块"); group.dataset.kind = "group";
+      group.setAttribute("style", `position:absolute;left:${left}px;top:${top}px;width:${right - left}px;height:${bottom - top}px`);
+      // Paint order: the block sits where its lowest member was, members keep their own order. Group membership of
+      // existing objects never changes, so the members are rebuilt inside the block and keep their annotations below.
+      const ordered = Array.from(parent.children).filter(el => members.includes(el as HTMLElement)) as HTMLElement[];
+      parent.insertBefore(group, ordered[0]);
+      const kept = new Map<string, Pick<TemplateSemanticEdit, "purpose" | "note" | "slot">>();
+      for (const el of ordered) {
+        el.style.left = `${px(el, "left") - left}px`; el.style.top = `${px(el, "top") - top}px`;
+        for (const node of [el, ...Array.from(el.querySelectorAll<HTMLElement>("[data-id]"))]) {
+          node.dataset.id = fresh((node.dataset.name || node.dataset.id!).replace(/^new:/, ""));
+          if (node.dataset.note || node.dataset.slot || node.dataset.purpose === "reference") kept.set(node.dataset.id, { purpose: node.dataset.purpose as TemplateSemanticEdit["purpose"], note: node.dataset.note, slot: node.dataset.slot });
+          for (const attr of ["data-purpose", "data-note", "data-slot"]) node.removeAttribute(attr);
+        }
+        group.appendChild(el);
+      }
+      const before = new Set(selected.nodes.map(n => n.id));
+      const grouped = await this.execute("apply_html", { expected_revision: design.revision, html: "<!doctype html>" + html.documentElement.outerHTML }, true);
+      if (!grouped.ok) return grouped;
+      const created = (await this.current()).pages[page - 1].nodes.filter(n => !before.has(n.id));
+      const named = (id: string) => created.find(n => n.name === id);
+      const block = named(group.dataset.id);
+      if (!block) throw new Error("组合已创建，但没有找到新块；请选中它后再设置块标记");
+      const edits: TemplateSemanticEdit[] = Array.from(kept).flatMap(([id, value]) => { const node = named(id); return node ? [{ nodeId: node.id, purpose: value.purpose ?? "content", note: value.note, slot: value.slot }] : []; });
+      if (slot) edits.unshift({ nodeId: block.id, purpose: "content", slot });
+      return edits.length ? this.updateTemplateSemantics(page, edits) : grouped;
+    } catch(error) { return {ok:false,content:[{type:"text",text:error instanceof Error?error.message:String(error)}]}; }
+  }
   async run(name: string, args: any): Promise<ToolResult> { return this.execute(name,args); }
   private async execute(name: string, args: any, humanForm = false, nested = false): Promise<ToolResult> {
     if (this.running && !nested) return { ok: false, content: [{ type: "text", text: "Design conversion is already running" }] };
@@ -158,7 +208,7 @@ export class DesignBridge {
         // Template authoring edits the page itself and always reads all of it.
         if (page.semantics?.fill === "layout" && a.html !== true && this.options.mode !== "template-authoring") return this.result({ ...identity, page: a.page, pageId: page.id, semantics: page.semantics, semanticsDefined: true,
           layoutFill: "按版式填充页：用 get_layout 读取块与字段，用 fill_layout 提交内容。确需整页 HTML 时传 html: true。" });
-        return this.result({ ...identity, page: a.page, pageId: page.id, semantics: page.semantics ?? {}, semanticsDefined:page.semantics!==undefined, nodes: page.nodes.map(n => ({id:n.id, shapeId:n.origin?.shapeId ?? n.metadata?.sourceShapeId, name:n.name, purpose:effectivePurpose(page,n), note:n.note, locked:effectiveLock(page,n)})), assets: page.nodes.filter(n => n.appearance.src).map(n => ({ id: n.id, name: n.name, src: `design-asset:${encodeURIComponent(n.id)}`, locked: effectiveLock(page,n), purpose: effectivePurpose(page,n), note:n.note })), html: this.html.get(page.id) });
+        return this.result({ ...identity, page: a.page, pageId: page.id, semantics: page.semantics ?? {}, semanticsDefined:page.semantics!==undefined, nodes: page.nodes.map(n => ({id:n.id, shapeId:n.origin?.shapeId ?? n.metadata?.sourceShapeId, name:n.name, kind:n.kind, parentId:n.parentId, purpose:effectivePurpose(page,n), note:n.note, slot:n.slot, locked:effectiveLock(page,n)})), ...(page.semantics?.fill === "layout" ? { layoutIssues: layoutIssues(this.html.get(page.id)!) } : {}), assets: page.nodes.filter(n => n.appearance.src).map(n => ({ id: n.id, name: n.name, src: `design-asset:${encodeURIComponent(n.id)}`, locked: effectiveLock(page,n), purpose: effectivePurpose(page,n), note:n.note })), html: this.html.get(page.id) });
       }
       if (name === "get_layout" || name === "fill_layout") {
         const design = await this.current(), page = design.pages[a.page - 1];

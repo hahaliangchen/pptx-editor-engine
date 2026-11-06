@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { describeLayout, fillLayout } from "../src/design/layout-fill";
+import { describeLayout, fillLayout, layoutIssues } from "../src/design/layout-fill";
 
 const P = (t: string, color = "#333333") => `<p data-paragraph="true" style="font-size:13px"><span style="font-size:13px;color:${color}">${t}</span></p>`;
 const bullet = (t: string) => `<p data-paragraph="true" style="font-size:12px"><span style="color:#E60012;font-size:9px">■</span><span style="font-size:12px;color:#333333"> ${t}</span></p>`;
@@ -57,6 +57,21 @@ describe("layout fill", () => {
     expect([art.style.left, art.style.width]).toEqual(["12px", "22px"]);
     expect(d.querySelector('[data-id="tile1"]')).not.toBeNull();
     expect(d.querySelector('[data-id="card3"]')).toBeNull();
+  });
+
+  it("takes an icon slot marked on a single dashed shape as its own ring", () => {
+    const single = row.replace(/<div data-id="ico1"[\s\S]*?<\/div>\s*<\/div>/, '<div data-id="ico1" data-kind="shape" data-name="i1" data-purpose="content" data-slot="icon" style="position:absolute;left:10px;top:37px;width:46px;height:46px;border:2px dashed #E60012"></div>');
+    const icon = doc(fillLayout(single, { sets: [{ set: "要点卡#1", items: [{ icons: { icon: svg } }] }] }).html).querySelector('[data-id="card1"] svg')!;
+    expect([icon.getAttribute("style"), icon.querySelector("path")!.getAttribute("stroke")]).toEqual(["position:absolute;left:10px;top:37px;width:46px;height:46px", "#E60012"]);
+  });
+
+  it("reports what keeps a layout page from being filled", () => {
+    expect(layoutIssues(row)).toEqual([]);
+    const messages = (html: string) => layoutIssues(html).map(i => i.message).join("\n");
+    expect(layoutIssues(page(""))).toMatchObject([{ severity: "info", message: expect.stringMatching(/没有块/) }]);
+    expect(messages(row.replace('data-slot="text"', ""))).toMatch(/没有字段名/);
+    expect(messages(row.replace('data-id="bg1" data-kind="shape" data-name="bg1" data-purpose="content"', '$& data-slot="卡#2"'))).toMatch(/块必须是组合/);
+    expect(messages(row.replace('data-slot="sep#1" style="position:absolute;left:353px', 'data-slot="sep#3" style="position:absolute;left:353px'))).toMatch(/没有组号为 3 的块/);
   });
 
   it("paints an icon in its placeholder ring's color, white on a red tile", () => {

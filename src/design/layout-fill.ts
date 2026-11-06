@@ -71,6 +71,37 @@ export function describeLayout(html: string): LayoutSummary {
   return { texts, sets: describe(null) };
 }
 
+export interface LayoutIssue { severity: "error" | "warning" | "info"; ids: string[]; message: string }
+
+/** What keeps a layout-fill page from being filled: blocks that are not groups, sets split across containers,
+ * separators without their set, and texts the AI cannot reach because they have no field name. */
+export function layoutIssues(html: string): LayoutIssue[] {
+  const doc = parseDesignHtml(html), issues: LayoutIssue[] = [];
+  const id = (el: Element) => (el as HTMLElement).dataset.id ?? "";
+  const slotted = Array.from(doc.body.querySelectorAll<HTMLElement>("[data-slot]"));
+  for (const el of slotted) if (BLOCK.test(slotOf(el)) && !slotOf(el).startsWith("sep#") && el.dataset.kind !== "group")
+    issues.push({ severity: "error", ids: [id(el)], message: `「${slotOf(el)}」是块标记，块必须是组合：先把这一条的元素组成块` });
+  const sets = new Map<string, Element[]>();
+  for (const el of slotted.filter(isBlock)) sets.set(`${slotOf(el)}@${id(blockOf(el) ?? doc.body)}`, [...(sets.get(`${slotOf(el)}@${id(blockOf(el) ?? doc.body)}`) ?? []), el]);
+  if (!sets.size) issues.push({ severity: "info", ids: [], message: "本页没有块，生成时只替换文字；条目数量要随内容增减时，把每一条的元素组成块并标为「块名#组号」" });
+  for (const [key, instances] of sets) {
+    const slot = key.replace(/@.*$/, "");
+    if (new Set(instances.map(el => el.parentElement)).size > 1) issues.push({ severity: "error", ids: instances.map(id), message: `「${slot}」的块不在同一个组合里，同组号的块要是兄弟元素` });
+    const names = instances.map(block => fieldsIn(block).map(slotOf).sort().join("|"));
+    if (new Set(names).size > 1) issues.push({ severity: "warning", ids: instances.map(id), message: `「${slot}」各块的字段名不一致，增加的块按第一块复制` });
+  }
+  const setNumbers = new Set(slotted.filter(isBlock).map(el => `${slotOf(el).replace(BLOCK, "$2")}@${id(el.parentElement!)}`));
+  for (const el of slotted.filter(el => slotOf(el).startsWith("sep#")))
+    if (!setNumbers.has(`${slotOf(el).slice(4)}@${id(el.parentElement!)}`)) issues.push({ severity: "warning", ids: [id(el)], message: `分隔「${slotOf(el)}」旁边没有组号为 ${slotOf(el).slice(4)} 的块` });
+  for (const el of Array.from(doc.body.querySelectorAll<HTMLElement>('[data-kind="text"]'))) {
+    const block = blockOf(el);
+    // One or two characters (», ■, ①) are the block's decoration and are copied with it.
+    if (block && !el.dataset.slot && el.dataset.purpose === "content" && (el.textContent ?? "").trim().length > 2) issues.push({ severity: "warning", ids: [id(el)], message: `块「${slotOf(block)}」里的这段文字没有字段名，生成时填不到` });
+    if (!block && el.dataset.slot && !BLOCK.test(el.dataset.slot)) issues.push({ severity: "warning", ids: [id(el)], message: `字段「${el.dataset.slot}」不在任何块里；页面上的单独文字不需要字段名` });
+  }
+  return issues;
+}
+
 /** Keep a leading list marker run ("■", "1.") and put the new words in the run after it. */
 function setParagraph(p: Element, text: string): void {
   const runs = Array.from(p.querySelectorAll("span"));
@@ -207,7 +238,8 @@ function tint(art: Element, color: string): void {
  * The ring's color is the one the author chose for this tile (red on light, white on red), so the icon takes it.
  */
 function fillIcon(group: Element, svg: string): void {
-  const shapes = Array.from(group.children).filter(c => (c as HTMLElement).dataset.kind === "shape") as HTMLElement[];
+  // A single marked shape is its own ring.
+  const shapes = (group as HTMLElement).dataset.kind !== "group" ? [group as HTMLElement] : Array.from(group.children).filter(c => (c as HTMLElement).dataset.kind === "shape") as HTMLElement[];
   const dashed = shapes.find(s => /dashed|dotted/.test(s.style.border + s.style.borderStyle));
   const ring = dashed ?? shapes[shapes.length - 1];
   const box = ring ? rectOf(ring) : { x: 0, y: 0, w: px(group as HTMLElement, "width"), h: px(group as HTMLElement, "height") };
