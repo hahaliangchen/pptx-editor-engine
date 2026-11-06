@@ -1,5 +1,6 @@
 import { effectiveLock, effectivePurpose } from "./template-policy";
 import { assertDesign, DesignDocument, DesignNode, DesignRun } from "./model";
+import { paintCss } from "./paint";
 
 export const escapeHtml = (value: string): string => value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 const cssNumber = (n: number) => String(Math.round(n * 1000) / 1000);
@@ -19,14 +20,13 @@ export function projectPage(document: DesignDocument, pageId: string): string {
     const a = node.appearance, r = a.rect;
     const parentRect = node.parentId ? byId.get(node.parentId)!.appearance.rect : { x: 0, y: 0 };
     const properties = [`position:absolute`, `left:${cssNumber(r.x - parentRect.x)}px`, `top:${cssNumber(r.y - parentRect.y)}px`, `width:${cssNumber(r.w)}px`, `height:${cssNumber(r.h)}px`];
-    if (a.fill) properties.push(`background-color:${a.fill}`);
-    if (a.border) properties.push(`border:${cssNumber(a.border.width)}px solid ${a.border.color}`);
-    if (a.radius !== undefined) properties.push(`border-radius:${cssNumber(a.radius)}px`);
+    properties.push(...paintCss(a, cssNumber));
     const lock = effectiveLock(page, node);
     const data = `data-id="${escapeHtml(node.id)}" data-kind="${node.kind}" data-name="${escapeHtml(node.name)}"`
       + (lock ? ` data-locked="${lock}"` : "")
       + ` data-purpose="${effectivePurpose(page, node)}"`
       + (node.note ? ` data-note="${escapeHtml(node.note)}"` : "")
+      + (node.slot ? ` data-slot="${escapeHtml(node.slot)}"` : "")
       + (node.role ? ` data-role="${escapeHtml(node.role)}"` : "")
       + (node.binding !== undefined ? ` data-bind="${escapeHtml(JSON.stringify(node.binding))}"` : "")
       + (node.required ? ` data-required="true"` : "")
@@ -40,5 +40,5 @@ export function projectPage(document: DesignDocument, pageId: string): string {
     }
     return `<div ${data} style="${escapeHtml(properties.join(";"))}">${content}</div>`;
   };
-  return `<!doctype html><html><head><meta charset="utf-8"><style>*{box-sizing:border-box}html,body{margin:0;width:1280px;height:720px}body{position:relative;background:${escapeHtml(page.background ?? "#ffffff")}}p{margin:0;flex-shrink:0}img{object-fit:fill}</style></head><body data-page-id="${escapeHtml(page.id)}" data-source-hash="${document.source.sha256}" data-design-revision="${document.revision}"${page.semantics?.role ? ` data-page-role="${escapeHtml(page.semantics.role)}"` : ""}${page.semantics?.layoutName ? ` data-layout-name="${escapeHtml(page.semantics.layoutName)}"` : ""}${page.semantics?.note ? ` data-page-note="${escapeHtml(page.semantics.note)}"` : ""}>${page.nodes.filter(n => !n.parentId).map(project).join("\n")}</body></html>`;
+  return `<!doctype html><html><head><meta charset="utf-8"><style>*{box-sizing:border-box}html,body{margin:0;width:1280px;height:720px}body{position:relative;background:${escapeHtml(page.background ?? "#ffffff")}}p{margin:0;flex-shrink:0}img{object-fit:fill}</style></head><body data-page-id="${escapeHtml(page.id)}" data-source-hash="${document.source.sha256}" data-design-revision="${document.revision}"${page.semantics?.role ? ` data-page-role="${escapeHtml(page.semantics.role)}"` : ""}${page.semantics?.layoutName ? ` data-layout-name="${escapeHtml(page.semantics.layoutName)}"` : ""}${page.semantics?.note ? ` data-page-note="${escapeHtml(page.semantics.note)}"` : ""}${page.semantics?.fill ? ` data-page-fill="${page.semantics.fill}"` : ""}>${page.nodes.filter(n => !n.parentId).map(project).join("\n")}</body></html>`;
 }

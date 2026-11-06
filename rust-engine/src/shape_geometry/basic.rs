@@ -1,4 +1,4 @@
-use super::helpers::{adjustment, polygon, rounded_rect, snipped_rect};
+use super::helpers::{adjustment, polygon, rounded_rect, same_side_rounded_rect, snipped_rect};
 use crate::ast::ShapeElement;
 use web_sys::CanvasRenderingContext2d;
 
@@ -75,7 +75,16 @@ pub fn draw(
                 ],
             );
         }
-        "round1Rect" | "round2SameRect" | "round2DiagRect" => rounded_rect(ctx, x, y, w, h, 0.16),
+        "round2SameRect" => same_side_rounded_rect(
+            ctx,
+            x,
+            y,
+            w,
+            h,
+            adjustment(shp, "adj1", 0.16667),
+            adjustment(shp, "adj2", 0.0),
+        ),
+        "round1Rect" | "round2DiagRect" => rounded_rect(ctx, x, y, w, h, 0.16),
         "snipRoundRect" | "snip1Rect" | "snip2SameRect" | "snip2DiagRect" => {
             snipped_rect(ctx, x, y, w, h, 0.16)
         }

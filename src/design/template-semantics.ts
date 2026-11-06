@@ -1,6 +1,6 @@
 import { cloneDesign, type DesignDocument } from "./model";
 import { assertDesignHtmlIdentity, parseDesignHtml } from "./html-document";
-import type { TemplatePurpose } from "./template-policy";
+import type { TemplatePageFill, TemplatePurpose } from "./template-policy";
 
 export interface TemplateSemanticChange {
   nodeId?: string;
@@ -10,9 +10,9 @@ export interface TemplateSemanticChange {
 }
 export interface TemplateSemanticProposal { sourceHash: string; revision: number; pageId: string; changes: TemplateSemanticChange[] }
 export interface TemplateSemanticAuthorization extends TemplateSemanticProposal { mode: "template-authoring" }
-export interface TemplateSemanticEdit { nodeId?: string; purpose?: TemplatePurpose; note?: string; role?: string; layoutName?: string }
-const nodeFields = { purpose: "data-purpose", note: "data-note" };
-const pageFields = { role: "data-page-role", layoutName: "data-layout-name", note: "data-page-note" };
+export interface TemplateSemanticEdit { nodeId?: string; purpose?: TemplatePurpose; note?: string; slot?: string; role?: string; layoutName?: string; fill?: TemplatePageFill }
+const nodeFields = { purpose: "data-purpose", note: "data-note", slot: "data-slot" };
+const pageFields = { role: "data-page-role", layoutName: "data-layout-name", note: "data-page-note", fill: "data-page-fill" };
 const values = (el: Element, fields: Record<string,string>): Record<string,string|undefined> => Object.fromEntries(Object.entries(fields).map(([key,attr])=>[key,el.getAttribute(attr) || undefined]));
 const equal = (a: unknown,b: unknown) => JSON.stringify(a) === JSON.stringify(b);
 interface ReadonlyHtmlChange { nodeId: string; name: string; attribute: string; original: string | null; submitted: string | null }
@@ -30,11 +30,12 @@ export function templateSemanticProposal(design: DesignDocument, baselineHtml: s
   const changes: TemplateSemanticChange[] = [];
   const readonlyChanges: ReadonlyHtmlChange[] = [];
   const before = values(baseline.body,pageFields), after = values(edited.body,pageFields);
+  if (after.fill && !["layout","free"].includes(after.fill)) throw new Error(`Invalid data-page-fill: ${after.fill}; use layout or free`);
   if (!equal(before,after)) changes.push({name:pageId,before,after});
   const byId = new Map(Array.from(baseline.querySelectorAll<HTMLElement>("[data-id]")).map(n=>[n.dataset.id!,n]));
   for (const el of Array.from(edited.querySelectorAll<HTMLElement>("[data-kind]"))) {
     const old = byId.get(el.dataset.id!);
-    if (!old) { if (el.dataset.purpose && el.dataset.purpose !== "content" || el.dataset.note) throw new Error("New AI nodes use content purpose; annotate them after creation"); continue; }
+    if (!old) { if (el.dataset.purpose && el.dataset.purpose !== "content" || el.dataset.note || el.dataset.slot) throw new Error("New AI nodes use content purpose; annotate them after creation"); continue; }
     for (const attr of ["data-locked","data-bind","data-required","data-max-chars","data-role","data-name"]) if (old.getAttribute(attr) !== el.getAttribute(attr)) readonlyChanges.push({nodeId:el.dataset.id!,name:page.nodes.find(n=>n.id===el.dataset.id)?.name ?? el.dataset.id!,attribute:attr,original:old.getAttribute(attr),submitted:el.getAttribute(attr)});
     const before = values(old,nodeFields), after = values(el,nodeFields);
     if (!equal(before,after)) {
@@ -56,7 +57,7 @@ export function prepareTemplateSemantics(design: DesignDocument, baselineHtml: s
     if (change.nodeId) {
       const node = page.nodes.find(n=>n.id===change.nodeId)!;
       if (node.metadata?.backdrop || node.hidden) throw new Error(`Unsupported/master object cannot be unlocked here: ${node.id}`);
-      node.purpose = change.after.purpose as TemplatePurpose; node.note = change.after.note;
+      node.purpose = change.after.purpose as TemplatePurpose; node.note = change.after.note; node.slot = change.after.slot;
     } else page.semantics = {...change.after};
   }
   return {design:next,proposal};

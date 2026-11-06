@@ -2,6 +2,7 @@ import JSZip from "jszip";
 import { writeTemplateRecord, readTemplateRecord, defaultPurpose, type TemplateRecord } from "./template-policy";
 import { base64ToBytes, sha256Hex } from "./bytes";
 import { assertDesign, DesignDocument, DesignNode, DesignText, sameAppearance } from "./model";
+import { colorXml, effectXml, fillXml, geometryXml, lineXml } from "./paint";
 
 const A = "http://schemas.openxmlformats.org/drawingml/2006/main";
 const P = "http://schemas.openxmlformats.org/presentationml/2006/main";
@@ -25,18 +26,18 @@ function replaceChild(parent: Element, name: string, replacement: Element): void
   if (old) parent.replaceChild(parent.ownerDocument.importNode(replacement, true), old);
   else parent.appendChild(parent.ownerDocument.importNode(replacement, true));
 }
-function colorXml(color: string): string {
-  let hex = color.replace(/^#/, ""), alpha = 1;
-  if (hex.length === 3) hex = hex.split("").map(c => c + c).join("");
-  const rgb = color.match(/^rgba?\(\s*([\d.]+)[, ]+([\d.]+)[, ]+([\d.]+)(?:\s*[,/]\s*([\d.]+))?\s*\)$/);
-  if (rgb) { hex = rgb.slice(1, 4).map(n => Math.round(Number(n)).toString(16).padStart(2, "0")).join(""); alpha = rgb[4] === undefined ? 1 : Number(rgb[4]); }
-  if (hex.length === 8) { alpha = parseInt(hex.slice(6), 16) / 255; hex = hex.slice(0, 6); }
-  if (!/^[0-9a-f]{6}$/i.test(hex)) throw new Error(`Unsupported color: ${color}`);
-  return `<a:srgbClr val="${hex.toUpperCase()}">${alpha < 1 ? `<a:alpha val="${Math.round(alpha * 100000)}"/>` : ""}</a:srgbClr>`;
+/** Insert a spPr child at its schema position: xfrm, geometry, fill, ln, effects, then everything else. */
+const SP_PR_ORDER = ["xfrm", "custGeom", "prstGeom", "noFill", "solidFill", "gradFill", "blipFill", "pattFill", "grpFill", "ln", "effectLst", "effectDag"];
+function placeSpPr(props: Element, names: string[], xml: string): void {
+  for (const child of Array.from(props.children)) if (names.includes(child.localName)) child.remove();
+  const node = props.ownerDocument.importNode(fragment(xml), true) as Element, rank = SP_PR_ORDER.indexOf(node.localName);
+  const before = Array.from(props.children).find(n => { const r = SP_PR_ORDER.indexOf(n.localName); return r < 0 || r > rank; });
+  props.insertBefore(node, before ?? null);
 }
+const FILLS = ["noFill", "solidFill", "gradFill", "blipFill", "pattFill", "grpFill"];
 function setFill(parent: Element, fill?: string): void {
-  for (const child of Array.from(parent.children)) if (["noFill", "solidFill", "gradFill", "blipFill", "pattFill", "grpFill"].includes(child.localName)) child.remove();
-  const paint = fragment(fill && fill !== "transparent" ? `<a:solidFill>${colorXml(fill)}</a:solidFill>` : "<a:noFill/>");
+  for (const child of Array.from(parent.children)) if (FILLS.includes(child.localName)) child.remove();
+  const paint = fragment(fillXml({ fill }));
   const before = Array.from(parent.children).find(n => ["ln", "effectLst", "effectDag", "scene3d", "sp3d", "latin", "ea", "cs", "sym", "hlinkClick", "hlinkMouseOver", "extLst"].includes(n.localName));
   parent.insertBefore(parent.ownerDocument.importNode(paint, true), before ?? null);
 }
@@ -162,13 +163,20 @@ export async function exportDesignBytes(design: DesignDocument, identities?: Map
         if (sourceId) owners.get(id)?.remove();
         const t = transform(parent), r = node.appearance.rect;
         const group = fragment(`<p:grpSp><p:nvGrpSpPr><p:cNvPr id="${id}" name="${x(node.name)}"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x="${Math.round((r.x-t.ox)/t.sx)}" y="${Math.round((r.y-t.oy)/t.sy)}"/><a:ext cx="${Math.max(1,Math.round(r.w/t.sx))}" cy="${Math.max(1,Math.round(r.h/t.sy))}"/><a:chOff x="${Math.round(viewBox[0]*9525)}" y="${Math.round(viewBox[1]*9525)}"/><a:chExt cx="${Math.max(1,Math.round(viewBox[2]*9525))}" cy="${Math.max(1,Math.round(viewBox[3]*9525))}"/></a:xfrm></p:grpSpPr></p:grpSp>`);
+        // The art's own shapes are the node's content, never brand assets: record them with the node's purpose,
+        // or reading the deck back would give them the conservative asset default and lock what the AI drew.
+        const purpose = node.purpose ?? defaultPurpose(node);
         for (const shape of Array.from(wrapper.documentElement.children)) {
-          for (const props of all(shape, "cNvPr")) props.setAttribute("id", String(++serial));
+          for (const props of all(shape, "cNvPr")) {
+            const childId = String(++serial);
+            props.setAttribute("id", childId);
+            record.nodes[childId] = { purpose, name: props.getAttribute("name") ?? "" };
+          }
           group.appendChild(group.ownerDocument.importNode(shape, true));
         }
         parent.appendChild(group);
         identities?.set(`${page.part}#${id}`, node.id);
-        record.nodes[id] = {purpose: node.purpose ?? defaultPurpose(node), ...(node.note ? {note:node.note} : {}), name:node.name};
+        record.nodes[id] = {purpose: node.purpose ?? defaultPurpose(node), ...(node.note ? {note:node.note} : {}), ...(node.slot ? {slot:node.slot} : {}), name:node.name};
         return;
       }
       if (node.appearance.text?.frames) {
@@ -181,8 +189,9 @@ export async function exportDesignBytes(design: DesignDocument, identities?: Map
           owners.set(String(sourceId), fragment(`<p:grpSp><p:nvGrpSpPr><p:cNvPr id="${sourceId}" name="${x(node.name)}"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/></p:grpSp>`));
         }
         const parts: DesignNode[] = [];
-        if (a.fill || a.border || a.radius) parts.push({id:`${node.id}:paint`,kind:"shape",name:`${node.name} background`,purpose:node.purpose,
-          appearance:{rect:a.rect,fill:a.fill,border:a.border,radius:a.radius}});
+        const {text: _text, ...paint} = a;
+        if (a.fill || a.gradient || a.border || a.radius || a.corners || a.shadow) parts.push({id:`${node.id}:paint`,kind:"shape",name:`${node.name} background`,purpose:node.purpose,
+          appearance:paint});
         text.frames!.forEach((frame,i) => parts.push({id:`${node.id}:paragraph:${i}`,kind:"text",name:`${node.name} paragraph ${i+1}`,purpose:node.purpose,
           appearance:{rect:frame.rect,text:{paragraphs:[{...text.paragraphs[i],before:0,after:0}],padding:frame.padding,verticalAlign:"top"}}}));
         await emit({...node,kind:"group",appearance:{rect:a.rect}},parent,true,parts);
@@ -208,7 +217,7 @@ export async function exportDesignBytes(design: DesignDocument, identities?: Map
       const physicalId = all(owner, "cNvPr")[0]?.getAttribute("id");
       if (physicalId) {
         identities?.set(`${page.part}#${physicalId}`, node.id);
-        record.nodes[physicalId] = { purpose: node.purpose ?? defaultPurpose(node), ...(node.note ? { note: node.note } : {}), name: node.name };
+        record.nodes[physicalId] = { purpose: node.purpose ?? defaultPurpose(node), ...(node.note ? { note: node.note } : {}), ...(node.slot ? { slot: node.slot } : {}), name: node.name };
       }
       if (node.kind === "group") {
         const changedGroup = fresh || parentChanged || !sameAppearance(node.origin?.appearance.rect, node.appearance.rect);
@@ -231,12 +240,12 @@ export async function exportDesignBytes(design: DesignDocument, identities?: Map
         replaceChild(xf, "ext", fragment(`<a:ext cx="${Math.round(r.w / t.sx)}" cy="${Math.round(r.h / t.sy)}"/>`));
       }
       if (node.kind === "image" || node.kind === "asset") { if (fresh || old?.src !== a.src) await image(node, owner); return; }
-      if (fresh || old?.fill !== a.fill) setFill(props, a.fill);
-      if (fresh || !sameAppearance(old?.border, a.border)) replaceChild(props, "ln", fragment(a.border ? `<a:ln w="${Math.round(a.border.width * unit)}"><a:solidFill>${colorXml(a.border.color)}</a:solidFill></a:ln>` : "<a:ln><a:noFill/></a:ln>"));
-      if (fresh || old?.radius !== a.radius) {
-        const adjustment = a.radius ? Math.min(50000, Math.round(a.radius / Math.max(1, Math.min(a.rect.w, a.rect.h)) * 100000)) : 0;
-        replaceChild(props, "prstGeom", fragment(`<a:prstGeom prst="${adjustment ? "roundRect" : "rect"}"><a:avLst>${adjustment ? `<a:gd name="adj" fmla="val ${adjustment}"/>` : ""}</a:avLst></a:prstGeom>`));
+      if (fresh || old?.fill !== a.fill || !sameAppearance(old?.gradient, a.gradient)) placeSpPr(props, FILLS, fillXml(a));
+      if (fresh || !sameAppearance(old?.border, a.border)) placeSpPr(props, ["ln"], lineXml(a.border, unit));
+      if (fresh || !sameAppearance(old?.shadow, a.shadow)) {
+        if (a.shadow || old?.shadow) placeSpPr(props, ["effectLst", "effectDag"], effectXml(a.shadow, unit));
       }
+      if (fresh || old?.radius !== a.radius || !sameAppearance(old?.corners, a.corners) || !sameAppearance(old?.polygon, a.polygon)) placeSpPr(props, ["prstGeom", "custGeom"], geometryXml(a));
       if (a.text && (fresh || !sameAppearance(old?.text, a.text))) writeText(owner, a.text, unit);
       else if (!a.text && old?.text) direct(owner, "txBody")?.remove();
     };

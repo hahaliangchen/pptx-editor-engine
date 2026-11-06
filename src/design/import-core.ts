@@ -3,6 +3,7 @@ import type { ElementSource, ShapeElement, Slide, SlideElement, TextElement, Ppt
 import { cloneDesign, DesignAppearance, DesignDocument, DesignNode, DesignParagraph, DesignRect, DesignPage } from "./model";
 import { applyDefaultPolicies, readTemplateRecord } from "./template-policy";
 import { bytesToBase64, sha256Hex } from "./bytes";
+import { hasExtendedPaint, readNativePaint } from "./paint";
 export interface ImportRuntime {
   dataUrl(url: string): Promise<string>;
   preview(slide: Slide, elements: SlideElement[], bounds: DesignRect): Promise<string>;
@@ -78,8 +79,12 @@ export async function importDocument(bytes: Uint8Array, doc: PptVirtualDocument,
           const appearance: DesignAppearance = { rect: bounds };
           let kind: DesignNode["kind"] = picture ? "image" : text ? "text" : "shape";
           // Unsupported visual grammar stays one asset; its source XML remains untouched.
+          // Gradients, one outer shadow, dashes, corner pairs and polygons stay editable when the explicit spPr is fully representable.
+          const spPr = Array.from(raw.children).find(n => n.localName === "spPr");
+          const native = shape && !shape.flipH && !shape.flipV ? readNativePaint(spPr, bounds, emuPerPx / scale) : undefined;
+          const extended = !!native && hasExtendedPaint(native);
           const complex = elements.some(e => e.type === "chart" || e.type === "table" || !!e.rotation)
-            || !!shape && (!(["rect", "roundRect"].includes(shape.shapeType)) || !!shape.customGeometry || !!shape.computedStyle?.effects || !!shape.computedStyle?.fill && !["solid", "none"].includes(shape.computedStyle.fill.type))
+            || !!shape && !extended && (!(["rect", "roundRect"].includes(shape.shapeType)) || !!shape.customGeometry || !!shape.computedStyle?.effects || !!shape.computedStyle?.fill && !["solid", "none"].includes(shape.computedStyle.fill.type))
             || !!picture && (!!picture.crop || !!picture.effects || picture.flipH || picture.flipV)
             || !!text && (!!text.body?.textDirection && text.body.textDirection !== "horz" || !!text.style.shadow || !!text.style.outline || !!text.paragraphs?.some(p => p.bullet || p.style.level || p.style.indent || p.style.marginLeft));
           if (complex) {
@@ -87,7 +92,8 @@ export async function importDocument(bytes: Uint8Array, doc: PptVirtualDocument,
             appearance.src = await runtime.preview(slide, elements, bounds);
           } else if (picture?.type === "image") appearance.src = await runtime.dataUrl(picture.url);
           else {
-            if (shape) {
+            if (shape && extended) Object.assign(appearance, native);
+            else if (shape) {
               const fill = shape.computedStyle?.fill;
               if (fill?.type === "solid") appearance.fill = fill.color;
               else if (!fill && shape.fill !== "transparent") appearance.fill = shape.fill;
@@ -109,7 +115,7 @@ export async function importDocument(bytes: Uint8Array, doc: PptVirtualDocument,
       if (tree) await walk(tree);
       for (const node of page.nodes) {
         const stored = record?.nodes[node.origin?.shapeId ?? String(node.metadata?.sourceShapeId ?? "")];
-        if (stored && (!stored.name || stored.name === node.name)) { node.purpose = stored.purpose; node.note = stored.note; }
+        if (stored && (!stored.name || stored.name === node.name)) { node.purpose = stored.purpose; node.note = stored.note; node.slot = stored.slot; }
       }
     }
     applyDefaultPolicies(design);

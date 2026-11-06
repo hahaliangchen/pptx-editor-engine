@@ -1,6 +1,6 @@
 # HTML 作者规范 v0：1280 × 720
 
-状态：目标规范。已接入本地产品转换接口，尚未部署线上。只保存 PPTX，JSON 与 HTML 是按需转换的工作视图。本文中的渐变、阴影、裁剪和完整测量元数据仍是目标能力，不代表全部已实现；实际范围见 [design-layer.md](design-layer.md)。Anthropic 仅用于 HTML 作者格式与审美参考，不采用其完整 HTML→PPTX 流程。
+状态：目标规范。已接入本地产品转换接口，尚未部署线上。只保存 PPTX，JSON 与 HTML 是按需转换的工作视图。下表的线性渐变、外阴影、虚线、上下成对圆角和多边形裁剪已实现为 PPT 原生效果；完整测量元数据仍是目标能力。实际范围见 [design-layer.md](design-layer.md)。Anthropic 仅用于 HTML 作者格式与审美参考，不采用其完整 HTML→PPTX 流程。
 
 ## 页面与设计
 
@@ -16,16 +16,17 @@
 
 | 内容 | 约束 |
 |---|---|
-| 背景 | 纯色、经验证的线性渐变 |
-| 边框 | 四边相同的实线颜色与宽度 |
-| 圆角 | 四角相同的圆形半径；需要精确映射到 shape adjustment |
-| 阴影 | 单个外阴影，spread 为 0；模糊值经过映射验证 |
+| 背景 | 纯色；或单个 `linear-gradient`（deg 角度或 to top/right/bottom/left，色标位置用 %），映射 `a:gradFill`。不可与 background-color 同写 |
+| 边框 | 四边相同的颜色与宽度，solid / dashed / dotted（`a:prstDash`） |
+| 圆角 | 四角相同（roundRect）；或上两角相等、下两角相等（`round2SameRect`），如 `8px 8px 0 0` |
+| 阴影 | 单个外阴影，spread 为 0，不支持 inset；blur 与渲染器同为 2σ，映射 `a:outerShdw` |
+| 多边形 | 仅 shape 节点的 `clip-path: polygon(...)`，点用 % 或 px，映射 `a:custGeom`；不可与边框、圆角、阴影同用 |
 | 透明度 | 叶节点的可映射填充/线条/图片透明度；不将父容器整体合成透明度冒充子元素透明度 |
 | 文字 | 字体、字号、粗斜体、颜色、字距、行高、段距、对齐与内边距；以实际测量行和片段为准 |
 | 图片 | PNG/JPEG，明确尺寸；支持已验证的 contain/cover 和定位映射 |
 | SVG | 独立资产，保留 SVG 原稿与可靠的显示资产；首版不承诺任意路径均可作为原生 PPT 路径编辑 |
 
-首版遇到 filter、backdrop-filter、混合模式、复杂 mask、动画、伪元素内容、多重阴影、不等角圆角、复杂 transform/嵌套 stacking context 等未支持表达时，返回定位明确的错误，由作者重写或显式转成单独资产。不能静默删样式，也不能擅自把整页截图。
+首版遇到 filter、backdrop-filter、混合模式、复杂 mask、动画、伪元素内容、多重阴影、内阴影、径向渐变、对角不等的圆角、复杂 transform/嵌套 stacking context 等未支持表达时，返回定位明确的错误，由作者重写或显式转成单独资产。不能静默删样式，也不能擅自把整页截图。
 
 浏览器可以用 CSS 流式排版；PPT 导入只使用冻结后的结果。可允许的 CSS 属性最终以转换器版本化的能力清单为准，本文不是“所有浏览器样式均可转换”的承诺。
 

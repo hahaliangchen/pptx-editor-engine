@@ -29,8 +29,16 @@ export interface DesignText {
 export interface DesignAppearance {
   rect: DesignRect;
   fill?: string;
-  border?: { color: string; width: number };
+  /** CSS linear-gradient: angle in CSS degrees, stop positions in percent. Native gradFill. */
+  gradient?: { angle: number; stops: Array<{ color: string; position: number }> };
+  border?: { color: string; width: number; style?: "dashed" | "dotted" };
   radius?: number;
+  /** Equal top corners and equal bottom corners (native round2SameRect); exclusive with `radius`. */
+  corners?: { top: number; bottom: number };
+  /** CSS clip-path polygon in percent of the box (native custGeom); exclusive with `radius`/`corners`. */
+  polygon?: Array<[number, number]>;
+  /** A single outer box-shadow in CSS px (native outerShdw). */
+  shadow?: { x: number; y: number; blur: number; color: string };
   text?: DesignText;
   src?: string;
 }
@@ -42,6 +50,8 @@ export interface DesignNode {
   name: string;
   purpose?: TemplatePurpose;
   note?: string;
+  /** Layout-fill role from the template: "要点卡#3" for a repeatable block in set 3, "sep#3" for its separator, "title"/"body"/"icon"… for a field inside a block. */
+  slot?: string;
   parentId?: string;
   appearance: DesignAppearance;
   lock?: "all" | "content";

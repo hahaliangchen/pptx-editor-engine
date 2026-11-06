@@ -48,7 +48,9 @@ HTML 和 JSON 均为临时投影，持久化仍只写 PPTX。重读后 HTML 是�
 
 支持 16:9 PPTX / 1280×720 CSS px；基础文字、形状、图片、组合、纯色背景、统一实线边框、统一圆角、中文测量换行、富文本、对齐、文本内边距与段距。导出写入真实文字/形状/图片，不把整页截图，也不自动缩字。
 
-复杂原对象以独立资产呈现，源包保留。未知且无预览的对象明确诊断，不静默删除。当前不承诺任意 SmartArt/动画/旋转效果编辑，也不承诺所有 CSS 支持。渐变、阴影、滤镜、复杂裁剪、伪元素等应作为独立视觉素材；新 SVG 使用 PNG 显示资产保留 SVG 原稿。
+shape 与 text 节点另支持 PPT 原生效果（`src/design/paint.ts`）：单个 `linear-gradient`（角度或 to 四边，百分比色标）→ `a:gradFill`/`a:lin`；单个外阴影 `box-shadow`（spread 为 0）→ `a:outerShdw`；`dashed`/`dotted` 边框 → `a:prstDash`；上两角相等、下两角相等的圆角 → `round2SameRect`；shape 的 `clip-path: polygon()`（% 或 px）→ `a:custGeom`，不可与边框、圆角、阴影同用。导入时只要 spPr 完整落在这个子集内（srgbClr 颜色），这些对象仍是可编辑 shape，投影回同样的 CSS；超出子集的仍作为独立资产。
+
+复杂原对象以独立资产呈现，源包保留。未知且无预览的对象明确诊断，不静默删除。当前不承诺任意 SmartArt/动画/旋转效果编辑，也不承诺所有 CSS 支持。径向渐变、多重/内阴影、滤镜、曲线裁剪、伪元素等应作为独立视觉素材；新 SVG 使用 PNG 显示资产保留 SVG 原稿。
 
 `group` 只表达组合关系，其背景/边框应由组内独立 shape 表达。文本及有色容器必须有 data-kind；原对象保留 data-id，新对象由转换器分配 ID。页面 body 保留 data-page-id、data-design-revision、data-source-hash。
 

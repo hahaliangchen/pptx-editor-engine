@@ -1,3 +1,4 @@
+import { describeLayout, fillLayout } from "../design/layout-fill";
 import { templateSemanticPermissionError, templateSemanticProposal, type TemplateSemanticProposal, type TemplateSemanticEdit } from "../design/template-semantics";
 import { effectivePurpose, effectiveLock } from "../design/template-policy";
 import { nodeText } from "../design/model";
@@ -119,7 +120,7 @@ export class DesignBridge {
       for (const edit of edits) {
         const element = edit.nodeId ? Array.from(html.querySelectorAll<HTMLElement>("[data-id]")).find(n=>n.dataset.id===edit.nodeId) : html.body;
         if (!element) throw new Error(`Unknown template node: ${edit.nodeId}`);
-        const attrs: Record<string,string> = edit.nodeId ? {purpose:"data-purpose",note:"data-note"} : {role:"data-page-role",layoutName:"data-layout-name",note:"data-page-note"};
+        const attrs: Record<string,string> = edit.nodeId ? {purpose:"data-purpose",note:"data-note",slot:"data-slot"} : {role:"data-page-role",layoutName:"data-layout-name",note:"data-page-note",fill:"data-page-fill"};
         for (const [key,attr] of Object.entries(attrs)) if (key in edit) {
           const value = (edit as unknown as Record<string,string>)[key];
           if (value) element.setAttribute(attr,value); else element.removeAttribute(attr);
@@ -129,8 +130,8 @@ export class DesignBridge {
     } catch(error) { return {ok:false,content:[{type:"text",text:error instanceof Error?error.message:String(error)}]}; }
   }
   async run(name: string, args: any): Promise<ToolResult> { return this.execute(name,args); }
-  private async execute(name: string, args: any, humanForm = false): Promise<ToolResult> {
-    if (this.running) return { ok: false, content: [{ type: "text", text: "Design conversion is already running" }] };
+  private async execute(name: string, args: any, humanForm = false, nested = false): Promise<ToolResult> {
+    if (this.running && !nested) return { ok: false, content: [{ type: "text", text: "Design conversion is already running" }] };
     this.running = true;
     try {
       const a = args ?? {};
@@ -141,7 +142,7 @@ export class DesignBridge {
           ...(name === "suggest_annotations" ? {advisory:"用途为当前规则，非修改授权。根据页面 HTML 和 render_slide 提出具体用途变化，制作人确认后才可 apply_html。"} : {}),
           pages:design.pages.map((page,index)=>({page:index+1,id:page.id,semantics:page.semantics ?? {},semanticsDefined:page.semantics!==undefined,
             objects:page.nodes.map(node=>({id:node.id,shapeId:node.origin?.shapeId ?? node.metadata?.sourceShapeId,name:node.name,kind:node.kind,parentId:node.parentId,purpose:effectivePurpose(page,node),locked:effectiveLock(page,node),note:node.note,rect:node.appearance.rect,text:nodeText(node),binding:node.binding,...(node.appearance.src?{asset:`design-asset:${encodeURIComponent(node.id)}`}:{})}))})).filter(page=>a.slide===undefined||page.page===a.slide),
-          diagnostics:design.diagnostics,designGuide:"读取当前 PPT 的 HTML，有效结果直接复用。根据内容和设计意图自由选择 HTML/CSS 构图、样式和布局；浏览器测量排版结果后写入可编辑 PPT。保留固定品牌素材。溢出和遮挡只作本地提示，不拦截保存或导出；视觉检查仅按用户明确要求执行。参考页可用 duplicateSlide 复制。"});
+          diagnostics:design.diagnostics,designGuide:"读取当前 PPT 的 HTML，有效结果直接复用。semantics.fill 为 layout 的页按版式填充：用 get_layout 和 fill_layout 只提交内容；free 或未标记的页根据内容和设计意图自由选择 HTML/CSS 构图、样式和布局；浏览器测量排版结果后写入可编辑 PPT。保留固定品牌素材。溢出和遮挡只作本地提示，不拦截保存或导出；视觉检查仅按用户明确要求执行。参考页可用 duplicateSlide 复制。"});
       }
       if (name === "get_design") {
         const design = await this.current();
@@ -153,7 +154,29 @@ export class DesignBridge {
           pages: design.pages.map((p, i) => ({ page: i + 1, id: p.id, nodes: p.nodes.length, semantics: p.semantics ?? {}, semanticsDefined:p.semantics!==undefined })) });
         const page = design.pages[a.page - 1];
         if (!Number.isInteger(a.page) || !page) throw new Error("Invalid page number");
+        // In generation a layout-fill page is filled from get_layout; its full HTML and node list only cost context.
+        // Template authoring edits the page itself and always reads all of it.
+        if (page.semantics?.fill === "layout" && a.html !== true && this.options.mode !== "template-authoring") return this.result({ ...identity, page: a.page, pageId: page.id, semantics: page.semantics, semanticsDefined: true,
+          layoutFill: "按版式填充页：用 get_layout 读取块与字段，用 fill_layout 提交内容。确需整页 HTML 时传 html: true。" });
         return this.result({ ...identity, page: a.page, pageId: page.id, semantics: page.semantics ?? {}, semanticsDefined:page.semantics!==undefined, nodes: page.nodes.map(n => ({id:n.id, shapeId:n.origin?.shapeId ?? n.metadata?.sourceShapeId, name:n.name, purpose:effectivePurpose(page,n), note:n.note, locked:effectiveLock(page,n)})), assets: page.nodes.filter(n => n.appearance.src).map(n => ({ id: n.id, name: n.name, src: `design-asset:${encodeURIComponent(n.id)}`, locked: effectiveLock(page,n), purpose: effectivePurpose(page,n), note:n.note })), html: this.html.get(page.id) });
+      }
+      if (name === "get_layout" || name === "fill_layout") {
+        const design = await this.current(), page = design.pages[a.page - 1];
+        if (!Number.isInteger(a.page) || !page) throw new Error("Invalid page number");
+        if (page.semantics?.fill !== "layout") throw new Error(`FILL_LAYOUT: page ${a.page} is not marked layout fill; design it with get_design and apply_html`);
+        const html = this.html.get(page.id)!;
+        if (name === "get_layout") return this.result({ revision: design.revision, page: a.page, pageId: page.id, ...describeLayout(html) });
+        const filled = fillLayout(html, { texts: a.texts, sets: a.sets });
+        const applied = await this.execute("apply_html", { html: filled.html }, false, true);
+        if (!applied.ok) return applied;
+        // Content-only call, content-sized answer: counts and this page's diagnostics, not every changed field.
+        const data = JSON.parse((applied.content[0] as { text: string }).text);
+        const changes: Array<{ action: string }> = data.changes ?? [];
+        const count = (action: string) => changes.filter(c => c.action === action).length;
+        return { ...applied, content: [{ type: "text", text: JSON.stringify({ applied: data.applied, needsSave: data.needsSave, design_revision: data.design_revision, pages: data.pages, pageList: data.pageList,
+          changed: { updated: count("update"), added: count("add"), removed: count("remove") },
+          diagnostics: (data.diagnostics ?? []).filter((d: { pageId?: string }) => d.pageId === page.id).map((d: { message: string }) => d.message.split(" {")[0]).slice(0, 12),
+          ...(filled.notes.length ? { fillNotes: filled.notes } : {}) }) }] };
       }
       await this.current();
       const before = await this.current();

@@ -52,7 +52,7 @@ export function createDesignConverter(runtime: DesignRuntime) {
         // Source-backed appearance is fresh; HTML-inexpressible business fields survive both directions.
         const { nativeArt: _consumedNativeArt, ...previousNode } = before;
         return { ...previousNode, ...node, id: before.id, role: node.role, binding: node.binding,
-          ...(!increment ? { purpose: before.purpose, note: before.note } : {}),
+          ...(!increment ? { purpose: before.purpose, note: before.note, slot: before.slot } : {}),
           ...(!increment && !before.appearance.text?.frames ? { appearance: cloneDesign(before.appearance), origin: node.origin ? { ...node.origin, appearance: cloneDesign(before.appearance) } : undefined } : {}),
           required: before.required, constraints: before.constraints,
           lock: before.lock ?? node.lock, metadata: { ...before.metadata, ...node.metadata } };

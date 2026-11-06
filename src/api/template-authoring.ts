@@ -454,7 +454,7 @@ export function templateDesignFacts(outline: Outline): TemplateDesignFacts {
     pages: outline.slides.map(slide => {
       const legacy = info.variants.find(page => page.slide === slide.index);
       return { id: slide.id, slide: slide.index, role: slide.template ? slide.template.role : legacy?.kind,
-        variant: slide.template ? slide.template.layoutName : legacy?.variant, when: slide.template ? slide.template.note : legacy?.when,
+        variant: slide.template ? slide.template.layoutName : legacy?.variant, when: slide.template ? slide.template.note : legacy?.when, fill: slide.template?.fill ?? "free",
         objects: flatten(slide.shapes).map(shape => ({id: shape.id, name: shape.name, purpose: shape.template?.purpose, note: shape.template?.note})) };
     })
   };

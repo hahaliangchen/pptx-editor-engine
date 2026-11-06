@@ -20,6 +20,72 @@ export async function measureDesignDOM({ nonce, collectIssues = false }: { nonce
         return `#${rgba.slice(1, 4).map(n => Math.round(Number(n)).toString(16).padStart(2, "0")).join("")}`;
       };
       const transparent = (value: string) => value === "transparent" || value === "rgba(0, 0, 0, 0)";
+      // Computed CSS values only; the browser has already normalized colors to rgb()/rgba().
+      const splitTop = (value: string) => {
+        const parts: string[] = []; let depth = 0, start = 0;
+        for (let i = 0; i < value.length; i++) {
+          if (value[i] === "(") depth++; else if (value[i] === ")") depth--;
+          else if (value[i] === "," && !depth) { parts.push(value.slice(start, i).trim()); start = i + 1; }
+        }
+        return [...parts, value.slice(start).trim()];
+      };
+      const linearGradient = (value: string, id: string) => {
+        const match = splitTop(value).length === 1 ? value.match(/^linear-gradient\(([\s\S]*)\)$/) : null;
+        if (!match) throw new Error(`Only one linear-gradient background is supported: ${id}`);
+        const args = splitTop(match[1]);
+        let angle = 180;
+        const sides: Record<string, number> = { "to top": 0, "to right": 90, "to bottom": 180, "to left": 270 };
+        const unit = args[0].match(/^(-?[\d.]+)(deg|turn|rad|grad)$/);
+        if (unit) { angle = Number(unit[1]) * ({ deg: 1, turn: 360, rad: 180 / Math.PI, grad: 0.9 } as Record<string, number>)[unit[2]]; args.shift(); }
+        else if (args[0].startsWith("to ")) {
+          if (sides[args[0]] === undefined) throw new Error(`Gradient corners are not supported, use an angle: ${id}`);
+          angle = sides[args[0]]; args.shift();
+        }
+        const stops: Array<{ color: string; position?: number }> = [];
+        for (const arg of args) {
+          const stop = arg.match(/^(rgba?\([^)]*\)|#[0-9a-f]{3,8}|[a-z]+)\s*(.*)$/i);
+          if (!stop) throw new Error(`Unsupported gradient stop "${arg}": ${id}`);
+          const positions = stop[2].trim() ? stop[2].trim().split(/\s+/) : [];
+          if (positions.some(p => !/^-?[\d.]+%$/.test(p))) throw new Error(`Gradient stop positions must be percentages: ${id}`);
+          if (!positions.length) stops.push({ color: color(stop[1]) });
+          for (const p of positions) stops.push({ color: color(stop[1]), position: Number.parseFloat(p) });
+        }
+        if (stops.length < 2) throw new Error(`A gradient needs at least two stops: ${id}`);
+        // CSS fix-up: missing ends are 0%/100%, missing middles are spaced evenly, positions never decrease.
+        stops[0].position ??= 0; stops[stops.length - 1].position ??= 100;
+        for (let i = 1; i < stops.length; i++) {
+          if (stops[i].position === undefined) {
+            let j = i; while (stops[j].position === undefined) j++;
+            const from = stops[i - 1].position!, to = stops[j].position!;
+            for (let k = i; k < j; k++) stops[k].position = from + (to - from) * (k - i + 1) / (j - i + 1);
+          }
+          stops[i].position = Math.max(stops[i].position!, stops[i - 1].position!);
+        }
+        if (stops.some(s => s.position! < 0 || s.position! > 100)) throw new Error(`Gradient stops must lie within 0%-100%: ${id}`);
+        return { angle: ((angle % 360) + 360) % 360, stops: stops.map(s => ({ color: s.color, position: Math.round(s.position! * 1000) / 1000 })) };
+      };
+      const boxShadow = (value: string, id: string) => {
+        if (splitTop(value).length !== 1 || /\binset\b/.test(value)) throw new Error(`Only one outer box-shadow is supported: ${id}`);
+        const tint = value.match(/rgba?\([^)]*\)/)?.[0];
+        const lengths = value.replace(tint ?? "", "").trim().split(/\s+/).map(px);
+        if (!tint || lengths.length < 2 || lengths[3]) throw new Error(`box-shadow needs a color and no spread: ${id}`);
+        return { x: lengths[0], y: lengths[1], blur: lengths[2] ?? 0, color: color(tint) };
+      };
+      const polygon = (value: string, box: DOMRect, id: string) => {
+        const match = value.match(/^polygon\((?:(?:nonzero|evenodd)\s*,\s*)?([\s\S]*)\)$/);
+        if (!match) throw new Error(`Only polygon() clip-path is supported: ${id}`);
+        const points = splitTop(match[1]).map(point => {
+          const [x, y] = point.split(/\s+/);
+          const coordinate = (v: string | undefined, size: number) => {
+            if (v?.endsWith("%")) return Number.parseFloat(v);
+            if (v?.endsWith("px") || v === "0") return Number.parseFloat(v) / size * 100;
+            throw new Error(`Polygon points must use % or px: ${id}`);
+          };
+          return [Math.round(coordinate(x, box.width) * 1000) / 1000, Math.round(coordinate(y, box.height) * 1000) / 1000] as [number, number];
+        });
+        if (points.length < 3) throw new Error(`A polygon needs at least three points: ${id}`);
+        return points;
+      };
       const markerElements = Array.from(document.querySelectorAll<HTMLElement>("[data-kind]"));
       const invalidNode = (code: string, message: string, el: HTMLElement, recovery: string): never => {
         const owner = el.closest<HTMLElement>("[data-kind]");
@@ -51,7 +117,9 @@ export async function measureDesignDOM({ nonce, collectIssues = false }: { nonce
         const style = computedStyle(el);
         if (style.display === "none" || style.visibility !== "visible") throw new Error("Hidden HTML nodes must be removed explicitly, not silently omitted");
         for (const pseudo of ["::before", "::after"]) { const content = computedStyle(el, pseudo).content; if (content && content !== "none" && content !== "normal" && content !== '""') throw new Error("Pseudo-element content is not supported; use a marked node"); }
-        if (style.transform !== "none" || style.scale && style.scale !== "none" || style.rotate && style.rotate !== "none" || style.translate && style.translate !== "none" || style.filter !== "none" || style.backdropFilter && style.backdropFilter !== "none" || style.mixBlendMode !== "normal" || Number(style.opacity) !== 1 || style.boxShadow !== "none" || style.backgroundImage !== "none" || style.zIndex !== "auto" || style.clipPath !== "none" || style.textShadow !== "none" || style.clip !== "auto" || style.maskImage && style.maskImage !== "none" || style.contain.includes("paint") || style.contentVisibility !== "visible" || el.tagName !== "IMG" && [style.overflowX,style.overflowY].some(v=>v!=="visible")) throw new Error(`Unsupported CSS on ${el.dataset.id ?? el.tagName}; use a separate image/SVG asset`);
+        // Gradients and shadows are native shape paint; a polygon clip is native shape geometry.
+        const paintable = ["shape", "text"].includes(el.dataset.kind ?? "");
+        if (style.transform !== "none" || style.scale && style.scale !== "none" || style.rotate && style.rotate !== "none" || style.translate && style.translate !== "none" || style.filter !== "none" || style.backdropFilter && style.backdropFilter !== "none" || style.mixBlendMode !== "normal" || Number(style.opacity) !== 1 || !paintable && (style.boxShadow !== "none" || style.backgroundImage !== "none") || style.zIndex !== "auto" || style.clipPath !== "none" && el.dataset.kind !== "shape" || style.textShadow !== "none" || style.clip !== "auto" || style.maskImage && style.maskImage !== "none" || style.contain.includes("paint") || style.contentVisibility !== "visible" || el.tagName !== "IMG" && [style.overflowX,style.overflowY].some(v=>v!=="visible")) throw new Error(`Unsupported CSS on ${el.dataset.id ?? el.tagName}; use a separate image/SVG asset`);
         const owner = el.closest<HTMLElement>("[data-kind]");
         if (el !== body && !el.dataset.kind && (!transparent(style.backgroundColor) || px(style.borderTopWidth) || px(style.borderLeftWidth))) throw new Error("Painted containers need data-kind and data-id");
         if (Array.from(el.childNodes).some(n => n.nodeType === Node.TEXT_NODE && !!n.textContent?.trim()) && (!owner || !["text", "shape"].includes(owner.dataset.kind!))) invalidNode(
@@ -72,16 +140,29 @@ export async function measureDesignDOM({ nonce, collectIssues = false }: { nonce
         if (kind === "group" && (!transparent(style.backgroundColor) || px(style.borderTopWidth))) throw new Error(`Group paint must be a separate shape node: ${id}`);
         const appearance: MeasuredPage["nodes"][number]["appearance"] = { rect: { x: bounds.x, y: bounds.y, w: bounds.width, h: bounds.height } };
         if (!transparent(style.backgroundColor)) appearance.fill = color(style.backgroundColor);
+        if (style.backgroundImage !== "none") {
+          if (appearance.fill) throw new Error(`Use either background-color or one linear-gradient, not both: ${id}`);
+          appearance.gradient = linearGradient(style.backgroundImage, id);
+        }
         const borders = [style.borderTopWidth, style.borderRightWidth, style.borderBottomWidth, style.borderLeftWidth].map(px);
         if (borders.some(n => n > 0)) {
-          if (!borders.every(n => n === borders[0]) || ![style.borderTopColor, style.borderRightColor, style.borderBottomColor, style.borderLeftColor].every(c => c === style.borderTopColor) || style.borderTopStyle !== "solid") throw new Error(`Only uniform solid borders are supported: ${id}`);
-          appearance.border = { color: color(style.borderTopColor), width: borders[0] };
+          const styles = [style.borderTopStyle, style.borderRightStyle, style.borderBottomStyle, style.borderLeftStyle];
+          if (!borders.every(n => n === borders[0]) || ![style.borderTopColor, style.borderRightColor, style.borderBottomColor, style.borderLeftColor].every(c => c === style.borderTopColor) || !styles.every(s => s === styles[0]) || !["solid", "dashed", "dotted"].includes(styles[0])) throw new Error(`Only uniform solid, dashed or dotted borders are supported: ${id}`);
+          appearance.border = { color: color(style.borderTopColor), width: borders[0], ...(styles[0] !== "solid" ? { style: styles[0] as "dashed" | "dotted" } : {}) };
         }
         const radii = [style.borderTopLeftRadius, style.borderTopRightRadius, style.borderBottomLeftRadius, style.borderBottomRightRadius];
         if (radii.some(r => px(r))) {
-          if (!radii.every(r => r === radii[0]) || radii[0].includes(" ")) throw new Error(`Only equal circular corners are supported: ${id}`);
-          appearance.radius = radii[0].endsWith("%") ? Math.min(bounds.width, bounds.height) * px(radii[0]) / 100 : px(radii[0]);
+          if (radii.some(r => r.includes(" "))) throw new Error(`Only circular corners are supported: ${id}`);
+          const [tl, tr, bl, br] = radii.map(r => r.endsWith("%") ? Math.min(bounds.width, bounds.height) * px(r) / 100 : px(r));
+          if (radii.every(r => r === radii[0])) appearance.radius = tl;
+          else if (tl === tr && bl === br) appearance.corners = { top: tl, bottom: bl };
+          else throw new Error(`Corners must be all equal, or equal along the top and along the bottom: ${id}`);
         }
+        if (style.clipPath !== "none") {
+          appearance.polygon = polygon(style.clipPath, bounds, id);
+          if (appearance.radius !== undefined || appearance.corners || appearance.border || style.boxShadow !== "none") throw new Error(`A polygon clip-path cannot be combined with border, border-radius or box-shadow: ${id}`);
+        }
+        if (style.boxShadow !== "none") appearance.shadow = boxShadow(style.boxShadow, id);
         const glyphs: NonNullable<MeasuredPage["textPaint"]>[string] = [];
         let clippedText = false;
         let firstOverflow: {character: string; font: string; overflow: {left: number; top: number; right: number; bottom: number}} | undefined;

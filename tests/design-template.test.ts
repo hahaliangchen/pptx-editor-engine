@@ -127,6 +127,39 @@ describe("template HTML policy and closed-loop persistence",()=>{
     } finally {bridge.dispose();}
   },60000);
 
+  it("keeps the author's page fill mode through save, reopen and HTML, and only authoring can change it",async()=>{
+    let bytes:Uint8Array=source;
+    const viewer={snapshotPptx:async()=>new Blob([bytes as BlobPart]),loadPptx:async(buffer:ArrayBuffer)=>{bytes=new Uint8Array(buffer)},getCurrentSlideIndex:()=>0,getSlidesCount:()=>4,selectSlide:async()=>{}};
+    const bridge=new DesignBridge(viewer,convertDesign,undefined,{mode:"template-authoring",confirmSemanticChanges:async()=>true});
+    try {
+      payload(await bridge.updateTemplateSemantics(3,[{role:"content",layoutName:"四栏",fill:"layout"}]));
+      // Authoring always sees the whole page; generation gets the compact view unless it asks for HTML.
+      let info=payload(await bridge.run("get_design",{page:3}));
+      expect(info.semantics.fill).toBe("layout");expect(info.html).toContain('data-page-fill="layout"');expect(info.nodes.length).toBeGreaterThan(0);
+      const reader=new DesignBridge(viewer,convertDesign);
+      try {
+        const compact=payload(await reader.run("get_design",{page:3}));
+        expect(compact.html).toBeUndefined();expect(compact.layoutFill).toContain("get_layout");
+        expect(payload(await reader.run("get_design",{page:3,html:true})).html).toContain('data-page-fill="layout"');
+      } finally {reader.dispose();}
+      const reopened=await syncDesign(bytes);
+      expect(reopened.pages[2].semantics?.fill).toBe("layout");
+      expect(projectPage(reopened,reopened.pages[2].id)).toContain('data-page-fill="layout"');
+      expect((await bridge.updateTemplateSemantics(3,[{fill:"grid" as any}])).ok).toBe(false);
+      payload(await bridge.updateTemplateSemantics(3,[{fill:"" as any}]));
+      info=payload(await bridge.run("get_design",{page:3}));
+      expect(info.semantics.fill).toBeUndefined();expect(info.html).not.toContain("data-page-fill");
+      expect(()=>validateTemplateRecord({version:1,page:{fill:"grid"},nodes:{}})).toThrow();
+    } finally {bridge.dispose();}
+    // Generation cannot grant itself a different fill mode.
+    const generation=new DesignBridge(viewer,convertDesign);
+    try {
+      const info=payload(await generation.run("get_design",{page:3}));
+      const html=info.html.replace("<body ",'<body data-page-fill="free" ');
+      expect((await generation.run("apply_html",{html})).ok).toBe(false);
+    } finally {generation.dispose();}
+  },60000);
+
   it("exposes manual annotation via the same HTML bridge and keeps author confirmation without version gating",async()=>{
     let bytes:Uint8Array=source;let confirmResolve!:(ok:boolean)=>void; let started!:()=>void; const confirming=new Promise<void>(resolve=>{started=resolve;});
     const viewer={snapshotPptx:async()=>new Blob([bytes as BlobPart]),loadPptx:async(buffer:ArrayBuffer)=>{bytes=new Uint8Array(buffer)},getCurrentSlideIndex:()=>0,getSlidesCount:()=>4,selectSlide:async()=>{}};

@@ -5,6 +5,7 @@ import JSZip from 'jszip';
 import { createCanvas, loadImage } from '@napi-rs/canvas';
 import { syncDesign, convertDesign } from '../src/design/service';
 import { projectPage } from '../src/design/projection';
+import { effectiveLock, effectivePurpose } from '../src/design/template-policy';
 import { HeadlessSession } from '../src/headless/session';
 
 it('materializes SVG icons as editable shapes and keeps them across subsequent edits', async () => {
@@ -35,7 +36,10 @@ it('materializes SVG icons as editable shapes and keeps them across subsequent e
   const reopened = await syncDesign(Buffer.from(saved.source.pptxBase64,'base64'));
   const icon = reopened.pages[0].nodes.find(n => n.kind === 'group' && n.name === 'new:clock');
   expect(icon).toBeDefined();
-  expect(reopened.pages[0].nodes.filter(n => n.parentId === icon!.id).length).toBe(2);
+  const parts = reopened.pages[0].nodes.filter(n => n.parentId === icon!.id);
+  expect(parts.length).toBe(2);
+  // What the AI drew stays its content after a save and reload: only the template's skeleton is locked.
+  expect(parts.map(n => [effectivePurpose(reopened.pages[0], n), effectiveLock(reopened.pages[0], n)])).toEqual([["content", undefined], ["content", undefined]]);
   const html2 = projectPage(reopened,reopened.pages[0].id).replace('</body>', '<div data-kind="shape" data-id="new:box" style="position:absolute;left:500px;top:300px;width:40px;height:40px;background:#ff0000"></div></body>');
   const edited = await convertDesign({operation:'apply',design:reopened,html:html2});
   const zip2 = await JSZip.loadAsync(Buffer.from(edited.source.pptxBase64,'base64'));

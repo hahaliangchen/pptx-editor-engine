@@ -71,6 +71,26 @@ describe("layout check", () => {
     await session.apply([{op:"setText",target:{slide:1,id:caption.id},text:"先记录，再试点，最后复盘。"}]);
     expect(await kinds(session)).not.toContain("low_contrast");
   });
+  it("reads white titles on top-rounded headers and polygon ribbons against those panels, not the card below", () => {
+    const shape = (id: string, geometry: string, rect: OutlineShape["rect"], fill: OutlineShape["fill"]): OutlineShape =>
+      ({ id, name: id, type: "shape", shape: geometry, rect, rotation: 0, fill });
+    const caption = (id: string, rect: OutlineShape["rect"], value: string): OutlineShape =>
+      ({ id, name: id, type: "text", rect, rotation: 0, text: value, style: { fontSizePt: 14, color: "#FFFFFF", align: "center" } });
+    const red = { gradient: { type: "linear" as const, angle: 0, stops: [{ position: 0, color: "#B8000E" }, { position: 100, color: "#E60012" }] } };
+    // Template card: white-to-pink body, then a red header with only its top corners rounded.
+    const body = { gradient: { type: "linear" as const, angle: 90, stops: [{ position: 0, color: "#FFFFFF" }, { position: 100, color: "#FDF3F3" }] } };
+    const outline = { slideSize: { w: 33.87, h: 19.05 }, layouts: [], slides: [{ index: 1, id: "s1", background: "#FFFFFF", shapes: [
+      shape("card", "roundRect", { x: 1, y: 3, w: 12, h: 10 }, body),
+      shape("header", "round2SameRect", { x: 1, y: 3, w: 12, h: 1.2 }, red),
+      caption("title", { x: 1.5, y: 3.1, w: 11, h: 1 }, "一期已上线"),
+      shape("ribbon", "custom", { x: 14, y: 3, w: 8, h: 1.2 }, red),
+      caption("ribbonText", { x: 14.5, y: 3.1, w: 7, h: 1 }, "飘带标题"),
+    ] }] } as Outline;
+    expect(checkLayout(outline).filter(issue => issue.kind === "low_contrast")).toEqual([]);
+    // A white title on the pale body alone is still reported.
+    outline.slides[0].shapes.splice(1, 1);
+    expect(checkLayout(outline).some(issue => issue.kind === "low_contrast" && issue.ids.includes("title"))).toBe(true);
+  });
   it("reports wrapped height even when the widest original line only slightly exceeds the box", async () => {
     const session = await deckWith([text({x: 7.6, y: 5.1, w: 5.6, h: 2.2}, "02｜排期与资源挤压\n并行项目争用关键人", 17)]);
     expect(await kinds(session)).toContain("text_overflow");

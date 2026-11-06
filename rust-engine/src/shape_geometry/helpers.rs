@@ -82,6 +82,31 @@ pub fn rounded_rect(ctx: &CanvasRenderingContext2d, x: f64, y: f64, w: f64, h: f
     ctx.close_path();
 }
 
+/// DrawingML round2SameRect: `top` rounds both top corners, `bottom` both bottom corners.
+pub fn same_side_rounded_rect(ctx: &CanvasRenderingContext2d, x: f64, y: f64, w: f64, h: f64, top: f64, bottom: f64) {
+    let side = w.min(h);
+    let t = side * top.clamp(0.0, 0.5);
+    let b = side * bottom.clamp(0.0, 0.5);
+    ctx.move_to(x + t, y);
+    ctx.line_to(x + w - t, y);
+    if t > 0.0 {
+        let _ = ctx.arc_to(x + w, y, x + w, y + t, t);
+    }
+    ctx.line_to(x + w, y + h - b);
+    if b > 0.0 {
+        let _ = ctx.arc_to(x + w, y + h, x + w - b, y + h, b);
+    }
+    ctx.line_to(x + b, y + h);
+    if b > 0.0 {
+        let _ = ctx.arc_to(x, y + h, x, y + h - b, b);
+    }
+    ctx.line_to(x, y + t);
+    if t > 0.0 {
+        let _ = ctx.arc_to(x, y, x + t, y, t);
+    }
+    ctx.close_path();
+}
+
 pub fn snipped_rect(ctx: &CanvasRenderingContext2d, x: f64, y: f64, w: f64, h: f64, cut: f64) {
     let c = (w.min(h) * cut.clamp(0.0, 0.5)).min(w.min(h) / 2.0);
     polygon(

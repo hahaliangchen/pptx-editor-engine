@@ -2,8 +2,10 @@ import type { DesignDocument, DesignNode, DesignPage, DesignRect } from "./model
 import { parseBinding } from "../api/template";
 
 export type TemplatePurpose = "fixed" | "content" | "reference";
-export interface TemplatePageSemantics { role?: string; layoutName?: string; note?: string }
-export interface TemplateNodeSemantics { purpose: TemplatePurpose; note?: string; name?: string }
+/** fill: "layout" keeps the page's blocks and their styles (AI changes text, icons, block count and arrangement); "free" or absent lets the AI design the content area. */
+export type TemplatePageFill = "layout" | "free";
+export interface TemplatePageSemantics { role?: string; layoutName?: string; note?: string; fill?: TemplatePageFill }
+export interface TemplateNodeSemantics { purpose: TemplatePurpose; note?: string; name?: string; slot?: string }
 export interface TemplateRecord { version: 1; page?: TemplatePageSemantics; nodes: Record<string, TemplateNodeSemantics> }
 export const TEMPLATE_EXT_URI = "{70D18A51-144B-49B9-A917-03139173DE67}";
 export const TEMPLATE_NS = "urn:pptx-editor:template:1";
@@ -12,8 +14,8 @@ const validText = (value: unknown): value is string | undefined => value === und
 export function validateTemplateRecord(value: unknown): asserts value is TemplateRecord {
   const r = value as TemplateRecord;
   if (!r || r.version !== 1 || !r.nodes || Array.isArray(r.nodes) || typeof r.nodes !== "object" || Object.keys(r).some(k => !["version", "page", "nodes"].includes(k))) throw new Error("Invalid template policy record");
-  if (r.page !== undefined && (!r.page || typeof r.page !== "object" || Array.isArray(r.page) || Object.keys(r.page).some(k => !["role", "layoutName", "note"].includes(k)) || !Object.values(r.page).every(validText))) throw new Error("Invalid template page semantics");
-  for (const [id, node] of Object.entries(r.nodes)) if (!/^\d+$/.test(id) || !node || !purposes.includes(node.purpose) || Object.keys(node).some(k => !["purpose", "note", "name"].includes(k)) || !validText(node.note) || !validText(node.name)) throw new Error(`Invalid template node policy: ${id}`);
+  if (r.page !== undefined && (!r.page || typeof r.page !== "object" || Array.isArray(r.page) || Object.keys(r.page).some(k => !["role", "layoutName", "note", "fill"].includes(k)) || !Object.values(r.page).every(validText) || r.page.fill !== undefined && !["layout", "free"].includes(r.page.fill))) throw new Error("Invalid template page semantics");
+  for (const [id, node] of Object.entries(r.nodes)) if (!/^\d+$/.test(id) || !node || !purposes.includes(node.purpose) || Object.keys(node).some(k => !["purpose", "note", "name", "slot"].includes(k)) || !validText(node.note) || !validText(node.name) || !validText(node.slot)) throw new Error(`Invalid template node policy: ${id}`);
 }
 export function readTemplateRecord(xml: Document): TemplateRecord | undefined {
   const found = Array.from(xml.getElementsByTagNameNS(TEMPLATE_NS, "template"));
@@ -69,10 +71,11 @@ export function effectiveLock(page: DesignPage, node: DesignNode): "all" | "cont
   return effectivePurpose(page, node) === "fixed" ? "all" : node.lock;
 }
 const overlap = (a: DesignRect, b: DesignRect): number => Math.max(0, Math.min(a.x+a.w,b.x+b.w)-Math.max(a.x,b.x))*Math.max(0,Math.min(a.y+a.h,b.y+b.h)-Math.max(a.y,b.y));
-const visiblePaint = (node: DesignNode): boolean => node.kind !== "group" && !!(node.appearance.src || node.appearance.text || node.appearance.border || node.appearance.fill && !["transparent", "rgba(0, 0, 0, 0)"].includes(node.appearance.fill));
+const painted = (a: DesignNode["appearance"]): boolean => !!(a.border || a.gradient || a.shadow || a.fill && !["transparent", "rgba(0, 0, 0, 0)"].includes(a.fill));
+const visiblePaint = (node: DesignNode): boolean => node.kind !== "group" && !!(node.appearance.src || node.appearance.text || painted(node.appearance));
 const paintRects = (node: DesignNode, textPaint?: Record<string,DesignRect[]>): DesignRect[] => {
   const a = node.appearance;
-  return a.text && !a.src && !a.border && (!a.fill || ["transparent","rgba(0, 0, 0, 0)"].includes(a.fill)) && textPaint?.[node.id] !== undefined ? textPaint[node.id] : [a.rect];
+  return a.text && !a.src && !painted(a) && textPaint?.[node.id] !== undefined ? textPaint[node.id] : [a.rect];
 };
 /** Use trusted glyph extents for transparent text, complete bounds for painted boxes and assets. */
 export function checkFixedProtection(before: DesignPage, after: DesignPage, beforeTextPaint?: Record<string,DesignRect[]>, afterTextPaint?: Record<string,DesignRect[]>): Array<{nodeId?: string; message: string}> {
@@ -96,7 +99,7 @@ export function checkFixedProtection(before: DesignPage, after: DesignPage, befo
       for (const region of regions) {
         const area = paintRects(foreground,afterTextPaint).reduce((sum,r)=>sum+overlap(region,r),0);
         const oldArea = old && beforeIndex.get(old.id)! > beforeIndex.get(fixed.id)! ? paintRects(old,beforeTextPaint).reduce((sum,r)=>sum+overlap(region,r),0) : 0;
-        const paintChanged = !!old && (old.appearance.src !== foreground.appearance.src || old.appearance.fill !== foreground.appearance.fill || JSON.stringify(old.appearance.border) !== JSON.stringify(foreground.appearance.border));
+        const paintChanged = !!old && (old.appearance.src !== foreground.appearance.src || old.appearance.fill !== foreground.appearance.fill || (["border", "gradient", "shadow"] as const).some(k => JSON.stringify(old.appearance[k]) !== JSON.stringify(foreground.appearance[k])));
         if (area > 0.5 && (area > oldArea + 0.5 || !old || paintChanged)) warnings.push({nodeId:foreground.id,message:`FIXED_OCCLUSION: ${foreground.id} covers fixed element ${fixed.id}. ${JSON.stringify({nodeId:foreground.id,nodeBounds:foreground.appearance.rect,fixedNodeId:fixed.id,protectedBounds:region,overlapArea:Math.round(area*100)/100,canvas:{width:1280,height:720},recovery:"Layout warning only; this does not block applying the page. Inspect the actual rendering before deciding whether to move or reflow mutable foreground content. Retain the fixed object's content and metadata."})}`});
       }
     }

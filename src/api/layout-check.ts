@@ -26,9 +26,13 @@ const flatten = (shapes: OutlineShape[]): OutlineShape[] =>
 
 const round = (value: number) => Math.round(value * 10) / 10;
 
-/** Opaque panels include painted backgrounds that differ from slide.background. */
+/**
+ * Opaque panels include painted backgrounds that differ from slide.background.
+ * Card headers with only their top corners rounded and polygon labels (ribbons,
+ * chevrons) are panels too; skipping them reads their text against the card below.
+ */
 function opaquePanelColor(shape: OutlineShape): string | undefined {
-  if (shape.type !== "shape" || !["rect", "roundRect"].includes(shape.shape ?? "") || (shape.opacity ?? 1) < .95) return;
+  if (shape.type !== "shape" || !["rect", "roundRect", "round2SameRect", "custom"].includes(shape.shape ?? "") || (shape.opacity ?? 1) < .95) return;
   if (typeof shape.fill === "string" && /^#[0-9a-f]{6}$/i.test(shape.fill)) return shape.fill;
   if (shape.fill && typeof shape.fill === "object" && "gradient" in shape.fill) {
     const stops = shape.fill.gradient.stops;
