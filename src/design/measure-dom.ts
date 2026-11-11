@@ -125,7 +125,16 @@ export async function measureDesignDOM({ nonce, collectIssues = false }: { nonce
         if (el.tagName === "IMG" && !["image", "asset"].includes(el.dataset.kind ?? "")) throw new Error("Every visible image must be a marked image/asset design node");
         const style = computedStyle(el);
         if (style.display === "none" || style.visibility !== "visible") throw new Error("Hidden HTML nodes must be removed explicitly, not silently omitted");
-        for (const pseudo of ["::before", "::after"]) { const content = computedStyle(el, pseudo).content; if (content && content !== "none" && content !== "normal" && content !== '""') throw new Error("Pseudo-element content is not supported; use a marked node"); }
+        for (const pseudo of ["::before", "::after"]) {
+          const content = computedStyle(el, pseudo).content;
+          // Firefox exposes its built-in image alternative text as ::before.
+          // Images have already decoded successfully above; this is browser
+          // fallback metadata, not authored CSS-generated page content.
+          const imageAlt = el.tagName === "IMG" && pseudo === "::before" && content === "-moz-alt-content";
+          if (!imageAlt && content && content !== "none" && content !== "normal" && content !== '""') {
+            throw new Error(`Pseudo-element content is not supported; use a marked node: ${el.dataset.id ?? el.tagName} ${pseudo} content=${content}`);
+          }
+        }
         // Gradients and shadows are native shape paint; a polygon clip is native shape geometry.
         const paintable = ["shape", "text"].includes(el.dataset.kind ?? "");
         if (style.transform !== "none" || style.scale && style.scale !== "none" || style.rotate && style.rotate !== "none" || style.translate && style.translate !== "none" || style.filter !== "none" || style.backdropFilter && style.backdropFilter !== "none" || style.mixBlendMode !== "normal" || Number(style.opacity) !== 1 || !paintable && (style.boxShadow !== "none" || style.backgroundImage !== "none") || style.zIndex !== "auto" || style.clipPath !== "none" && el.dataset.kind !== "shape" || style.textShadow !== "none" || style.clip !== "auto" || style.maskImage && style.maskImage !== "none" || style.contain.includes("paint") || style.contentVisibility !== "visible" || el.tagName !== "IMG" && [style.overflowX,style.overflowY].some(v=>v!=="visible")) throw new Error(`Unsupported CSS on ${el.dataset.id ?? el.tagName}; use a separate image/SVG asset`);
