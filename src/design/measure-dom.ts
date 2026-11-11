@@ -179,10 +179,37 @@ export async function measureDesignDOM({ nonce, collectIssues = false }: { nonce
           appearance.gradient = linearGradient(style.backgroundImage, id);
         }
         const borders = [style.borderTopWidth, style.borderRightWidth, style.borderBottomWidth, style.borderLeftWidth].map(px);
+        const edges: MeasuredPage["nodes"] = [];
         if (borders.some(n => n > 0)) {
           const styles = [style.borderTopStyle, style.borderRightStyle, style.borderBottomStyle, style.borderLeftStyle];
-          if (!borders.every(n => n === borders[0]) || ![style.borderTopColor, style.borderRightColor, style.borderBottomColor, style.borderLeftColor].every(c => c === style.borderTopColor) || !styles.every(s => s === styles[0]) || !["solid", "dashed", "dotted"].includes(styles[0])) invalidNode("NONUNIFORM_BORDER", "Only uniform solid, dashed or dotted borders are supported", el, 'Use one uniform border on all sides, or represent a top/bottom-only accent with a separate thin data-kind="shape" rectangle.');
-          appearance.border = { color: color(style.borderTopColor), width: borders[0], ...(styles[0] !== "solid" ? { style: styles[0] as "dashed" | "dotted" } : {}) };
+          const colors = [style.borderTopColor, style.borderRightColor, style.borderBottomColor, style.borderLeftColor];
+          const supported = (s: string) => ["solid", "dashed", "dotted"].includes(s);
+          if (borders.every(n => n === borders[0]) && colors.every(c => c === colors[0]) && styles.every(s => s === styles[0])) {
+            if (!supported(styles[0])) invalidNode("UNSUPPORTED_BORDER_STYLE", "Only solid, dashed or dotted borders are supported", el, "Use a solid, dashed or dotted border; draw other line effects as separate data-kind=\"shape\" nodes.");
+            appearance.border = { color: color(colors[0]), width: borders[0], ...(styles[0] !== "solid" ? { style: styles[0] as "dashed" | "dotted" } : {}) };
+          } else {
+            // A border on some sides only (an accent bar, a divider, an L frame)
+            // has no native single-shape form; each painted side becomes its own
+            // editable shape drawn over the node, so the design is kept, not refused.
+            (["top", "right", "bottom", "left"] as const).forEach((side, i) => {
+              const width = borders[i];
+              if (width <= 0 || ["none", "hidden"].includes(styles[i])) return;
+              if (!supported(styles[i])) invalidNode("UNSUPPORTED_BORDER_STYLE", "Only solid, dashed or dotted borders are supported", el, "Use a solid, dashed or dotted border; draw other line effects as separate data-kind=\"shape\" nodes.");
+              const horizontal = side === "top" || side === "bottom", far = side === "bottom" || side === "right";
+              const solid = styles[i] === "solid";
+              // Solid: a filled bar of the border's thickness. Dashed/dotted: a
+              // zero-thickness edge outlined with that dash, centred on the border.
+              const offset = solid ? (far ? (horizontal ? bounds.height : bounds.width) - width : 0) : (far ? (horizontal ? bounds.height : bounds.width) - width / 2 : width / 2);
+              const rect = horizontal
+                ? { x: bounds.x, y: bounds.y + offset, w: bounds.width, h: solid ? width : 0 }
+                : { x: bounds.x + offset, y: bounds.y, w: solid ? width : 0, h: bounds.height };
+              let edgeId = `${id.startsWith("new:") ? "" : "new:"}${id}:${side}-border`;
+              for (let n = 2; document.querySelector(`[data-id="${CSS.escape(edgeId)}"]`); n++) edgeId = `${id.startsWith("new:") ? "" : "new:"}${id}:${side}-border-${n}`;
+              const edgeParent = el.parentElement?.closest<HTMLElement>("[data-kind]");
+              edges.push({ id: edgeId, kind: "shape", ...(edgeParent ? { parentId: edgeParent.dataset.id } : {}),
+                appearance: solid ? { rect, fill: color(colors[i]) } : { rect, border: { color: color(colors[i]), width, style: styles[i] as "dashed" | "dotted" } } });
+            });
+          }
         }
         const radii = [style.borderTopLeftRadius, style.borderTopRightRadius, style.borderBottomLeftRadius, style.borderBottomRightRadius];
         if (radii.some(r => px(r))) {
@@ -292,7 +319,7 @@ export async function measureDesignDOM({ nonce, collectIssues = false }: { nonce
             issue(`Text is clipped or outside its box: ${id}. ${JSON.stringify({nodeId:id,nodeBounds:appearance.rect,textBounds:{x:left,y:top,w:right-left,h:bottom-top},requiredTextHeight:bottom-top,overflow:{left:Math.max(0,bounds.left-left),top:Math.max(0,bounds.top-top),right:Math.max(0,right-bounds.right),bottom:Math.max(0,bottom-bounds.bottom)},firstOverflow,lineHeights:appearance.text.paragraphs.map(p=>p.lineHeight),recovery:"Layout warning only; applying HTML is allowed. Overflow is relative to this text box's own edges; moving the entire box does not change it. Inspect the actual rendering, then adjust padding, width, height, line height or wording if visibly clipped. Preserve fixed assets and data-* metadata."})}`,id);
           }
         }
-        nodes.push({ id, kind, ...(parent ? { parentId: parent.dataset.id } : {}), appearance });
+        nodes.push({ id, kind, ...(parent ? { parentId: parent.dataset.id } : {}), appearance }, ...edges);
       }
       return { pageId, revision, background: transparent(computedStyle(body).backgroundColor) ? "#ffffff" : color(computedStyle(body).backgroundColor), sourceHash: body.dataset.sourceHash, nodes, textPaint, ...(collectIssues ? { issues } : {}) };
 }
