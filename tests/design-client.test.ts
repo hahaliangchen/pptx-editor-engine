@@ -5,7 +5,7 @@ import { createServer, type Server } from "node:http";
 import { readFileSync, writeFileSync, mkdtempSync, rmSync, existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
-import { chromium, type Browser, type Page } from "playwright";
+import { chromium, firefox, type Browser, type Page } from "playwright";
 
 const require = createRequire(import.meta.url);
 let browser: Browser, server: Server, page: Page, output: string;
@@ -43,7 +43,7 @@ beforeAll(async () => {
     }
   });
   await new Promise<void>(resolveListen => server.listen(0, "127.0.0.1", resolveListen));
-  browser = await chromium.launch();
+  browser = await (process.env.PPT_TEST_BROWSER === "firefox" ? firefox : chromium).launch();
   page = await browser.newPage({ viewport: { width: 1360, height: 850 } });
   page.on("pageerror", error => console.error("Browser runtime:", error.stack));
   page.on("request", request => browserNetwork.push(request.url()));
@@ -88,6 +88,33 @@ describe("conversion on the user's browser", () => {
     expect(result.checked).toMatchObject({validated:true,applied:false,needsSave:false,content_complete:false});
     expect(result.checked.changes.some((change:any)=>change.action==="add")).toBe(true);
     expect(result.loads).toBe(0);expect(result.unchanged).toBe(true);expect(result.pending).toBe(false);expect(result.frames).toBe(0);
+  },60000);
+
+  it("prepares CJK fonts beside application CSS fonts in Firefox and Chromium", async () => {
+    const result=await page.evaluate(async()=>{
+      const w=window as any,t=w.designTest;
+      const style=document.createElement("style");style.textContent='@font-face{font-family:ApplicationCSSProbe;src:url("/api/font?family=DejaVu+Sans")}';document.head.append(style);
+      await document.fonts.load("16px ApplicationCSSProbe");
+      const cssFace=Array.from(document.fonts).find((face:any)=>face.family==="ApplicationCSSProbe")!;
+      const rawFrame=document.createElement("iframe");document.body.append(rawFrame);let cssCopyRejected=false;
+      try {(rawFrame.contentDocument!.fonts as any).add(cssFace);}catch(error){cssCopyRejected=(error as DOMException).name==="InvalidModificationError";}finally{rawFrame.remove();}
+      const bridge=new t.DesignBridge(w.viewer,w.converter.convertDesign);
+      const read=(r:any)=>{if(!r.ok)throw new Error(JSON.stringify(r));return JSON.parse(r.content[0].text);};
+      try {
+        const start=read(await bridge.run("get_design",{page:1}));
+        const html=start.html.replace("</body>",'<div data-kind="text" style="position:absolute;left:120px;top:160px;width:900px;height:160px"><p style="font-family:\'Noto Sans CJK SC\';font-size:30px;line-height:42px;font-weight:700">领导浏览器字体兼容回归<br>Chinese font conversion and saving</p></div></body>');
+        const checked=read(await bridge.run("validate_html",{html}));
+        const applied=read(await bridge.run("apply_html",{html,content_complete:true}));
+        const persisted=await w.viewer.snapshotPptx();
+        const reopened=await w.converter.syncDesign(new Uint8Array(await persisted.arrayBuffer()));
+        const png=await w.viewer.renderPagePng(1,960);
+        const face=w.viewer.backendDomFonts.get("noto sans cjk sc|700|false");
+        return {cssCopyRejected,validated:checked.validated,applied:applied.applied,complete:applied.content_complete,text:reopened.pages[0].nodes.map(t.nodeText).join(" "),fontStatus:face?.status,collections:w.viewer.registeredFontBytes.filter((b:Uint8Array)=>String.fromCharCode(...b.subarray(0,4))==="ttcf").length,png:png.length,frames:document.querySelectorAll("iframe").length};
+      } finally {bridge.dispose();style.remove();}
+    });
+    if(process.env.PPT_TEST_BROWSER==="firefox")expect(result.cssCopyRejected).toBe(true);
+    expect(result.validated).toBe(true);expect(result.applied).toBe(true);expect(result.complete).toBe(true);
+    expect(result.text).toContain("领导浏览器字体兼容回归");expect(result.fontStatus).toBe("loaded");expect(result.collections).toBe(0);expect(result.png).toBeGreaterThan(1000);expect(result.frames).toBe(0);
   },60000);
 
   it("uses the actual viewer and WASM assets, edits HTML locally, and reopens only PPTX with groups and text", async () => {

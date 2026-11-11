@@ -3,6 +3,7 @@ import { measureDesignDOM } from "./measure-dom";
 import { type DesignDocument, type MeasuredPage } from "./model";
 import { baselineFor, mergeHtmlDifference } from "./html-diff";
 import { parseDesignHtml } from "./html-document";
+import { copyScriptFontFaces } from "../page/browser-fonts";
 
 export type PrepareDesignFonts = (document: Document) => Promise<void>;
 
@@ -38,7 +39,7 @@ export async function measureHtmlInBrowser(html: string, prepareFonts?: PrepareD
     doc.querySelector("meta[http-equiv]")?.remove();
     const measured = (async () => {
       if (prepareFonts) await prepareFonts(doc);
-      else document.fonts.forEach(face => (doc.fonts as FontFaceSet & { add(face: FontFace): void }).add(face));
+      else copyScriptFontFaces(document.fonts, doc.fonts);
       const nonce = Array.from(crypto.getRandomValues(new Uint8Array(16)), n => n.toString(16).padStart(2, "0")).join("");
       return measureDesignDOM({ nonce, collectIssues }, doc);
     })();

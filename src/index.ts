@@ -21,6 +21,7 @@ import { DocumentSession } from "./document-session";
 import { expandForRender } from "./render-elements";
 import { resolveOpenFamily } from "./page/font-map";
 import { WorkerRenderer } from "./page/worker-renderer";
+import { browserFontBytes } from "./page/browser-fonts";
 
 export interface ViewerOptions {
   container: HTMLElement;
@@ -70,6 +71,7 @@ export default class PptViewer {
   private session: DocumentSession;
   private imageCache: Record<string, HTMLImageElement> = {};
   private registeredFontBytes: Uint8Array[] = [];
+  private backendDomFonts = new Map<string, FontFace>();
   private workerRenderer: WorkerRenderer | null = null;
   private slideJsonCache = new Map<string, string>();
   private renderedSlideCache = new Map<string, RenderedSlideSnapshot>();
@@ -315,23 +317,22 @@ export default class PptViewer {
       if (!response.ok) {
         throw new Error(`Font backend could not provide ${family} (${weight}, italic=${italic})`);
       }
-      const fontBytes = new Uint8Array(await response.arrayBuffer());
+      const fontBytes = browserFontBytes(new Uint8Array(await response.arrayBuffer()), family, weight, italic);
+      // Only programmatically created faces may be shared with the measurement
+      // frame. A failure must not silently leave DOM and WASM using different fonts.
+      let face: FontFace;
+      try {
+        face = await new FontFace(family, fontBytes.slice().buffer, {weight: String(weight), style: italic ? "italic" : "normal"}).load();
+        (document.fonts as FontFaceSet & {add(face: FontFace): void}).add(face);
+      } catch (error) {
+        throw new Error(`FONT_PREPARATION_FAILED: ${family} (${weight}, italic=${italic}): ${error instanceof Error ? error.message : String(error)}`);
+      }
       this.renderer.register_font(fontBytes);
       this.registeredFontBytes.push(fontBytes);
       if (this.cacheRenderer) {
         this.cacheRenderer.register_font(fontBytes);
       }
-      try {
-        // The in-place text editor is DOM based, so it needs the same font.
-        const face = new FontFace(family, fontBytes.slice().buffer, {
-          weight: String(weight),
-          style: italic ? "italic" : "normal"
-        });
-        // `add` is typed in lib.dom.iterable, which a host app may not include.
-        (document.fonts as FontFaceSet & { add(face: FontFace): void }).add(await face.load());
-      } catch (err) {
-        console.warn(`[Font Manager] DOM font registration failed for ${family}`, err);
-      }
+      this.backendDomFonts.set(key, face);
       this.loadedFontKeys.add(key);
       console.log(`[Font Manager] Registered backend font in Rust: ${family} (${weight}, italic=${italic}).`);
     })().finally(() => this.fontLoads.delete(key));
@@ -580,7 +581,14 @@ export default class PptViewer {
       });
     await Promise.all(requests.map(font => this.loadBackendFont(font.family, font.bold, font.italic)));
     for (const request of requests) request.el.style.setProperty("font-family", JSON.stringify(request.family), "important");
-    document.fonts.forEach(face => (frameDocument.fonts as FontFaceSet & { add(face: FontFace): void }).add(face));
+    // Do not enumerate document.fonts: application styles also contain
+    // CSS-connected faces, which Firefox correctly rejects in another set.
+    for (const request of requests) {
+      const key = `${request.family.toLowerCase()}|${request.bold ? 700 : 400}|${request.italic}`;
+      const face = this.backendDomFonts.get(key);
+      if (!face) throw new Error(`FONT_PREPARATION_FAILED: missing loaded face ${request.family}`);
+      (frameDocument.fonts as FontFaceSet & {add(face: FontFace): void}).add(face);
+    }
     await frameDocument.fonts.ready;
   }
 
@@ -620,6 +628,8 @@ export default class PptViewer {
     this.wheelTarget?.removeEventListener("wheel", this.wheelHandler);
     this.workerRenderer?.dispose();
     this.workerRenderer = null;
+    for (const face of this.backendDomFonts.values()) (document.fonts as FontFaceSet & {delete(face: FontFace): boolean}).delete(face);
+    this.backendDomFonts.clear();
     this.session.dispose();
   }
 
