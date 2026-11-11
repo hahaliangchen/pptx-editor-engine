@@ -94,6 +94,8 @@ export interface OutlineSlide {
   layout?: string;
   /** The page's background (its own, or the layout's or master's): a colour, or a gradient. */
   background?: string | OutlineGradient;
+  /** Bounds of inherited master/layout artwork, which is omitted from editable shapes. */
+  inheritedArtwork?: CmRect[];
   /** The visible full-page paint can be a shape over a different page background. */
   appearance?: { background?: string | OutlineGradient; source: "slide" | "shape"; shapeId?: string; tone: "light" | "dark" | "mixed" | "unknown" };
   shapes: OutlineShape[];
@@ -341,6 +343,14 @@ export function buildOutline(doc: PptVirtualDocument, options: OutlineOptions = 
           id: scene.slide.id,
           ...(scene.slide.layout ? { layout: scene.slide.layout } : {}),
           ...describeBackground(scene.slide),
+          inheritedArtwork: scene.slide.elements
+            .filter(element => !element.source && element.id !== "slide_background")
+            .map(element => ({
+              x: round(element.rect.x * emuPerPx / 360000),
+              y: round(element.rect.y * emuPerPx / 360000),
+              w: round(element.rect.w * emuPerPx / 360000),
+              h: round(element.rect.h * emuPerPx / 360000)
+            })),
           shapes: scene.roots.map(node => describeNode(node, emuPerPx, maxText))
         };
         if (scene.slide.rawXml) {

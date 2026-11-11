@@ -77,6 +77,13 @@ const paintRects = (node: DesignNode, textPaint?: Record<string,DesignRect[]>): 
   const a = node.appearance;
   return a.text && !a.src && !painted(a) && textPaint?.[node.id] !== undefined ? textPaint[node.id] : [a.rect];
 };
+/** Brand marks on the master/layout that page content must keep clear of. A
+ * near-full-page backdrop is not one, and neither is a decoration under the
+ * slide's own text (a title band): that is the text's intended background. */
+export function brandProtectedRegions(decorations: DesignRect[], ownText: DesignRect[]): DesignRect[] {
+  const centreIn = (t: DesignRect, r: DesignRect) => t.x + t.w / 2 >= r.x && t.x + t.w / 2 <= r.x + r.w && t.y + t.h / 2 >= r.y && t.y + t.h / 2 <= r.y + r.h;
+  return decorations.filter(r => (r.w < 1200 || r.h < 650) && !ownText.some(t => centreIn(t, r)));
+}
 /** Use trusted glyph extents for transparent text, complete bounds for painted boxes and assets. */
 export function checkFixedProtection(before: DesignPage, after: DesignPage, beforeTextPaint?: Record<string,DesignRect[]>, afterTextPaint?: Record<string,DesignRect[]>): Array<{nodeId?: string; message: string}> {
   const warnings: Array<{nodeId?: string; message: string}> = [];
@@ -120,6 +127,6 @@ export function applyDefaultPolicies(document: DesignDocument): void {
     const parent = page.nodes.find(n=>n.id===node.parentId);
     const text = node.appearance.text?.paragraphs.map(p=>p.runs.map(r=>r.text).join("")).join(" ").trim();
     node.purpose = annotatedPurpose(node.name) ?? (brandName(node.name) ? "fixed" : parent?.purpose === "reference" || parent?.purpose === "content" && annotatedPurpose(parent.name) ? parent.purpose
-      : text && (repeated.get(text)?.size ?? 0) >= 2 ? "fixed" : defaultPurpose(node));
+      : text && !/\{\{[^{}]+\}\}/.test(text) && (repeated.get(text)?.size ?? 0) >= 2 ? "fixed" : defaultPurpose(node));
   }
 }

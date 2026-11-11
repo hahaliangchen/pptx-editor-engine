@@ -86,6 +86,19 @@ export async function measureDesignDOM({ nonce, collectIssues = false }: { nonce
         if (points.length < 3) throw new Error(`A polygon needs at least three points: ${id}`);
         return points;
       };
+      // The HTML projection of an existing freeform can be a text node with a
+      // polygon that traces its entire rectangular box. It clips nothing and
+      // may safely be measured as ordinary text without changing its geometry.
+      const rectangularClip = (value: string, el: HTMLElement) => {
+        if (!value.startsWith("polygon(")) return false;
+        try {
+          const points = polygon(value, el.getBoundingClientRect(), el.dataset.id ?? "");
+          if (points.length === 5 && points[0][0] === points[4][0] && points[0][1] === points[4][1]) points.pop();
+          if (points.length !== 4 || new Set(points.map(p => p.join(","))).size !== 4) return false;
+          return points.every((p, i) => (p[0] === 0 || p[0] === 100) && (p[1] === 0 || p[1] === 100)
+            && ((p[0] === points[(i + 1) % 4][0]) !== (p[1] === points[(i + 1) % 4][1])));
+        } catch { return false; }
+      };
       const markerElements = Array.from(document.querySelectorAll<HTMLElement>("[data-kind]"));
       const elementPath = (el: HTMLElement): string => {
         const parts: string[] = [];
@@ -98,7 +111,7 @@ export async function measureDesignDOM({ nonce, collectIssues = false }: { nonce
       const invalidNode = (code: string, message: string, el: HTMLElement, recovery: string): never => {
         const owner = el.closest<HTMLElement>("[data-kind]");
         throw new Error(`${message}. ${JSON.stringify({
-          code, pageId, revision, tag: el.tagName.toLowerCase(), nodeId: el.dataset.id ?? null,
+          code, phase: "html_validation", applied: false, pageId, revision, tag: el.tagName.toLowerCase(), nodeId: el.dataset.id ?? null,
           ownerId: owner?.dataset.id ?? null, ownerKind: owner?.dataset.kind ?? null,
           ownerIndex: owner ? markerElements.indexOf(owner) : null,
           selector: elementPath(el), htmlSnippet: el.outerHTML.slice(0, 700),
@@ -137,7 +150,7 @@ export async function measureDesignDOM({ nonce, collectIssues = false }: { nonce
         }
         // Gradients and shadows are native shape paint; a polygon clip is native shape geometry.
         const paintable = ["shape", "text"].includes(el.dataset.kind ?? "");
-        if (style.transform !== "none" || style.scale && style.scale !== "none" || style.rotate && style.rotate !== "none" || style.translate && style.translate !== "none" || style.filter !== "none" || style.backdropFilter && style.backdropFilter !== "none" || style.mixBlendMode !== "normal" || Number(style.opacity) !== 1 || !paintable && (style.boxShadow !== "none" || style.backgroundImage !== "none") || style.zIndex !== "auto" || style.clipPath !== "none" && el.dataset.kind !== "shape" || style.textShadow !== "none" || style.clip !== "auto" || style.maskImage && style.maskImage !== "none" || style.contain.includes("paint") || style.contentVisibility !== "visible" || el.tagName !== "IMG" && [style.overflowX,style.overflowY].some(v=>v!=="visible")) throw new Error(`Unsupported CSS on ${el.dataset.id ?? el.tagName}; use a separate image/SVG asset`);
+        if (style.transform !== "none" || style.scale && style.scale !== "none" || style.rotate && style.rotate !== "none" || style.translate && style.translate !== "none" || style.filter !== "none" || style.backdropFilter && style.backdropFilter !== "none" || style.mixBlendMode !== "normal" || Number(style.opacity) !== 1 || !paintable && (style.boxShadow !== "none" || style.backgroundImage !== "none") || style.zIndex !== "auto" || style.clipPath !== "none" && el.dataset.kind !== "shape" && !(el.dataset.kind === "text" && rectangularClip(style.clipPath, el)) || style.textShadow !== "none" || style.clip !== "auto" || style.maskImage && style.maskImage !== "none" || style.contain.includes("paint") || style.contentVisibility !== "visible" || el.tagName !== "IMG" && [style.overflowX,style.overflowY].some(v=>v!=="visible")) throw new Error(`Unsupported CSS on ${el.dataset.id ?? el.tagName}; use a separate image/SVG asset`);
         const owner = el.closest<HTMLElement>("[data-kind]");
         if (el !== body && !el.dataset.kind && (!transparent(style.backgroundColor) || px(style.borderTopWidth) || px(style.borderLeftWidth))) invalidNode(
           "UNMARKED_PAINTED_CONTAINER", "Painted container is missing data-kind", el,

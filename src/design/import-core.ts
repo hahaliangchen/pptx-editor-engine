@@ -1,7 +1,7 @@
 import { parseBinding } from "../api/template";
 import type { ElementSource, ShapeElement, Slide, SlideElement, TextElement, PptVirtualDocument } from "../pptx-virtual-dom";
 import { cloneDesign, DesignAppearance, DesignDocument, DesignNode, DesignParagraph, DesignRect, DesignPage } from "./model";
-import { applyDefaultPolicies, readTemplateRecord } from "./template-policy";
+import { applyDefaultPolicies, readTemplateRecord, brandProtectedRegions } from "./template-policy";
 import { bytesToBase64, sha256Hex } from "./bytes";
 import { hasExtendedPaint, readNativePaint } from "./paint";
 export interface ImportRuntime {
@@ -45,7 +45,8 @@ export async function importDocument(bytes: Uint8Array, doc: PptVirtualDocument,
       const byShape = new Map<string, SlideElement[]>();
       for (const element of slide.elements) if (element.source?.part === part) byShape.set(element.source.shapeId, [...(byShape.get(element.source.shapeId) ?? []), element]);
       const decoration = slide.elements.filter(e => !e.source || e.source.part !== part);
-      if (decoration.length) page.nodes.push({ id: `${part}#backdrop`, name: "Master and background", kind: "asset", lock: "all", required: true, metadata: { backdrop: true, protectedRegions: decoration.filter(e => e.rect.w * scale < 1200 || e.rect.h * scale < 650).map(e => rect(e.rect)) }, appearance: { rect: { x: 0, y: 0, w: 1280, h: 720 }, src: await runtime.preview(slide, decoration, { x: 0, y: 0, w: 1280, h: 720 }) } });
+      const protectedRegions = brandProtectedRegions(decoration.map(e => rect(e.rect)), slide.elements.filter(e => e.source?.part === part && e.type === "text").map(e => rect(e.rect)));
+      if (decoration.length) page.nodes.push({ id: `${part}#backdrop`, name: "Master and background", kind: "asset", lock: "all", required: true, metadata: { backdrop: true, protectedRegions }, appearance: { rect: { x: 0, y: 0, w: 1280, h: 720 }, src: await runtime.preview(slide, decoration, { x: 0, y: 0, w: 1280, h: 720 }) } });
       const xml = new DOMParser().parseFromString(slide.rawXml, "application/xml");
       const record = readTemplateRecord(xml);
       page.semantics = record?.page;

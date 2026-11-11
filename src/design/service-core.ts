@@ -3,7 +3,7 @@ import { assertDesign, cloneDesign, DesignDocument } from "./model";
 import { base64ToBytes, sha256Hex } from "./bytes";
 import { parseDesignHtml } from "./html-document";
 export interface DesignRequest {
-  operation: "sync" | "apply" | "pages";
+  operation: "sync" | "apply" | "pages" | "prepare" | "materialize";
   design?: DesignDocument;
   pptxBase64?: string;
   html?: string;
@@ -11,6 +11,8 @@ export interface DesignRequest {
   baselineHtml?: string;
   /** Host-issued exact, version-bound author confirmation; never an AI tool argument. */
   semanticAuthorization?: TemplateSemanticAuthorization;
+  /** Inherited from real blocks by fill_layout; not an AI tool argument. */
+  layoutCopies?: import("./layout-fill").LayoutCopy[];
   /** Host-resolved assets, never accepted from model tool arguments. */
   nativeAssets?: Record<string, { viewBox: [number, number, number, number]; shapesXml: string }>;
   expectedRevision?: number;
@@ -82,7 +84,8 @@ export function createDesignConverter(runtime: DesignRuntime) {
     const design = request.design;
     if (!design) throw new Error("Read the current design before changing it");
     assertDesign(design);
-    if (request.operation === "apply") {
+    if (request.operation === "materialize") return materializeDesign(design);
+    if (request.operation === "apply" || request.operation === "prepare") {
       if (!request.html) throw new Error("apply requires a complete HTML document");
       const resolveAssets = (source: string) => {
         const html = parseDesignHtml(source);
@@ -97,6 +100,17 @@ export function createDesignConverter(runtime: DesignRuntime) {
         return "<!doctype html>" + html.documentElement.outerHTML;
       };
       const merged = await mergeHtml(design, resolveAssets(request.html), request.baselineHtml ? resolveAssets(request.baselineHtml) : undefined, request.semanticAuthorization);
+      if (request.layoutCopies?.length) {
+        const oldIds = new Set(design.pages.flatMap(p=>p.nodes.map(n=>n.id)));
+        const pageId = parseDesignHtml(request.html).body.dataset.pageId;
+        const page = merged.pages.find(p=>p.id===pageId)!;
+        for (const copy of request.layoutCopies) {
+          const node = page.nodes.find(n=>n.id===copy.nodeId);
+          if (!node || oldIds.has(copy.nodeId)) throw new Error("Invalid layout copy identity");
+          node.purpose = copy.purpose; node.slot = copy.slot;
+        }
+        page.semanticsChanged = true;
+      }
       if (merged.revision === design.revision) return merged;
       for (const page of merged.pages) for (const node of page.nodes) {
         const previous = design.pages.flatMap(p => p.nodes).find(n => n.id === node.id);
@@ -105,7 +119,7 @@ export function createDesignConverter(runtime: DesignRuntime) {
           if (native) node.nativeArt = native;
         }
       }
-      return materializeDesign(merged);
+      return request.operation === "prepare" ? merged : materializeDesign(merged);
     }
     if (request.operation === "pages") {
       const commands = request.commands;

@@ -97,9 +97,10 @@ describe("layout fill", () => {
     expect(kept.map(c => [c.style.left, c.style.top])).toEqual([["40px", "100px"], ["370px", "100px"], ["40px", "220px"], ["370px", "220px"]]);
     const more = doc(fillLayout(row, { sets: [{ set: "要点卡#1", items: [1, 2, 3, 4].map(i => ({ fields: { text: `能力${i}` } })) }] }).html);
     expect(more.querySelectorAll('[data-slot="要点卡#1"]')).toHaveLength(3);
-    const copy = Array.from(more.body.children).find(c => c.getAttribute("data-kind") === "group" && !c.hasAttribute("data-id")) as HTMLElement;
+    const copy = Array.from(more.body.children).find(c => c.getAttribute("data-kind") === "group" && c.getAttribute("data-id")?.startsWith("new:layout-")) as HTMLElement;
     expect(copy.querySelector("p")!.textContent).toBe("能力4");
-    expect(copy.querySelector("[data-id],[data-slot],[data-purpose],[data-note]")).toBeNull();
+    expect(copy.querySelector("[data-slot],[data-purpose],[data-note]")).toBeNull();
+    expect(Array.from(copy.querySelectorAll("[data-kind]")).every(el=>el.getAttribute("data-id")?.startsWith("new:layout-"))).toBe(true);
     expect(copy.innerHTML).toContain("linear-gradient(180deg, #ffffff 0%, #fdf3f3 100%)");
     expect(more.querySelectorAll('[data-kind="text"]')).toHaveLength(1 + 4 + 3);
   });
@@ -275,4 +276,12 @@ describe("layout fill", () => {
     expect(ribCentre).toBeCloseTo(240, 0);
     expect(parseFloat(label.style.left) + parseFloat(label.style.width) / 2).toBeCloseTo(parseFloat(rib.style.width) / 2, 0);
   });
+});
+
+it('exposes loose title/note roles without making them block fields or header indices',()=>{
+  const html=row.replace('data-id="title"','data-slot="title" data-id="title"')+
+    '<div data-id="note" data-kind="text" data-purpose="content" data-slot="note"><p>口径说明</p></div>';
+  const summary=describeLayout(html);
+  expect(summary.texts).toEqual([{id:'title',text:['页面标题——副标题占位'],slot:'title'},{id:'note',text:['口径说明'],slot:'note'}]);
+  expect(summary.sets[0].items[0].fields).toEqual({text:['要点标题','■\u00a0说明文字占位']});
 });

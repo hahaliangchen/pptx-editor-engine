@@ -18,6 +18,9 @@ export interface ToolCallTransport {
 }
 
 export interface PageToolLinkOptions {
+  /** Only page-isolated operations may opt in. Always capped at three. */
+  parallel?: Set<string>;
+  concurrency?: number;
   /** Run a tool against the open deck. */
   run(name: string, args: unknown): Promise<ToolResult>;
   /** Tools that change the deck; after one succeeds `persist` runs before the reply. */
@@ -54,7 +57,11 @@ export class PageToolLink {
 
   private async loop(): Promise<void> {
     let failures = 0;
+    const active = new Set<Promise<void>>();
+    const requested = this.options.concurrency ?? 1;
+    const limit = Number.isFinite(requested) ? Math.max(1, Math.min(3, Math.floor(requested))) : 1;
     while (this.running) {
+      if (active.size >= limit) {await Promise.race(active); continue;}
       let calls: PageToolCall[];
       try {
         calls = await this.transport.next(this.options.waitMs ?? 20000);
@@ -67,10 +74,18 @@ export class PageToolLink {
         continue;
       }
       for (const call of calls) {
-        if (!this.running) return;
-        await this.answer(call);
+        if (!this.running) break;
+        if (!this.options.parallel?.has(call.name)) {
+          await Promise.all(active);
+          await this.answer(call);
+        } else {
+          while (active.size >= limit) await Promise.race(active);
+          const job = this.answer(call).finally(() => active.delete(job));
+          active.add(job);
+        }
       }
     }
+    await Promise.all(active);
   }
 
   private async answer(call: PageToolCall): Promise<void> {
@@ -78,7 +93,12 @@ export class PageToolLink {
     let result: ToolResult;
     try {
       result = await this.options.run(call.name, call.arguments);
-      if (result.ok && this.options.mutating.has(call.name) && this.options.persist) {
+      const saved = result.content.some(part => {
+        if (part.type !== 'text') return false;
+        try {const data = JSON.parse(part.text); return data.saved === true && Number.isInteger(data.stored_revision) && data.stored_revision > 0;}
+        catch {return false;}
+      });
+      if (result.ok && !saved && this.options.mutating.has(call.name) && this.options.persist) {
         const revision = await this.options.persist();
         result = { ...result, content: [...result.content, { type: "text", text: JSON.stringify({ saved: true, stored_revision: revision }) }] };
       }

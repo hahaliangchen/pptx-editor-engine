@@ -1,12 +1,14 @@
 import { describeLayout, fillLayout, layoutIssues } from "../design/layout-fill";
 import { templateSemanticPermissionError, templateSemanticProposal, type TemplateSemanticProposal, type TemplateSemanticEdit } from "../design/template-semantics";
 import { effectivePurpose, effectiveLock } from "../design/template-policy";
-import { nodeText } from "../design/model";
+import { nodeText, cloneDesign } from "../design/model";
+import { PageFillQueue } from "./page-fill-queue";
 import type { DesignDocument } from "../design/model";
 import { projectPage } from "../design/projection";
 import type { DesignRequest } from "../design/service-core";
 import type { ToolResult } from "../api/tools";
 import { parseDesignHtml } from "../design/html-document";
+import { editHtmlSource } from "../design/html-edits";
 
 export interface DesignViewer {
   snapshotPptx(): Promise<Blob>;
@@ -17,6 +19,8 @@ export interface DesignViewer {
   selectSlide(index: number): Promise<unknown>;
 }
 export interface DesignBridgeOptions {
+  /** Acknowledge a merged page batch before any page returns saved:true. */
+  persist?: () => Promise<number>;
   mode?: "generation" | "template-authoring";
   convertInlineSvg?: (svg: string) => Promise<{ viewBox: [number, number, number, number]; shapesXml: string }>;
   resolveNativeAsset?: (path: string) => Promise<{ viewBox: [number, number, number, number]; shapesXml: string } | undefined>;
@@ -24,6 +28,7 @@ export interface DesignBridgeOptions {
   confirmSemanticChanges?: (proposal: TemplateSemanticProposal) => Promise<boolean>;
 }
 export type DesignConverter = (request: DesignRequest) => Promise<DesignDocument>;
+interface PreparedFill {page: number; pageId: string; generation: number; next: DesignDocument; changed: boolean; notes: string[]; contentComplete: boolean}
 export function base64Bytes(value: string): Uint8Array {
   const decoded = atob(value), bytes = new Uint8Array(decoded.length);
   for (let i = 0; i < decoded.length; i++) bytes[i] = decoded.charCodeAt(i);
@@ -48,11 +53,13 @@ export class DesignBridge {
   private refreshTimer?: ReturnType<typeof setTimeout>;
   private syncing?: Promise<DesignDocument>;
   private html = new Map<string, string>();
+  private editGeneration = 0;
+  private fills = new PageFillQueue<PreparedFill, ToolResult>(values => this.commitFills(values));
   constructor(private viewer: DesignViewer, private convert: DesignConverter,
     private resolveAsset?: (path: string) => Promise<string>, private options: DesignBridgeOptions = {}) {}
   edited(): void {
     if (this.loading || this.disposed) return;
-    this.epoch++; this.html.clear();
+    this.epoch++; this.editGeneration++; this.html.clear();
     this.scheduleRefresh();
   }
   /** Called on edit completion too: typing may have flushed while still active. */
@@ -71,15 +78,24 @@ export class DesignBridge {
     const id = this.design?.pages[page - 1]?.id;
     return id ? this.html.get(id) : undefined;
   }
-  dispose(): void { this.disposed = true; this.reset(); }
+  dispose(): void { this.disposed = true; this.fills.dispose(); this.reset(); }
   get pending(): boolean { return this.dirty; }
   saved(): void { this.dirty = false; }
-  reset(): void { clearTimeout(this.refreshTimer); this.html.clear(); this.design = undefined; this.captured = -1; this.epoch++; this.dirty = false; }
+  reset(): void { clearTimeout(this.refreshTimer); this.html.clear(); this.design = undefined; this.captured = -1; this.epoch++; this.editGeneration++; this.dirty = false; }
 
   private project(design: DesignDocument): void {
     const projection = JSON.parse(JSON.stringify(design)) as DesignDocument;
     for (const page of projection.pages) for (const node of page.nodes) if (node.appearance.src) node.appearance.src = `design-asset:${encodeURIComponent(node.id)}`;
     this.html = new Map(projection.pages.map(page => [page.id, projectPage(projection, page.id)]));
+  }
+
+  /** Keep a read's HTML and node metadata on the same immutable snapshot even
+   * when another page finishes installing between async continuations. */
+  private pageHtml(design: DesignDocument, pageId: string): string {
+    if (design === this.design && this.html.has(pageId)) return this.html.get(pageId)!;
+    const projection = cloneDesign(design);
+    for (const page of projection.pages) for (const node of page.nodes) if (node.appearance.src) node.appearance.src = `design-asset:${encodeURIComponent(node.id)}`;
+    return projectPage(projection, pageId);
   }
 
   private async current(): Promise<DesignDocument> {
@@ -179,10 +195,86 @@ export class DesignBridge {
       return edits.length ? this.updateTemplateSemantics(page, edits) : grouped;
     } catch(error) { return {ok:false,content:[{type:"text",text:error instanceof Error?error.message:String(error)}]}; }
   }
-  async run(name: string, args: any): Promise<ToolResult> { return this.execute(name,args); }
-  private async execute(name: string, args: any, humanForm = false, nested = false): Promise<ToolResult> {
-    if (this.running && !nested) return { ok: false, content: [{ type: "text", text: "Design conversion is already running" }] };
-    this.running = true;
+  async run(name: string, args: any): Promise<ToolResult> {
+    if (name === 'edit_html' && !this.options.persist) {
+      try {
+        const design = await this.current(), page = design.pages[args?.page - 1];
+        if (!Number.isInteger(args?.page) || !page) throw new Error('Invalid page number');
+        const html = this.editedPageHtml(design, args.page, args.edits);
+        return await this.run('apply_html', {html, content_complete: args?.content_complete});
+      } catch (error) { return {ok:false,content:[{type:'text',text:error instanceof Error ? error.message : String(error)}]}; }
+    }
+    if ((name === 'fill_layout' || name === 'apply_html' || name === 'edit_html') && this.options.persist) {
+      try {
+        const page = name !== 'apply_html' ? args?.page : (await this.current()).pages.findIndex(p=>p.id===parseDesignHtml(args?.html ?? '', true).body.dataset.pageId)+1;
+        return await this.fills.run(page, () => this.prepareFill(args, name, page));
+      }
+      catch (error) { return {ok:false,content:[{type:'text',text:error instanceof Error ? error.message : String(error)}]}; }
+    }
+    if (this.fills.pending && !this.isRead(name)) return {ok:false,content:[{type:'text',text:'LAYOUT_FILL_BUSY: wait for the pending page results'}]};
+    return this.execute(name,args);
+  }
+  private editedPageHtml(design: DesignDocument, pageNumber: number, edits: Parameters<typeof editHtmlSource>[1]): string {
+    try {
+      const page = design.pages[pageNumber - 1];
+      if (!Number.isInteger(pageNumber) || !page) throw new Error('Invalid page number');
+      const html = editHtmlSource(this.pageHtml(design, page.id), edits);
+      if (parseDesignHtml(html, true).body.dataset.pageId !== page.id) throw new Error('HTML_EDIT_PAGE_IDENTITY: a source edit must preserve its page identity');
+      return html;
+    } catch (error) {
+      throw new Error(JSON.stringify({code:'HTML_EDIT_REJECTED',phase:'html_validation',applied:false,page:pageNumber,
+        cause:error instanceof Error ? error.message : String(error)}));
+    }
+  }
+  private async prepareFill(args: any, name = 'fill_layout', pageNumber = args?.page): Promise<PreparedFill> {
+    if (this.running) throw new Error('Design conversion is already running');
+    const before = cloneDesign(await this.current()), generation = this.editGeneration;
+    const page = before.pages[pageNumber - 1];
+    if (!Number.isInteger(pageNumber) || !page) throw new Error('Invalid page number');
+    if (name === 'fill_layout' && page.semantics?.fill !== 'layout') throw new Error(`FILL_LAYOUT: page ${pageNumber} is not marked layout fill`);
+    const filled = name === 'fill_layout' ? fillLayout(this.html.get(page.id)!, {texts:args.texts,sets:args.sets})
+      : {html:name === 'edit_html' ? this.editedPageHtml(before, pageNumber, args.edits) : args.html,notes:[],copies:[]};
+    const result = await this.execute('apply_html', {html:filled.html}, false, true, before, filled.copies);
+    if (!result.ok) throw new Error(JSON.stringify({code:'PAGE_PREPARATION_REJECTED',phase:'page_prepare',applied:false,page:pageNumber,
+      cause:result.content.filter(p=>p.type==='text').map(p=>(p as {text:string}).text).join('\n')}));
+    const next = (result as ToolResult & {prepared:DesignDocument}).prepared;
+    return {page:pageNumber,pageId:page.id,generation,next,changed:next.revision!==before.revision,notes:filled.notes,contentComplete:args?.content_complete===true};
+  }
+  private async commitFills(values: PreparedFill[]): Promise<ToolResult[]> {
+    const generation = this.editGeneration;
+    if (this.disposed || this.viewer.hasActiveInteraction?.() || values.some(v=>v.generation!==generation)) throw new Error('EDITOR_CHANGED: read current pages before retrying the affected fills');
+    const before = await this.current();
+    if (generation !== this.editGeneration) throw new Error('EDITOR_CHANGED: document changed before page merge');
+    const merged = cloneDesign(before), ids = new Set(values.map(v=>v.pageId));
+    for (const value of values) {
+      const at = merged.pages.findIndex(p=>p.id===value.pageId), prepared = value.next.pages.find(p=>p.id===value.pageId);
+      if (at < 0 || !prepared || merged.pages[at].part !== prepared.part) throw new Error('EDITOR_CHANGED: page identity changed');
+      if (value.changed) merged.pages[at] = cloneDesign(prepared);
+    }
+    merged.diagnostics = [...merged.diagnostics.filter(d=>!ids.has(d.pageId)), ...values.flatMap(v=>v.next.diagnostics.filter(d=>d.pageId===v.pageId))];
+    merged.changes = values.flatMap(v=>(v.next.changes??[]).filter(c=>c.pageId===v.pageId));
+    if (values.some(v=>v.changed)) {
+      merged.revision = before.revision + 1;
+      const next = await this.convert({operation:'materialize',design:merged});
+      if (this.disposed || generation !== this.editGeneration) throw new Error('EDITOR_CHANGED: document changed during page materialization');
+      await this.install(before,next);
+    }
+    const revision = await this.options.persist!();
+    if (!Number.isInteger(revision) || revision <= 0) throw new Error('Page batch save returned no valid stored revision');
+    return values.map(value => this.result({applied:value.changed,content_complete:value.contentComplete,needsSave:false,design_revision:this.design!.revision,
+      pages:this.design!.pages.length,pageList:this.design!.pages.map((p,i)=>({page:i+1,id:p.id})),
+      diagnostics:this.design!.diagnostics.filter(d=>d.pageId===value.pageId).map(d=>d.message.split(' {')[0]).slice(0,12),
+      ...(value.notes.length?{fillNotes:value.notes}:{}),saved:true,stored_revision:revision,
+      pageConcurrency:{limit:3,peakPreparing:this.fills.peakPreparing,savedPages:values.map(v=>v.page)}}));
+  }
+  private isRead(name: string): boolean {
+    return ["get_design", "get_layout", "get_template", "suggest_annotations"].includes(name);
+  }
+  private async execute(name: string, args: any, humanForm = false, nested = false, prepareBase?: DesignDocument, layoutCopies?: DesignRequest["layoutCopies"]): Promise<ToolResult> {
+    const read = this.isRead(name);
+    if (!read && !prepareBase && this.fills.pending && !nested) return {ok:false,content:[{type:'text',text:'LAYOUT_FILL_BUSY: wait for pending page results'}]};
+    if (!read && this.running && !nested) return { ok: false, content: [{ type: "text", text: "Design conversion is already running" }] };
+    if (!read && !prepareBase) this.running = true;
     try {
       const a = args ?? {};
       if (name === "get_template" || name === "suggest_annotations") {
@@ -208,16 +300,17 @@ export class DesignBridge {
         // Template authoring edits the page itself and always reads all of it.
         if (page.semantics?.fill === "layout" && a.html !== true && this.options.mode !== "template-authoring") return this.result({ ...identity, page: a.page, pageId: page.id, semantics: page.semantics, semanticsDefined: true,
           layoutFill: "按版式填充页：用 get_layout 读取块与字段，用 fill_layout 提交内容。确需整页 HTML 时传 html: true。" });
-        return this.result({ ...identity, page: a.page, pageId: page.id, semantics: page.semantics ?? {}, semanticsDefined:page.semantics!==undefined, nodes: page.nodes.map(n => ({id:n.id, shapeId:n.origin?.shapeId ?? n.metadata?.sourceShapeId, name:n.name, kind:n.kind, parentId:n.parentId, purpose:effectivePurpose(page,n), note:n.note, slot:n.slot, locked:effectiveLock(page,n)})), ...(page.semantics?.fill === "layout" ? { layoutIssues: layoutIssues(this.html.get(page.id)!) } : {}), assets: page.nodes.filter(n => n.appearance.src).map(n => ({ id: n.id, name: n.name, src: `design-asset:${encodeURIComponent(n.id)}`, locked: effectiveLock(page,n), purpose: effectivePurpose(page,n), note:n.note })), html: this.html.get(page.id) });
+        const html = this.pageHtml(design, page.id);
+        return this.result({ ...identity, page: a.page, pageId: page.id, semantics: page.semantics ?? {}, semanticsDefined:page.semantics!==undefined, nodes: page.nodes.map(n => ({id:n.id, shapeId:n.origin?.shapeId ?? n.metadata?.sourceShapeId, name:n.name, kind:n.kind, parentId:n.parentId, purpose:effectivePurpose(page,n), note:n.note, slot:n.slot, ...(n.kind === "text" ? {text:nodeText(n)} : {}), locked:effectiveLock(page,n)})), ...(page.semantics?.fill === "layout" ? { layoutIssues: layoutIssues(html) } : {}), assets: page.nodes.filter(n => n.appearance.src).map(n => ({ id: n.id, name: n.name, src: `design-asset:${encodeURIComponent(n.id)}`, locked: effectiveLock(page,n), purpose: effectivePurpose(page,n), note:n.note, ...((n.metadata?.protectedRegions as unknown[] | undefined)?.length ? { protectedRegions: n.metadata!.protectedRegions } : {}) })), html });
       }
       if (name === "get_layout" || name === "fill_layout") {
         const design = await this.current(), page = design.pages[a.page - 1];
         if (!Number.isInteger(a.page) || !page) throw new Error("Invalid page number");
         if (page.semantics?.fill !== "layout") throw new Error(`FILL_LAYOUT: page ${a.page} is not marked layout fill; design it with get_design and apply_html`);
-        const html = this.html.get(page.id)!;
+        const html = this.pageHtml(design, page.id);
         if (name === "get_layout") return this.result({ revision: design.revision, page: a.page, pageId: page.id, ...describeLayout(html) });
         const filled = fillLayout(html, { texts: a.texts, sets: a.sets });
-        const applied = await this.execute("apply_html", { html: filled.html, content_complete: a.content_complete }, false, true);
+        const applied = await this.execute("apply_html", { html: filled.html, content_complete: a.content_complete }, false, true, undefined, filled.copies);
         if (!applied.ok) return applied;
         // Content-only call, content-sized answer: counts and this page's diagnostics, not every changed field.
         const data = JSON.parse((applied.content[0] as { text: string }).text);
@@ -228,8 +321,7 @@ export class DesignBridge {
           diagnostics: (data.diagnostics ?? []).filter((d: { pageId?: string }) => d.pageId === page.id).map((d: { message: string }) => d.message.split(" {")[0]).slice(0, 12),
           ...(filled.notes.length ? { fillNotes: filled.notes } : {}) }) }] };
       }
-      await this.current();
-      const before = await this.current();
+      const before = prepareBase ?? await this.current();
       const request: DesignRequest = name === "apply_html" || name === "validate_html"
         ? { operation: "apply", design: before, expectedRevision: before.revision, html: a.html }
         : { operation: "pages", design: before, expectedRevision: before.revision, commands: a.commands };
@@ -291,13 +383,24 @@ export class DesignBridge {
         }
         request.html = "<!doctype html>" + html.documentElement.outerHTML;
       }
+      if (layoutCopies?.length) request.layoutCopies = layoutCopies;
+      if (prepareBase) request.operation = 'prepare';
       // Validation uses the same conversion and protection checks on an isolated
       // snapshot, but never installs the result into the viewer or marks it dirty.
       if (name === "validate_html") request.design = JSON.parse(JSON.stringify(before));
       const next = await this.convert(request);
       if (this.disposed) throw new Error("PAGE_CLOSED: design bridge disposed");
+      if (prepareBase) return {ok:true,content:[],prepared:next} as ToolResult & {prepared:DesignDocument};
       if (name === "validate_html") return this.result({ revision: before.revision, validated: true, applied: false, content_complete: false, needsSave: false, changes: next.changes ?? [], diagnostics: next.diagnostics });
       if (next.revision === before.revision && next.source.sha256 === before.source.sha256) return this.result({ revision: next.revision, applied: false, content_complete: a.content_complete === true, needsSave: this.dirty, changes: [] });
+      await this.install(before,next);
+      this.editGeneration++;
+      return this.result({ revision: next.revision, pages: next.pages.length, pageList: next.pages.map((p,i)=>({page:i+1,id:p.id})), applied: true, content_complete: a.content_complete === true, needsSave: true, changes: next.changes ?? [], diagnostics: next.diagnostics });
+    } catch (error) {
+      return { ok: false, content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }] };
+    } finally { if (!read && !prepareBase) this.running = false; if (this.captured !== this.epoch) this.scheduleRefresh(); }
+  }
+  private async install(before:DesignDocument,next:DesignDocument): Promise<void> {
       const selected = this.viewer.getCurrentSlideIndex();
       this.loading = true;
       try {
@@ -311,10 +414,6 @@ export class DesignBridge {
       } finally { this.loading = false; }
       this.epoch++; this.captured = this.epoch; this.design = next; this.dirty = true;
       this.project(next);
-      return this.result({ revision: next.revision, pages: next.pages.length, pageList: next.pages.map((p,i)=>({page:i+1,id:p.id})), applied: true, content_complete: a.content_complete === true, needsSave: true, changes: next.changes ?? [], diagnostics: next.diagnostics });
-    } catch (error) {
-      return { ok: false, content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }] };
-    } finally { this.running = false; if (this.captured !== this.epoch) this.scheduleRefresh(); }
   }
   private result(value: any): ToolResult {
     const {revision,...data}=value;

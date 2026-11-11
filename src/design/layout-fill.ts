@@ -4,7 +4,8 @@ import { parseDesignHtml } from "./html-document";
  * Layout fill: on a page the author marked `fill: "layout"`, the AI sends content only and the host
  * edits the page's own HTML. Blocks are groups whose template slot is "<block>#<set>"; siblings with
  * the same slot form a repeatable set, "sep#<set>" marks the separators between them, and every other
- * slot names a field inside its nearest block ("title", "body", "icon" …). Existing blocks keep their
+ * slot names a field inside its nearest block ("title", "body", "icon" …); outside a block a text slot
+ * identifies a named loose text such as title, page-number or note. Existing blocks keep their
  * identity and markup; extra items are copies of a block, so styles are copied, never redrawn.
  */
 export interface FillItem { fields?: Record<string, string | string[]>; icons?: Record<string, string>; sets?: FillSet[] }
@@ -12,7 +13,7 @@ export interface FillSet { set: string; columns?: number; items: FillItem[] }
 export interface FillRequest { texts?: Record<string, string | string[]>; sets?: FillSet[] }
 export interface LayoutItem { fields: Record<string, string[]>; icons: string[]; sets: LayoutSet[] }
 export interface LayoutSet { set: string; block: string; arrangement: Arrangement; columns: number; items: LayoutItem[] }
-export interface LayoutSummary { texts: Array<{ id: string; text: string[] }>; sets: LayoutSet[] }
+export interface LayoutSummary { texts: Array<{ id: string; text: string[]; slot?: string }>; sets: LayoutSet[] }
 type Arrangement = "single" | "row" | "column" | "grid";
 interface Rect { x: number; y: number; w: number; h: number }
 
@@ -66,8 +67,8 @@ export function describeLayout(html: string): LayoutSummary {
     })
   }));
   const texts = Array.from(doc.body.querySelectorAll<HTMLElement>('[data-kind="text"][data-id]'))
-    .filter(el => !el.dataset.slot && !blockOf(el) && el.dataset.purpose === "content")
-    .map(el => ({ id: el.dataset.id!, text: paragraphs(el).map(p => short(p.textContent ?? "")) }));
+    .filter(el => !blockOf(el) && el.dataset.purpose === "content" && !slotOf(el).startsWith("sep#"))
+    .map(el => ({ id: el.dataset.id!, text: paragraphs(el).map(p => short(p.textContent ?? "")), ...(el.dataset.slot ? {slot:el.dataset.slot} : {}) }));
   return { texts, sets: describe(null) };
 }
 
@@ -97,7 +98,6 @@ export function layoutIssues(html: string): LayoutIssue[] {
     const block = blockOf(el);
     // One or two characters (», ■, ①) are the block's decoration and are copied with it.
     if (block && !el.dataset.slot && el.dataset.purpose === "content" && (el.textContent ?? "").trim().length > 2) issues.push({ severity: "warning", ids: [id(el)], message: `块「${slotOf(block)}」里的这段文字没有字段名，生成时填不到` });
-    if (!block && el.dataset.slot && !BLOCK.test(el.dataset.slot)) issues.push({ severity: "warning", ids: [id(el)], message: `字段「${el.dataset.slot}」不在任何块里；页面上的单独文字不需要字段名` });
   }
   return issues;
 }
@@ -525,16 +525,25 @@ function fillRest(block: Element, item: FillItem, notes: string[]): void {
   for (const set of item.sets ?? []) fillSet(block, block, set, notes);
 }
 
-/** Copies are new objects: they carry no identity or template annotations of their own. */
-function settleCopies(doc: Document): void {
-  for (const copy of Array.from(doc.querySelectorAll("[data-fill-new]"))) {
-    for (const el of [copy, ...Array.from(copy.querySelectorAll("*"))]) {
+export interface LayoutCopy { nodeId: string; purpose: "fixed" | "content" | "reference"; slot?: string }
+let copySequence = 0;
+/** New identities and inherited field roles are issued by fill_layout, never by AI HTML. */
+function settleCopies(doc: Document): LayoutCopy[] {
+  const copies: LayoutCopy[] = [], nonce = `${Date.now()}-${++copySequence}`;
+  const elements = new Set(Array.from(doc.querySelectorAll("[data-fill-new]")).flatMap(copy=>[copy,...Array.from(copy.querySelectorAll("*"))]));
+  for (const el of elements) {
+      const marked = el.hasAttribute("data-kind"), slot = slotOf(el), purpose = el.getAttribute("data-purpose");
       for (const attr of ["data-fill-new", "data-id", "data-slot", "data-purpose", "data-note", "data-name", "data-locked", "data-required", "data-role", "data-bind", "data-max-chars"]) el.removeAttribute(attr);
-    }
+      if (marked) {
+        const nodeId = `new:layout-${nonce}:${copies.length}`;
+        el.setAttribute("data-id", nodeId);
+        copies.push({nodeId,purpose:purpose === "fixed" || purpose === "reference" ? purpose : "content",...(slot ? {slot} : {})});
+      }
   }
+  return copies;
 }
 
-export function fillLayout(html: string, request: FillRequest): { html: string; notes: string[] } {
+export function fillLayout(html: string, request: FillRequest): { html: string; notes: string[]; copies: LayoutCopy[] } {
   const doc = parseDesignHtml(html, true), notes: string[] = [];
   for (const [id, value] of Object.entries(request.texts ?? {})) {
     const el = Array.from(doc.querySelectorAll<HTMLElement>("[data-id]")).find(n => n.dataset.id === id);
@@ -543,8 +552,8 @@ export function fillLayout(html: string, request: FillRequest): { html: string; 
   }
   const mentioned = new Set<string>();
   for (const set of request.sets ?? []) { fillSet(null, doc.body, set, notes); mentioned.add(set.set); }
-  settleCopies(doc);
+  const copies = settleCopies(doc);
   const untouched = Array.from(setsIn(doc.body, null).keys()).filter(s => !mentioned.has(s) && !mentioned.has(blockName(s)));
   if (untouched.length) notes.push(`未填写、仍是模板示例的块：${untouched.join("、")}；不用的块传 items: [] 删除`);
-  return { html: "<!doctype html>" + doc.documentElement.outerHTML, notes };
+  return { html: "<!doctype html>" + doc.documentElement.outerHTML, notes, copies };
 }

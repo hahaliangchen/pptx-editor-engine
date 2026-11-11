@@ -65,3 +65,17 @@ it('accepts a model-authored inline SVG through the page bridge without an asset
   expect(xml).toContain('custGeom'); expect(xml).not.toContain('<p:pic>');
   bridge.dispose();
 },30000);
+
+it('accepts inline SVG on the persisted apply_html path used by the product page', async () => {
+  const { DesignBridge } = await import('../src/page/design-bridge');
+  const native = JSON.parse(readFileSync('tests/fixtures/native-svg-clock.json', 'utf8'));
+  let current = readFileSync('tools/templates/blank.pptx'), saved = 0;
+  const viewer = {snapshotPptx:async()=>new Blob([current]), loadPptx:async(buffer:ArrayBuffer)=>{current=Buffer.from(buffer);},getCurrentSlideIndex:()=>0,getSlidesCount:()=>1,selectSlide:async()=>{}};
+  const bridge = new DesignBridge(viewer, convertDesign, undefined, {convertInlineSvg:async()=>native, persist:async()=>++saved});
+  const data = JSON.parse((await bridge.run('get_design',{page:1})).content[0].text!);
+  const html = data.html.replace('</body>', '<svg viewBox="0 0 64 64" width="80" height="80" style="position:absolute;left:100px;top:120px"><circle cx="32" cy="32" r="25" fill="#147d92"/></svg></body>');
+  const result = await bridge.run('apply_html',{html});
+  expect(result.ok, JSON.stringify(result)).toBe(true);
+  expect(saved).toBe(1);
+  bridge.dispose();
+},30000);

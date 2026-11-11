@@ -90,4 +90,11 @@ describe("HTML design measurement", () => {
     await expect(measureHtml(base.replace("</body>", '<div data-kind="text" style="width:300px;height:10px"><p style="font-size:40px">不能裁切</p></div></body>'))).rejects.toThrow(/clipped|outside/);
     await expect(measureHtml(base.replace("</body>", '<div data-kind="shape" style="width:100px;height:100px;filter:blur(2px)"></div></body>'))).rejects.toThrow("Unsupported CSS");
   }, 20000);
+
+  it("accepts a rectangular no-op clip on text while rejecting actual text clipping", async () => {
+    const design = await blank(), base = projectPage(design, design.pages[0].id);
+    const textWithClip = (points: string) => base.replace("</body>", `<div data-kind="text" data-id="clip-test" style="position:absolute;left:100px;top:100px;width:200px;height:80px;clip-path:polygon(${points})"><p style="margin:0;font-size:20px">示例</p></div></body>`);
+    await expect(measureHtml(textWithClip("0% 100%, 100% 100%, 100% 0%, 0% 0%, 0% 100%"))).resolves.toBeDefined();
+    await expect(measureHtml(textWithClip("0% 100%, 100% 100%, 50% 0%, 0% 0%"))).rejects.toThrow("Unsupported CSS");
+  }, 20000);
 });

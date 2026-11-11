@@ -21,6 +21,11 @@ async function diagnostic(markup: string) {
 }
 
 describe("actionable HTML validation diagnostics", () => {
+  it("marks an unowned painted container as an unapplied source validation error",async()=>{
+    const result=await diagnostic(html('<div style="position:absolute;left:50px;top:50px;width:100px;height:100px;background:#c00000"></div>'));
+    expect(result).toMatchObject({code:'UNMARKED_PAINTED_CONTAINER',phase:'html_validation',applied:false,tag:'div'});
+    expect(result.recovery).toContain('New nodes may omit data-id');
+  },20000);
   it.each([1064, 1086])("identifies the real project820 duplicate data-kind error (seq%s) before generic text checks", async seq => {
     const result = await diagnostic(fixture(`high-qa-apply-${seq}.html`));
     expect(result).toMatchObject({ code: "INVALID_DESIGN_KIND", pageId: "ppt/slides/slide5.xml", tag: "div", nodeId: null,
@@ -41,7 +46,7 @@ describe("actionable HTML validation diagnostics", () => {
 
   it("reports the nearest owner and bounded text for a paragraph directly inside a group", async () => {
     const result = await diagnostic(html(`<div data-id="group-1" data-kind="group"><p>${"未归属文字 ".repeat(60)}</p></div>`));
-    expect(result).toMatchObject({ code: "TEXT_OWNER_REQUIRED", pageId: "ppt/slides/slide1.xml", revision: 7, tag: "p", nodeId: null, ownerId: "group-1", ownerKind: "group", ownerIndex: 0 });
+    expect(result).toMatchObject({ code: "TEXT_OWNER_REQUIRED", phase:"html_validation", applied:false, pageId: "ppt/slides/slide1.xml", revision: 7, tag: "p", nodeId: null, ownerId: "group-1", ownerKind: "group", ownerIndex: 0 });
     expect(result.textSnippet.length).toBe(160);
     expect(result.recovery).toContain('data-kind="text"');
   }, 20000);
