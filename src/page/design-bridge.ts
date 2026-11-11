@@ -217,20 +217,20 @@ export class DesignBridge {
         const html = this.html.get(page.id)!;
         if (name === "get_layout") return this.result({ revision: design.revision, page: a.page, pageId: page.id, ...describeLayout(html) });
         const filled = fillLayout(html, { texts: a.texts, sets: a.sets });
-        const applied = await this.execute("apply_html", { html: filled.html }, false, true);
+        const applied = await this.execute("apply_html", { html: filled.html, content_complete: a.content_complete }, false, true);
         if (!applied.ok) return applied;
         // Content-only call, content-sized answer: counts and this page's diagnostics, not every changed field.
         const data = JSON.parse((applied.content[0] as { text: string }).text);
         const changes: Array<{ action: string }> = data.changes ?? [];
         const count = (action: string) => changes.filter(c => c.action === action).length;
-        return { ...applied, content: [{ type: "text", text: JSON.stringify({ applied: data.applied, needsSave: data.needsSave, design_revision: data.design_revision, pages: data.pages, pageList: data.pageList,
+        return { ...applied, content: [{ type: "text", text: JSON.stringify({ applied: data.applied, content_complete: data.content_complete, needsSave: data.needsSave, design_revision: data.design_revision, pages: data.pages, pageList: data.pageList,
           changed: { updated: count("update"), added: count("add"), removed: count("remove") },
           diagnostics: (data.diagnostics ?? []).filter((d: { pageId?: string }) => d.pageId === page.id).map((d: { message: string }) => d.message.split(" {")[0]).slice(0, 12),
           ...(filled.notes.length ? { fillNotes: filled.notes } : {}) }) }] };
       }
       await this.current();
       const before = await this.current();
-      const request: DesignRequest = name === "apply_html"
+      const request: DesignRequest = name === "apply_html" || name === "validate_html"
         ? { operation: "apply", design: before, expectedRevision: before.revision, html: a.html }
         : { operation: "pages", design: before, expectedRevision: before.revision, commands: a.commands };
       if (request.html?.toLowerCase().includes("<svg")) {
@@ -272,7 +272,7 @@ export class DesignBridge {
         const proposal = templateSemanticProposal(before, request.baselineHtml, request.html);
         if (proposal.changes.length) {
           if (this.options.mode !== "template-authoring") throw templateSemanticPermissionError(proposal,"generation cannot change template purposes or annotation notes; restore the original values");
-          if (!humanForm && !await this.options.confirmSemanticChanges?.(proposal)) throw new Error("TEMPLATE_CONFIRMATION_REQUIRED: author did not approve these annotation changes");
+          if (name !== "validate_html" && !humanForm && !await this.options.confirmSemanticChanges?.(proposal)) throw new Error("TEMPLATE_CONFIRMATION_REQUIRED: author did not approve these annotation changes");
           if (this.disposed) throw new Error("PAGE_CLOSED: design bridge disposed");
           request.semanticAuthorization = { ...proposal, mode:"template-authoring" };
         }
@@ -291,9 +291,13 @@ export class DesignBridge {
         }
         request.html = "<!doctype html>" + html.documentElement.outerHTML;
       }
+      // Validation uses the same conversion and protection checks on an isolated
+      // snapshot, but never installs the result into the viewer or marks it dirty.
+      if (name === "validate_html") request.design = JSON.parse(JSON.stringify(before));
       const next = await this.convert(request);
       if (this.disposed) throw new Error("PAGE_CLOSED: design bridge disposed");
-      if (next.revision === before.revision && next.source.sha256 === before.source.sha256) return this.result({ revision: next.revision, applied: false, needsSave: this.dirty, changes: [] });
+      if (name === "validate_html") return this.result({ revision: before.revision, validated: true, applied: false, content_complete: false, needsSave: false, changes: next.changes ?? [], diagnostics: next.diagnostics });
+      if (next.revision === before.revision && next.source.sha256 === before.source.sha256) return this.result({ revision: next.revision, applied: false, content_complete: a.content_complete === true, needsSave: this.dirty, changes: [] });
       const selected = this.viewer.getCurrentSlideIndex();
       this.loading = true;
       try {
@@ -307,7 +311,7 @@ export class DesignBridge {
       } finally { this.loading = false; }
       this.epoch++; this.captured = this.epoch; this.design = next; this.dirty = true;
       this.project(next);
-      return this.result({ revision: next.revision, pages: next.pages.length, pageList: next.pages.map((p,i)=>({page:i+1,id:p.id})), applied: true, needsSave: true, changes: next.changes ?? [], diagnostics: next.diagnostics });
+      return this.result({ revision: next.revision, pages: next.pages.length, pageList: next.pages.map((p,i)=>({page:i+1,id:p.id})), applied: true, content_complete: a.content_complete === true, needsSave: true, changes: next.changes ?? [], diagnostics: next.diagnostics });
     } catch (error) {
       return { ok: false, content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }] };
     } finally { this.running = false; if (this.captured !== this.epoch) this.scheduleRefresh(); }

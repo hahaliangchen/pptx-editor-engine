@@ -87,12 +87,21 @@ export async function measureDesignDOM({ nonce, collectIssues = false }: { nonce
         return points;
       };
       const markerElements = Array.from(document.querySelectorAll<HTMLElement>("[data-kind]"));
+      const elementPath = (el: HTMLElement): string => {
+        const parts: string[] = [];
+        for (let node: Element | null = el; node && node !== body; node = node.parentElement) {
+          const index = node.parentElement ? Array.from(node.parentElement.children).indexOf(node) + 1 : 1;
+          parts.unshift(`${node.tagName.toLowerCase()}:nth-child(${index})`);
+        }
+        return "body" + (parts.length ? " > " + parts.join(" > ") : "");
+      };
       const invalidNode = (code: string, message: string, el: HTMLElement, recovery: string): never => {
         const owner = el.closest<HTMLElement>("[data-kind]");
         throw new Error(`${message}. ${JSON.stringify({
           code, pageId, revision, tag: el.tagName.toLowerCase(), nodeId: el.dataset.id ?? null,
           ownerId: owner?.dataset.id ?? null, ownerKind: owner?.dataset.kind ?? null,
           ownerIndex: owner ? markerElements.indexOf(owner) : null,
+          selector: elementPath(el), htmlSnippet: el.outerHTML.slice(0, 700),
           textSnippet: (el.textContent ?? "").replace(/\s+/g, " ").trim().slice(0, 160),
           recovery: `${recovery} Preserve the latest get_design data-* attributes and retry apply_html. No page content was applied.`
         })}`);
@@ -121,7 +130,10 @@ export async function measureDesignDOM({ nonce, collectIssues = false }: { nonce
         const paintable = ["shape", "text"].includes(el.dataset.kind ?? "");
         if (style.transform !== "none" || style.scale && style.scale !== "none" || style.rotate && style.rotate !== "none" || style.translate && style.translate !== "none" || style.filter !== "none" || style.backdropFilter && style.backdropFilter !== "none" || style.mixBlendMode !== "normal" || Number(style.opacity) !== 1 || !paintable && (style.boxShadow !== "none" || style.backgroundImage !== "none") || style.zIndex !== "auto" || style.clipPath !== "none" && el.dataset.kind !== "shape" || style.textShadow !== "none" || style.clip !== "auto" || style.maskImage && style.maskImage !== "none" || style.contain.includes("paint") || style.contentVisibility !== "visible" || el.tagName !== "IMG" && [style.overflowX,style.overflowY].some(v=>v!=="visible")) throw new Error(`Unsupported CSS on ${el.dataset.id ?? el.tagName}; use a separate image/SVG asset`);
         const owner = el.closest<HTMLElement>("[data-kind]");
-        if (el !== body && !el.dataset.kind && (!transparent(style.backgroundColor) || px(style.borderTopWidth) || px(style.borderLeftWidth))) throw new Error("Painted containers need data-kind and data-id");
+        if (el !== body && !el.dataset.kind && (!transparent(style.backgroundColor) || px(style.borderTopWidth) || px(style.borderLeftWidth))) invalidNode(
+          "UNMARKED_PAINTED_CONTAINER", "Painted container is missing data-kind", el,
+          'For a card containing marked objects, use a data-kind="group" container with a separate data-kind="shape" child for its background and sibling text nodes. A top-only border must be a separate thin shape; native borders must be uniform on all sides. Pure layout containers must be transparent and borderless. New nodes may omit data-id; IDs are assigned automatically. Use validate_html to check the repair without changing the deck.'
+        );
         if (Array.from(el.childNodes).some(n => n.nodeType === Node.TEXT_NODE && !!n.textContent?.trim()) && (!owner || !["text", "shape"].includes(owner.dataset.kind!))) invalidNode(
           "TEXT_OWNER_REQUIRED", "Text must belong to a data-kind=text or shape node", el,
           'Place this text in a p, heading or li inside a data-kind="text" or data-kind="shape" node. A group may contain marked text nodes but cannot directly own text. Do not change an existing node identity or remove fixed assets.'
@@ -136,8 +148,8 @@ export async function measureDesignDOM({ nonce, collectIssues = false }: { nonce
         const id = el.dataset.id!, style = computedStyle(el), bounds = el.getBoundingClientRect();
         if (bounds.x < -0.5 || bounds.y < -0.5 || bounds.right > 1280.5 || bounds.bottom > 720.5) issue(`Element is outside the canvas: ${id}`, id);
         const parent = el.parentElement?.closest<HTMLElement>("[data-kind]");
-        if (parent && parent.dataset.kind !== "group") throw new Error(`Only group nodes may contain design nodes: ${id}`);
-        if (kind === "group" && (!transparent(style.backgroundColor) || px(style.borderTopWidth))) throw new Error(`Group paint must be a separate shape node: ${id}`);
+        if (parent && parent.dataset.kind !== "group") invalidNode("INVALID_DESIGN_PARENT", "Only group nodes may contain design nodes", el, 'Use a data-kind="group" container for sibling shape/text objects; a shape or text node cannot contain other marked design nodes.');
+        if (kind === "group" && (!transparent(style.backgroundColor) || px(style.borderTopWidth))) invalidNode("PAINTED_GROUP", "Group paint must be a separate shape node", el, 'Keep this group transparent and borderless; put its visible background in a separate data-kind="shape" child.');
         const appearance: MeasuredPage["nodes"][number]["appearance"] = { rect: { x: bounds.x, y: bounds.y, w: bounds.width, h: bounds.height } };
         if (!transparent(style.backgroundColor)) appearance.fill = color(style.backgroundColor);
         if (style.backgroundImage !== "none") {
@@ -147,7 +159,7 @@ export async function measureDesignDOM({ nonce, collectIssues = false }: { nonce
         const borders = [style.borderTopWidth, style.borderRightWidth, style.borderBottomWidth, style.borderLeftWidth].map(px);
         if (borders.some(n => n > 0)) {
           const styles = [style.borderTopStyle, style.borderRightStyle, style.borderBottomStyle, style.borderLeftStyle];
-          if (!borders.every(n => n === borders[0]) || ![style.borderTopColor, style.borderRightColor, style.borderBottomColor, style.borderLeftColor].every(c => c === style.borderTopColor) || !styles.every(s => s === styles[0]) || !["solid", "dashed", "dotted"].includes(styles[0])) throw new Error(`Only uniform solid, dashed or dotted borders are supported: ${id}`);
+          if (!borders.every(n => n === borders[0]) || ![style.borderTopColor, style.borderRightColor, style.borderBottomColor, style.borderLeftColor].every(c => c === style.borderTopColor) || !styles.every(s => s === styles[0]) || !["solid", "dashed", "dotted"].includes(styles[0])) invalidNode("NONUNIFORM_BORDER", "Only uniform solid, dashed or dotted borders are supported", el, 'Use one uniform border on all sides, or represent a top/bottom-only accent with a separate thin data-kind="shape" rectangle.');
           appearance.border = { color: color(style.borderTopColor), width: borders[0], ...(styles[0] !== "solid" ? { style: styles[0] as "dashed" | "dotted" } : {}) };
         }
         const radii = [style.borderTopLeftRadius, style.borderTopRightRadius, style.borderBottomLeftRadius, style.borderBottomRightRadius];

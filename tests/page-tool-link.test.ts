@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { PageToolCall, PageToolLink, ToolCallTransport } from "../src/page/tool-link";
 import { resolveOpenFamily } from "../src/page/font-map";
-import { PAGE_TOOLS } from "../src/page/page-tools";
+import { PAGE_TOOLS, MUTATING_TOOLS } from "../src/page/page-tools";
 import type { ToolResult } from "../src/api/tools";
 
 function transport(batches: PageToolCall[][]) {
@@ -22,6 +22,13 @@ function transport(batches: PageToolCall[][]) {
 const ok = (text: string): ToolResult => ({ ok: true, content: [{ type: "text", text }] });
 
 describe("PageToolLink", () => {
+  it("delivers successful preflight without saving it", async () => {
+    const {value,replies,wake}=transport([[{call_id:"check",name:"validate_html",arguments:{html:"<body>preview</body>"}}]]);
+    let saves=0;
+    const link=new PageToolLink(value,{run:async()=>ok(JSON.stringify({validated:true,applied:false,needsSave:false})),mutating:MUTATING_TOOLS,persist:async()=>{saves++;return 2;}});
+    link.start();await new Promise(resolve=>setTimeout(resolve,10));const stopped=link.stop();wake();await stopped;
+    expect(saves).toBe(0);expect(replies).toHaveLength(1);expect(replies[0].result.content).toHaveLength(1);
+  });
   it("answers calls in order and saves after a successful edit", async () => {
     const { value, replies, wake } = transport([[
       { call_id: "1", name: "get_outline", arguments: {} },
@@ -83,7 +90,7 @@ describe("open font policy", () => {
   });
 
   it("marks every deck tool as executed by the page", () => {
-    expect(PAGE_TOOLS.map(t => t.name)).toEqual(["get_design", "apply_html", "get_layout", "fill_layout", "manage_design_pages", "get_outline", "render_slide", "check_layout", "suggest_annotations", "check_template", "get_template"]);
+    expect(PAGE_TOOLS.map(t => t.name)).toEqual(["get_design", "validate_html", "apply_html", "get_layout", "fill_layout", "manage_design_pages", "get_outline", "render_slide", "check_layout", "suggest_annotations", "check_template", "get_template"]);
     expect(PAGE_TOOLS.every(t => t.executor === "page")).toBe(true);
   });
 });

@@ -68,6 +68,28 @@ afterAll(async () => {
 });
 
 describe("conversion on the user's browser", () => {
+  it("preflights HTML in the actual viewer without applying or changing its PPTX", async () => {
+    const result = await page.evaluate(async () => {
+      const w=window as any,t=w.designTest;
+      const bridge=new t.DesignBridge(w.viewer,w.converter.convertDesign);
+      const read=(result:any)=>{if(!result.ok)throw new Error(JSON.stringify(result));return JSON.parse(result.content[0].text);};
+      const baseline=read(await bridge.run("get_design",{page:1}));
+      const html=baseline.html.replace("</body>",'<div data-kind="text" style="position:absolute;left:120px;top:420px;width:700px;height:90px"><p style="font-family:Arial;font-size:24px;line-height:32px">Read-only preflight content</p></div></body>');
+      const original=await w.viewer.snapshotPptx();
+      const before=t.bytesToBase64(new Uint8Array(await original.arrayBuffer()));
+      const load=w.viewer.loadPptx.bind(w.viewer);let loads=0;
+      w.viewer.loadPptx=async(...args:any[])=>{loads++;return load(...args);};
+      try {
+        const checked=read(await bridge.run("validate_html",{html}));
+        const current=await w.viewer.snapshotPptx();
+        return {checked,loads,unchanged:before===t.bytesToBase64(new Uint8Array(await current.arrayBuffer())),pending:bridge.pending,frames:document.querySelectorAll("iframe").length};
+      } finally {w.viewer.loadPptx=load;bridge.dispose();}
+    });
+    expect(result.checked).toMatchObject({validated:true,applied:false,needsSave:false,content_complete:false});
+    expect(result.checked.changes.some((change:any)=>change.action==="add")).toBe(true);
+    expect(result.loads).toBe(0);expect(result.unchanged).toBe(true);expect(result.pending).toBe(false);expect(result.frames).toBe(0);
+  },60000);
+
   it("uses the actual viewer and WASM assets, edits HTML locally, and reopens only PPTX with groups and text", async () => {
     const result = await page.evaluate(async () => {
       const w = window as any, t = w.designTest;
