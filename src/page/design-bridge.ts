@@ -1,5 +1,5 @@
 import { describeLayout, fillLayout, layoutIssues } from "../design/layout-fill";
-import { templateSemanticPermissionError, templateSemanticProposal, type TemplateSemanticProposal, type TemplateSemanticEdit } from "../design/template-semantics";
+import { normalizeNewContentAnnotations, templateSemanticPermissionError, templateSemanticProposal, type NewNodeAnnotation, type TemplateSemanticProposal, type TemplateSemanticEdit } from "../design/template-semantics";
 import { effectivePurpose, effectiveLock } from "../design/template-policy";
 import { nodeText, cloneDesign } from "../design/model";
 import { PageFillQueue } from "./page-fill-queue";
@@ -28,7 +28,7 @@ export interface DesignBridgeOptions {
   confirmSemanticChanges?: (proposal: TemplateSemanticProposal) => Promise<boolean>;
 }
 export type DesignConverter = (request: DesignRequest) => Promise<DesignDocument>;
-interface PreparedFill {page: number; pageId: string; generation: number; next: DesignDocument; changed: boolean; notes: string[]; contentComplete: boolean}
+interface PreparedFill {annotationCleanups?: NewNodeAnnotation[]; page: number; pageId: string; generation: number; next: DesignDocument; changed: boolean; notes: string[]; contentComplete: boolean}
 export function base64Bytes(value: string): Uint8Array {
   const decoded = atob(value), bytes = new Uint8Array(decoded.length);
   for (let i = 0; i < decoded.length; i++) bytes[i] = decoded.charCodeAt(i);
@@ -238,7 +238,7 @@ export class DesignBridge {
     if (!result.ok) throw new Error(JSON.stringify({code:'PAGE_PREPARATION_REJECTED',phase:'page_prepare',applied:false,page:pageNumber,
       cause:result.content.filter(p=>p.type==='text').map(p=>(p as {text:string}).text).join('\n')}));
     const next = (result as ToolResult & {prepared:DesignDocument}).prepared;
-    return {page:pageNumber,pageId:page.id,generation,next,changed:next.revision!==before.revision,notes:filled.notes,contentComplete:args?.content_complete===true};
+    return {page:pageNumber,pageId:page.id,generation,next,changed:next.revision!==before.revision,notes:filled.notes,contentComplete:args?.content_complete===true,annotationCleanups:(result as ToolResult & {annotationCleanups?:NewNodeAnnotation[]}).annotationCleanups};
   }
   private async commitFills(values: PreparedFill[]): Promise<ToolResult[]> {
     const generation = this.editGeneration;
@@ -264,7 +264,7 @@ export class DesignBridge {
     return values.map(value => this.result({applied:value.changed,content_complete:value.contentComplete,needsSave:false,design_revision:this.design!.revision,
       pages:this.design!.pages.length,pageList:this.design!.pages.map((p,i)=>({page:i+1,id:p.id})),
       diagnostics:this.design!.diagnostics.filter(d=>d.pageId===value.pageId).map(d=>d.message.split(' {')[0]).slice(0,12),
-      ...(value.notes.length?{fillNotes:value.notes}:{}),saved:true,stored_revision:revision,
+      ...(value.notes.length?{fillNotes:value.notes}:{}),...(value.annotationCleanups?.length?{annotationCleanups:value.annotationCleanups}:{}),saved:true,stored_revision:revision,
       pageConcurrency:{limit:3,peakPreparing:this.fills.peakPreparing,savedPages:values.map(v=>v.page)}}));
   }
   private isRead(name: string): boolean {
@@ -357,10 +357,15 @@ export class DesignBridge {
         }
         request.html = "<!doctype html>" + html.documentElement.outerHTML;
       }
+      let annotationCleanups: NewNodeAnnotation[] = [];
       if (request.html) {
         const pageId = parseDesignHtml(request.html).body.dataset.pageId;
         request.baselineHtml = pageId ? this.html.get(pageId) : undefined;
         if (!request.baselineHtml) throw new Error("Unknown design page");
+        if (this.options.mode !== "template-authoring") {
+          const normalized = normalizeNewContentAnnotations(request.baselineHtml, request.html);
+          request.html = normalized.html; annotationCleanups = normalized.cleaned;
+        }
         const proposal = templateSemanticProposal(before, request.baselineHtml, request.html);
         if (proposal.changes.length) {
           if (this.options.mode !== "template-authoring") throw templateSemanticPermissionError(proposal,"generation cannot change template purposes or annotation notes; restore the original values");
@@ -390,12 +395,12 @@ export class DesignBridge {
       if (name === "validate_html") request.design = JSON.parse(JSON.stringify(before));
       const next = await this.convert(request);
       if (this.disposed) throw new Error("PAGE_CLOSED: design bridge disposed");
-      if (prepareBase) return {ok:true,content:[],prepared:next} as ToolResult & {prepared:DesignDocument};
-      if (name === "validate_html") return this.result({ revision: before.revision, validated: true, applied: false, content_complete: false, needsSave: false, changes: next.changes ?? [], diagnostics: next.diagnostics });
+      if (prepareBase) return {ok:true,content:[],prepared:next,annotationCleanups} as ToolResult & {prepared:DesignDocument;annotationCleanups:NewNodeAnnotation[]};
+      if (name === "validate_html") return this.result({ revision: before.revision, validated: true, applied: false, content_complete: false, needsSave: false, changes: next.changes ?? [], diagnostics: next.diagnostics, ...(annotationCleanups.length?{annotationCleanups}:{}) });
       if (next.revision === before.revision && next.source.sha256 === before.source.sha256) return this.result({ revision: next.revision, applied: false, content_complete: a.content_complete === true, needsSave: this.dirty, changes: [] });
       await this.install(before,next);
       this.editGeneration++;
-      return this.result({ revision: next.revision, pages: next.pages.length, pageList: next.pages.map((p,i)=>({page:i+1,id:p.id})), applied: true, content_complete: a.content_complete === true, needsSave: true, changes: next.changes ?? [], diagnostics: next.diagnostics });
+      return this.result({ revision: next.revision, pages: next.pages.length, pageList: next.pages.map((p,i)=>({page:i+1,id:p.id})), applied: true, content_complete: a.content_complete === true, needsSave: true, changes: next.changes ?? [], diagnostics: next.diagnostics, ...(annotationCleanups.length?{annotationCleanups}:{}) });
     } catch (error) {
       return { ok: false, content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }] };
     } finally { if (!read && !prepareBase) this.running = false; if (this.captured !== this.epoch) this.scheduleRefresh(); }
